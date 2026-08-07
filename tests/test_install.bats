@@ -104,32 +104,31 @@ teardown() {
   grep -q "agmsg-second sentinel" "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 }
 
-@test "install: --update with no --cmd still finds the one real install past a bak-named decoy (#599)" {
+@test "install: --update with no --cmd treats a leftover backup-shaped directory as another candidate, not a silent exclusion (#599)" {
+  # No code in this repo creates a ".bak-"-named directory -- that name is a
+  # human backup convention, not something install.sh generates. A pattern
+  # narrow enough to exclude it is therefore also narrow enough to still
+  # exclude nothing on a real machine, while remaining broad enough to
+  # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
+  # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
+  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # not special-case names at all. A directory that still carries the .agmsg
+  # marker is just another candidate, and more than one candidate is exactly
+  # the ambiguity this fix already refuses to guess through.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  local decoy="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
-  mkdir -p "$decoy/scripts" "$decoy/templates" "$decoy/db" "$decoy/agents"
-  touch "$decoy/.agmsg"
-  echo "decoy sentinel" > "$decoy/SKILL.md"
+  local leftover="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
+  mkdir -p "$leftover/scripts" "$leftover/templates" "$leftover/db" "$leftover/agents"
+  touch "$leftover/.agmsg"
+  echo "leftover sentinel" > "$leftover/SKILL.md"
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "Updating agmsg..." ]]
-  [[ ! "$output" =~ "Updating agmsg.bak-20260731" ]]
-  grep -q "decoy sentinel" "$decoy/SKILL.md"
-}
-
-@test "install: --update with no --cmd is not fooled by a legitimate install name that merely contains \"bak\" (#599)" {
-  # The exclusion pattern must match the reported backup shape (".bak-...")
-  # and nothing broader: --cmd has no reserved-name validation, so a real
-  # install can legally be named e.g. "agmsg.bakery" (co2 review, #659). If
-  # the exclusion were a bare "*.bak*" this install would be silently
-  # skipped, leaving zero candidates and reporting "Not installed" for an
-  # install that is, in fact, installed.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg.bakery
-
-  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "Updating agmsg.bakery..." ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Several agmsg installs found" ]]
+  [[ "$output" =~ "agmsg" ]]
+  [[ "$output" =~ "agmsg.bak-20260731" ]]
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "leftover sentinel" "$leftover/SKILL.md"
 }
 
 @test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {

@@ -227,15 +227,16 @@ if [ "$UPDATE_ONLY" = true ]; then
   # install came first, so guessing from a list of more than one is a
   # silent coin flip on which install (and the shared ~/.agents/bin/codex
   # shim it refreshes) gets updated (#599). A single install is unaffected
-  # -- this is the common case and it still "just works". Backup-shaped
-  # directory names are skipped: they carry the same .agmsg marker as a
-  # real install but are never the one an unqualified --update means. The
-  # pattern is deliberately narrow (the literal ".bak-" shape reported in
-  # #599 and #599's comments, e.g. "agmsg.bak-20260731") rather than a bare
-  # "*.bak*": --cmd has no reserved-name validation, so a broader pattern
-  # would silently drop a real install whose chosen name merely contains
-  # "bak" (e.g. "agmsg.bakery") -- the same silent-wrong-pick failure this
-  # fix exists to close, just via exclusion instead of glob order.
+  # -- this is the common case and it still "just works".
+  #
+  # No name-based exclusion for backup-shaped directories: --cmd has no
+  # reserved-name validation, so any pattern that would catch a real backup
+  # (e.g. "agmsg.bak-20260731") can equally match a legitimately chosen
+  # install name (e.g. "agmsg.bak-tool") -- there is no substring that is
+  # guaranteed to mean "not a real install" (co2 review, #659). A leftover
+  # backup directory that still carries the .agmsg marker is therefore just
+  # another candidate: it makes the set ambiguous, and ambiguous is exactly
+  # what this fix already refuses to guess through, below.
   if [ -n "$CMD_NAME" ]; then
     SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
     if [ ! -f "$SKILL_DIR/.agmsg" ]; then
@@ -246,7 +247,6 @@ if [ "$UPDATE_ONLY" = true ]; then
     candidates=()
     for d in "$AGENTS_DIR"/skills/*/; do
       d="${d%/}"
-      case "$(basename "$d")" in *.bak-*) continue ;; esac
       [ -f "$d/.agmsg" ] && candidates+=("$d")
     done
     case "${#candidates[@]}" in
