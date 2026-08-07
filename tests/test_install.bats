@@ -88,6 +88,11 @@ teardown() {
 @test "install: --update with no --cmd refuses to guess between two real installs (#599)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  # Distinct per-install sentinels, not just each install's VERSION (which is
+  # the same source-derived string for both and would not distinguish "one of
+  # them got silently updated" from "neither did" -- co2 review, #659).
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
   [ "$status" -ne 0 ]
@@ -95,7 +100,8 @@ teardown() {
   [[ "$output" =~ "agmsg" ]]
   [[ "$output" =~ "agmsg-second" ]]
   # Neither install was touched -- this is a refusal, not a guess.
-  [ "$(cat "$FAKE_HOME/.agents/skills/agmsg/VERSION" 2>/dev/null)" = "$(cat "$FAKE_HOME/.agents/skills/agmsg-second/VERSION" 2>/dev/null)" ]
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "agmsg-second sentinel" "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 }
 
 @test "install: --update with no --cmd still finds the one real install past a bak-named decoy (#599)" {
@@ -110,6 +116,20 @@ teardown() {
   [[ "$output" =~ "Updating agmsg..." ]]
   [[ ! "$output" =~ "Updating agmsg.bak-20260731" ]]
   grep -q "decoy sentinel" "$decoy/SKILL.md"
+}
+
+@test "install: --update with no --cmd is not fooled by a legitimate install name that merely contains \"bak\" (#599)" {
+  # The exclusion pattern must match the reported backup shape (".bak-...")
+  # and nothing broader: --cmd has no reserved-name validation, so a real
+  # install can legally be named e.g. "agmsg.bakery" (co2 review, #659). If
+  # the exclusion were a bare "*.bak*" this install would be silently
+  # skipped, leaving zero candidates and reporting "Not installed" for an
+  # install that is, in fact, installed.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg.bakery
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Updating agmsg.bakery..." ]]
 }
 
 @test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {
