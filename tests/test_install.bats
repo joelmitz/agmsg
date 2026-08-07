@@ -85,6 +85,33 @@ teardown() {
   grep -q "backup sentinel" "$backup/SKILL.md"
 }
 
+@test "install: --update with no --cmd refuses to guess between two real installs (#599)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Several agmsg installs found" ]]
+  [[ "$output" =~ "agmsg" ]]
+  [[ "$output" =~ "agmsg-second" ]]
+  # Neither install was touched -- this is a refusal, not a guess.
+  [ "$(cat "$FAKE_HOME/.agents/skills/agmsg/VERSION" 2>/dev/null)" = "$(cat "$FAKE_HOME/.agents/skills/agmsg-second/VERSION" 2>/dev/null)" ]
+}
+
+@test "install: --update with no --cmd still finds the one real install past a bak-named decoy (#599)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local decoy="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
+  mkdir -p "$decoy/scripts" "$decoy/templates" "$decoy/db" "$decoy/agents"
+  touch "$decoy/.agmsg"
+  echo "decoy sentinel" > "$decoy/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Updating agmsg..." ]]
+  [[ ! "$output" =~ "Updating agmsg.bak-20260731" ]]
+  grep -q "decoy sentinel" "$decoy/SKILL.md"
+}
+
 @test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {
   # actas/drop used to invoke a fresh Monitor unconditionally, ignoring
   # mode=off/turn (#280) — this is prompt-instruction text, not executable

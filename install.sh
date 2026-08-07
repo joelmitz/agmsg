@@ -221,8 +221,15 @@ echo ""
 
 # --- Update mode ---
 if [ "$UPDATE_ONLY" = true ]; then
-  # Find existing install. If --cmd was passed, update exactly that skill;
-  # otherwise preserve the historical "first installed agmsg skill" behavior.
+  # Find existing install. If --cmd was passed, update exactly that skill.
+  # Otherwise, scan for installs and require exactly one: a glob expands in
+  # collation order, not installation order, and nothing records which
+  # install came first, so guessing from a list of more than one is a
+  # silent coin flip on which install (and the shared ~/.agents/bin/codex
+  # shim it refreshes) gets updated (#599). A single install is unaffected
+  # -- this is the common case and it still "just works". Backup-shaped
+  # directory names are skipped: they carry the same .agmsg marker as a
+  # real install but are never the one an unqualified --update means.
   if [ -n "$CMD_NAME" ]; then
     SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
     if [ ! -f "$SKILL_DIR/.agmsg" ]; then
@@ -230,13 +237,24 @@ if [ "$UPDATE_ONLY" = true ]; then
       exit 1
     fi
   else
-    SKILL_DIR=""
+    candidates=()
     for d in "$AGENTS_DIR"/skills/*/; do
-      if [ -f "${d}.agmsg" ]; then
-        SKILL_DIR="${d%/}"
-        break
-      fi
+      d="${d%/}"
+      case "$(basename "$d")" in *.bak*) continue ;; esac
+      [ -f "$d/.agmsg" ] && candidates+=("$d")
     done
+    case "${#candidates[@]}" in
+      0) SKILL_DIR="" ;;
+      1) SKILL_DIR="${candidates[0]}" ;;
+      *)
+        echo "  ! Several agmsg installs found:" >&2
+        for d in "${candidates[@]}"; do
+          echo "      $(basename "$d")" >&2
+        done
+        echo "  ! --update with no --cmd cannot tell which one you mean. Pass --cmd <name> to pick one." >&2
+        exit 1
+        ;;
+    esac
   fi
   if [ -z "$SKILL_DIR" ]; then
     echo "  ! Not installed. Run ./install.sh first." >&2
