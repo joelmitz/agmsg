@@ -55,6 +55,7 @@ Options:
                           actively-working turn is never cut off regardless
                           of total duration — only true silence trips it.
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
+  --startup-self-test     Queue one idempotent self-message after the TUI thread is ready.
   --resolve-only          Print resolved team/name and exit.
   --print-loaded-threads  Print the app-server's loaded thread ids (one per
                           line) and exit. Needs --app-server. Used by
@@ -186,6 +187,7 @@ function parseArgs(argv) {
     requestTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_REQUEST_TIMEOUT_MS || 30000),
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
+    startupSelfTest: false,
     pairs: [],
     workspaceRoots: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
@@ -237,6 +239,8 @@ function parseArgs(argv) {
       opts.loadedTimeout = Number(argv[++i]);
     } else if (arg === "--inline-inbox") {
       opts.inlineInbox = true;
+    } else if (arg === "--startup-self-test") {
+      opts.startupSelfTest = true;
     } else {
       die(`unknown option: ${arg}`);
     }
@@ -923,6 +927,9 @@ class CodexBridge {
     this.lastWakeMaxId = "";
     this.staleWakeCount = 0;
     this.watchFailureCount = 0;
+    this.resumeError = "";
+    this.selfTestToken = "";
+    this.selfTestConfirmed = false;
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
     this.stopping = false;
@@ -949,6 +956,8 @@ class CodexBridge {
     this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
     this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
+    this.client.on("item/started", this.clientHandler("item/started", (params) => this.observeSelfTest(params)));
+    this.client.on("item/completed", this.clientHandler("item/completed", (params) => this.observeSelfTest(params)));
     this.client.on("thread/status/changed", this.clientHandler("thread/status/changed", (params) => this.onThreadStatus(params)));
     this.client.on("turn/started", this.clientHandler("turn/started", () => {
       this.turnActive = true;
@@ -980,10 +989,58 @@ class CodexBridge {
     await this.client.ready?.();
     await this.initialize();
     await this.ensureThread();
+    await this.queueStartupSelfTest();
+    this.writeMeta();
     await this.armWatch();
     // After armWatch, not before: the seat is a claim that this role is being
     // delivered to, and until the watch is armed that is not yet true.
     this.recordSeat();
+  }
+
+  startupSelfTestPath() {
+    const key = this.identities.length === 1
+      ? `${this.identity.team}.${this.identity.name}`
+      : crypto.createHash("sha1").update(this.identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
+    return path.join(RUN_DIR, `codex-bridge.${key}.selftest`);
+  }
+
+  async queueStartupSelfTest() {
+    if (!this.opts.startupSelfTest || !this.threadId || this.threadId === "loaded") return;
+    const marker = this.startupSelfTestPath();
+    try {
+      if (fs.existsSync(marker)) {
+        const state = fs.readFileSync(marker, "utf8").trim().split(/\t/);
+        if (state[0] === this.threadId) {
+          this.selfTestToken = state[1] || "";
+          this.selfTestConfirmed = state[2] === "CONFIRMED";
+          console.error(`codex-bridge: startup self-test ${this.selfTestConfirmed ? "already confirmed" : "pending"} (${this.selfTestToken || "missing token"})`);
+          return;
+        }
+      }
+    } catch (_) {
+      // A stale or unreadable marker must not prevent normal delivery.
+    }
+    this.selfTestToken = `codex-monitor-test-${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${crypto.randomUUID()}`;
+    const result = spawnSync(BASH_BIN, [
+      path.join(SCRIPTS_DIR, "send.sh"),
+      this.identity.team, this.identity.name, this.identity.name, this.selfTestToken,
+    ], { cwd: SKILL_DIR, encoding: "utf8", env: process.env });
+    if (result.error || result.status !== 0) {
+      fs.writeFileSync(marker, `${this.threadId}\t${this.selfTestToken}\tSEND_FAILED\n`);
+      console.error(`codex-bridge: startup self-test SEND_FAILED (${(result.stderr || result.error?.message || "unknown error").trim()})`);
+      return;
+    }
+    fs.writeFileSync(marker, `${this.threadId}\t${this.selfTestToken}\tDELIVERY_UNCONFIRMED\n`);
+    console.error(`codex-bridge: startup self-test queued (${this.selfTestToken}); DELIVERY_UNCONFIRMED until the token is observed on the current thread`);
+  }
+
+  observeSelfTest(params) {
+    if (!this.selfTestToken || this.selfTestConfirmed || !params) return;
+    if (params.threadId && params.threadId !== this.threadId) return;
+    if (!JSON.stringify(params).includes(this.selfTestToken)) return;
+    this.selfTestConfirmed = true;
+    try { fs.writeFileSync(this.startupSelfTestPath(), `${this.threadId}\t${this.selfTestToken}\tCONFIRMED\n`); } catch (_) {}
+    console.error(`codex-bridge: startup self-test CONFIRMED on thread ${this.threadId}`);
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1033,6 +1090,11 @@ class CodexBridge {
         `project=${this.opts.project}`,
         `identities=${this.identities.map((p) => `${p.team}/${p.name}`).join(",")}`,
         `type=${this.opts.type}`,
+        `app_server=${this.opts.appServer || "stdio://"}`,
+        `thread=${this.threadId || ""}`,
+        `resume_error=${this.resumeError}`,
+        `self_test=${this.selfTestToken || ""}`,
+        `self_test_status=${this.selfTestConfirmed ? "CONFIRMED" : (this.selfTestToken ? "DELIVERY_UNCONFIRMED" : "DISABLED")}`,
       ].join("\n") + "\n",
     );
   }
@@ -1111,7 +1173,8 @@ class CodexBridge {
         // below is a distinct failure (a resume that succeeded but returned
         // the wrong thread) and should still die() as before, not be
         // silently swallowed by this fallback.
-        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        this.resumeError = err.message;
+        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume; diagnosis=UNKNOWN`);
         this.threadIdle = true;
         this.turnActive = false;
         return;
@@ -1382,6 +1445,7 @@ class CodexBridge {
 
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
+    this.observeSelfTest(params);
     // Same funnel: a delta is partial by name, so the flag it leaves behind is
     // what stops the next diagnostic from joining it into one line (#784).
     writeErr(params.delta);
