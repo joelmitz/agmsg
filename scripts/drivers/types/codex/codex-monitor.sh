@@ -233,6 +233,11 @@ SOCKET_URL="ws://127.0.0.1:$PORT"
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
+# Ask the bridge to perform one idempotent startup self-test after it has
+# attached to the loaded TUI thread.  The hook is deliberately not used here:
+# at SessionStart neither the remote TUI nor its loaded thread is guaranteed to
+# be ready yet.
+export AGMSG_CODEX_STARTUP_SELF_TEST=1
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
 # Same guard: the launcher is detached on purpose and outlives this script, so

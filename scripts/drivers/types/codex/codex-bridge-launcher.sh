@@ -510,6 +510,7 @@ EOF
     --thread "$thread_id" \
     --app-server "$req_app_server" \
     --inline-inbox \
+    ${AGMSG_CODEX_STARTUP_SELF_TEST:+--startup-self-test} \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
   printf '%s\n' "$launched_pid" > "$pidfile"

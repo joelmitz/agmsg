@@ -230,8 +230,17 @@ DELIVERY_OUTPUT="$(bash "$SCRIPT_DIR/delivery.sh" status "$TYPE" "$PROJECT" 2>&1
 MODE_LINE="$(printf '%s\n' "$DELIVERY_OUTPUT" | head -1)"
 MODE="${MODE_LINE#mode: }"
 
+CODEX_DIAG_OUTPUT=""
+CODEX_DIAG_STATUS=0
+
 PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE")"
 PAIR_COUNT="$(printf '%s\n' "$PAIRS" | grep -c . || true)"
+
+if [ "$TYPE" = "codex" ] && [ "$PAIR_COUNT" -eq 1 ]; then
+  IFS=$'\t' read -r _diag_team _diag_agent <<< "$PAIRS"
+  CODEX_DIAG_OUTPUT="$(bash "$SCRIPT_DIR/drivers/types/codex/codex-diagnose.sh" "$PROJECT" "$_diag_team" "$_diag_agent" 2>&1)" || CODEX_DIAG_STATUS=$?
+  [ "$CODEX_DIAG_STATUS" -eq 0 ] || _warn "Codex bridge diagnosis is not MATCH (see diagnosis below)"
+fi
 
 REG_LINES=""
 FIRST_TEAM="" FIRST_AGENT=""
@@ -334,6 +343,11 @@ echo
 
 echo "$(_redact_text "$DELIVERY_OUTPUT")"
 echo
+
+if [ -n "$CODEX_DIAG_OUTPUT" ]; then
+  echo "$(_redact_text "$CODEX_DIAG_OUTPUT")"
+  echo
+fi
 
 echo "registrations ($PAIR_COUNT):"
 if [ "$PAIR_COUNT" -eq 0 ]; then
