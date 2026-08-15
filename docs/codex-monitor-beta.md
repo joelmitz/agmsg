@@ -141,6 +141,36 @@ connect to the unix socket (EPERM). Instead:
 4. On an unread message it inlines the text into a `turn/start` on that thread —
    surfacing it in the live Codex TUI — then re-arms after the turn ends.
 
+### Process-operation safety (Issue #89)
+
+The Codex sandbox uses a separate PID namespace. A process missing from its
+`ps` or `/proc` view is therefore not evidence that the host process stopped,
+and a PID mismatch is not evidence that two processes are unrelated.
+
+Codex must not independently decide to stop or restart the TUI, app-server,
+bridge, or launcher that hosts the current session. When host-side process
+inspection or recovery is required, an unsandboxed Claude or Herdr operator
+must perform the inspection and obtain the user's approval for the exact target
+scope. The coordination request from Codex is sent through agmsg; the operator
+then runs the guard below from the host execution context.
+
+```bash
+# Read-only inspection. The expected command line must be narrow and explicit.
+~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-process-guard.sh \
+  inspect <pid> '<expected-args-glob>'
+
+# Destructive operation. Run only after the host-side review and user approval.
+~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-process-guard.sh \
+  kill --approve <pid> '<expected-args-glob>'
+```
+
+The guard returns `SAFE` only when the target is visible, its command line
+matches, and it is outside the current host process chain. It returns `REJECT`
+for a current-chain or command-line mismatch and `UNKNOWN` when the target or
+the chain cannot be observed. `UNKNOWN` is terminal: do not kill, restart, or
+remove pidfiles. PID-only kills, broad name matches, and sandbox-only process
+observations are not valid evidence.
+
 Turns are serialized (one per thread): a message that arrives while a turn is
 running stays unread and is delivered after the turn completes. The turn ends
 via `turn/completed`, a `thread/status` idle, or a watchdog (the real app-server
