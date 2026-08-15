@@ -83,6 +83,11 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "codex-bridge: startup self-test timestamp uses local time components" {
+  run env TZ=Asia/Tokyo node -e 'const { formatLocalTimestamp } = require(process.argv[1]); const value = formatLocalTimestamp(new Date("2026-08-15T16:41:12.457Z")); if (value !== "20260816014112457") { console.error(value); process.exit(1); }' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
 @test "codex-bridge: resolve-only prints the selected identity" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only

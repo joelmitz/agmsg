@@ -87,6 +87,18 @@ function toPosixPath(p) {
   return `/${match[1].toLowerCase()}${p.slice(2).replace(/\\/g, "/")}`;
 }
 
+function formatLocalTimestamp(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0"),
+    String(date.getMilliseconds()).padStart(3, "0"),
+  ].join("");
+}
+
 function parseArgs(argv) {
   const opts = {
     type: "codex",
@@ -928,7 +940,7 @@ class CodexBridge {
     } catch (_) {
       // A stale or unreadable marker must not prevent normal delivery.
     }
-    this.selfTestToken = `codex-monitor-test-${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${crypto.randomUUID()}`;
+    this.selfTestToken = `codex-monitor-test-${formatLocalTimestamp()}-${crypto.randomUUID()}`;
     const result = spawnSync(BASH_BIN, [
       path.join(SCRIPTS_DIR, "send.sh"),
       this.identity.team, this.identity.name, this.identity.name, this.selfTestToken,
@@ -1607,4 +1619,4 @@ if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { toPosixPath };
+module.exports = { formatLocalTimestamp, toPosixPath };
