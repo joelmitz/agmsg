@@ -17,6 +17,7 @@ HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 PORT_FILE="$RUN_DIR/codex-app-server.$HASH.port"
 SERVER_PID_FILE="$RUN_DIR/codex-app-server.$HASH.pid"
 BASE="$RUN_DIR/codex-bridge.$TEAM.$AGENT"
+BASELINE_FILE="$RUN_DIR/codex-app-server.$HASH.loaded-baseline"
 BRIDGE_PID="$(cat "$BASE.pid" 2>/dev/null || true)"
 BRIDGE_THREAD="$(cat "$BASE.thread" 2>/dev/null || true)"
 BRIDGE_APP="$(cat "$BASE.appserver" 2>/dev/null || true)"
@@ -31,6 +32,26 @@ LOADED=""
 if [ -n "$PORT" ] && [ -n "$NODE_BIN" ] && { command -v "$NODE_BIN" >/dev/null 2>&1 || [ -x "$NODE_BIN" ]; }; then
   LOADED="$("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js" --app-server "ws://127.0.0.1:$PORT" --print-loaded-threads --connect-timeout-ms 1500 --request-timeout-ms 1500 2>/dev/null || true)"
 fi
+
+# Normalize the app-server response into sets. A multi-thread app-server is not
+# evidence of the current TUI: retained threads are normal after resume/close.
+DIAG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-codex-diagnose.XXXXXX")"
+trap 'rm -rf "$DIAG_TMP"' EXIT
+printf '%s\n' "$LOADED" | grep -E '^[[:alnum:]-]+$' | sort -u >"$DIAG_TMP/current" || true
+if [ -f "$BASELINE_FILE" ] && ! grep -Fxq '# probe-unavailable' "$BASELINE_FILE"; then
+  grep -E '^[[:alnum:]-]+$' "$BASELINE_FILE" | sort -u >"$DIAG_TMP/baseline" || true
+  comm -13 "$DIAG_TMP/baseline" "$DIAG_TMP/current" >"$DIAG_TMP/new" || true
+  baseline_state="AVAILABLE"
+else
+  : >"$DIAG_TMP/baseline"
+  : >"$DIAG_TMP/new"
+  baseline_state="UNKNOWN"
+fi
+loaded_count="$(grep -c . "$DIAG_TMP/current" 2>/dev/null || true)"
+baseline_count="$(grep -c . "$DIAG_TMP/baseline" 2>/dev/null || true)"
+new_count="$(grep -c . "$DIAG_TMP/new" 2>/dev/null || true)"
+loaded_only="$(cat "$DIAG_TMP/current" 2>/dev/null || true)"
+new_thread="$(cat "$DIAG_TMP/new" 2>/dev/null || true)"
 
 TUI_PIDS=""
 if [ -n "$PORT" ] && command -v ss >/dev/null 2>&1; then
@@ -50,8 +71,21 @@ elif [ -n "$BRIDGE_APP" ] || [ -n "$PORT" ]; then
   app_state="MISMATCH"
 fi
 thread_state="UNKNOWN"
-if [ -n "$BRIDGE_THREAD" ] && [ -n "$SEAT_THREAD" ]; then
-  if [ "$BRIDGE_THREAD" = "$SEAT_THREAD" ]; then thread_state="MATCH"; else thread_state="MISMATCH"; fi
+thread_reason="no-unique-current-thread"
+if [ "$loaded_count" -eq 1 ] && [ "$BRIDGE_THREAD" = "$loaded_only" ] \
+  && [ "$SEAT_THREAD" = "$BRIDGE_THREAD" ]; then
+  thread_state="MATCH"
+  thread_reason="single-loaded-thread-and-seat-bridge-match"
+elif [ "$baseline_state" = "AVAILABLE" ] && [ "$new_count" -eq 1 ] \
+  && [ "$BRIDGE_THREAD" = "$new_thread" ] \
+  && { [ -z "$SEAT_THREAD" ] || [ "$SEAT_THREAD" = "$BRIDGE_THREAD" ]; }; then
+  thread_state="MATCH"
+  thread_reason="unique-baseline-delta-and-seat-bridge-match"
+elif [ -n "$BRIDGE_THREAD" ] && [ -n "$SEAT_THREAD" ] \
+  && [ "$BRIDGE_THREAD" != "$SEAT_THREAD" ] \
+  && grep -Fxq "$BRIDGE_THREAD" "$DIAG_TMP/current"; then
+  thread_state="MISMATCH"
+  thread_reason="bridge-seat-mismatch"
 fi
 overall="MATCH"
 for state in "$process_state" "$app_state" "$thread_state"; do
@@ -63,6 +97,7 @@ echo "process: $process_state tui_pids=${TUI_PIDS:-unknown} app_server_pid=${SER
 echo "app-server: $app_state port=${PORT:-unknown} bridge_app=${BRIDGE_APP:-unknown}"
 echo "thread: $thread_state seat=${SEAT_THREAD:-unknown} bridge=${BRIDGE_THREAD:-unknown}"
 echo "loaded_threads: ${LOADED:-unknown}"
+echo "thread-evidence: baseline_state=$baseline_state baseline_count=$baseline_count current_count=$loaded_count new_count=$new_count candidate=${new_thread:-unknown} reason=$thread_reason"
 if [ -f "$META" ]; then
   awk -F= '/^(resume_error|self_test|self_test_status)=/ { print "meta: " $0 }' "$META"
 fi
