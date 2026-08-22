@@ -60,6 +60,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          echo "TEST: forcing failure to verify the issue-opening step"; exit 1
           cmp="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...fujibee:agmsg:main")"
           missing="$(printf '%s' "$cmp" | jq -r '.ahead_by')"
           local_only="$(printf '%s' "$cmp" | jq -r '.behind_by')"
