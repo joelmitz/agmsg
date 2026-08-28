@@ -78,11 +78,57 @@ teardown() {
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Updating agmsg..." ]]
-  [[ ! "$output" =~ "Updating agmsg.backup-keep" ]]
+  printf '%s\n' "$output" | grep -Fq "Updating agmsg..."
+  refute grep -Fq "Updating agmsg.backup-keep" <<<"$output"
   [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
   [ ! -f "$FAKE_HOME/.agents/agmsg.backup-keep.ps1" ]
   grep -q "backup sentinel" "$backup/SKILL.md"
+}
+
+@test "install: --update with no --cmd refuses to guess between two real installs (#599)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  # Distinct per-install sentinels, not just each install's VERSION (which is
+  # the same source-derived string for both and would not distinguish "one of
+  # them got silently updated" from "neither did" -- co2 review, #659).
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
+  printf '%s\n' "$output" | grep -Fq "agmsg"
+  printf '%s\n' "$output" | grep -Fq "agmsg-second"
+  # Neither install was touched -- this is a refusal, not a guess.
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "agmsg-second sentinel" "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
+}
+
+@test "install: --update with no --cmd treats a leftover backup-shaped directory as another candidate, not a silent exclusion (#599)" {
+  # No code in this repo creates a ".bak-"-named directory -- that name is a
+  # human backup convention, not something install.sh generates. A pattern
+  # narrow enough to exclude it is therefore also narrow enough to still
+  # exclude nothing on a real machine, while remaining broad enough to
+  # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
+  # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
+  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # not special-case names at all. A directory that still carries the .agmsg
+  # marker is just another candidate, and more than one candidate is exactly
+  # the ambiguity this fix already refuses to guess through.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local leftover="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
+  mkdir -p "$leftover/scripts" "$leftover/templates" "$leftover/db" "$leftover/agents"
+  touch "$leftover/.agmsg"
+  echo "leftover sentinel" > "$leftover/SKILL.md"
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
+  printf '%s\n' "$output" | grep -Fq "agmsg"
+  printf '%s\n' "$output" | grep -Fq "agmsg.bak-20260731"
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "leftover sentinel" "$leftover/SKILL.md"
 }
 
 @test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {
@@ -563,6 +609,67 @@ PY
   fi
 }
 
+@test "install: a symlinked Codex config.toml keeps its link and the edit lands on the target (#747, writable_roots exists)" {
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/dotfiles"
+  # The reporter's exact shape: writable_roots already present with an entry, and
+  # config.toml is a symlink into a dotfiles repo (stow/chezmoi/manual).
+  cat > "$FAKE_HOME/dotfiles/config.toml" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/existing/path"]
+EOF
+  ln -s "$FAKE_HOME/dotfiles/config.toml" "$FAKE_HOME/.codex/config.toml"
+  [ -L "$FAKE_HOME/.codex/config.toml" ] || skip "filesystem did not create a real symlink here"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  # The link survives: `mv` would have replaced it with a plain file (#747).
+  [ -L "$FAKE_HOME/.codex/config.toml" ]
+  # The edit reached the link's target, not a detached copy at the link path.
+  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/teams" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  # The pre-existing entry is kept.
+  grep -q "/some/existing/path" "$FAKE_HOME/dotfiles/config.toml"
+}
+
+@test "install: a symlinked Codex config.toml keeps its link when only the section exists (#747, second branch)" {
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/dotfiles"
+  # Section present, no writable_roots — the other mv-based branch.
+  cat > "$FAKE_HOME/dotfiles/config.toml" <<'EOF'
+[sandbox_workspace_write]
+EOF
+  ln -s "$FAKE_HOME/dotfiles/config.toml" "$FAKE_HOME/.codex/config.toml"
+  [ -L "$FAKE_HOME/.codex/config.toml" ] || skip "filesystem did not create a real symlink here"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  [ -L "$FAKE_HOME/.codex/config.toml" ]
+  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+}
+
+@test "install: an ordinary Codex config.toml is replaced atomically, not truncated in place (#747 control)" {
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/existing/path"]
+EOF
+  # The reverse of the symlink tests, guarding the ordinary-file arm so the atomic
+  # mv cannot be dropped again unseen (#747). An atomic `mv` gives the destination
+  # a NEW inode (the temp file's); a truncate-then-write (`cat >`, the symlink arm)
+  # keeps the old inode. So an unchanged inode here would mean the ordinary path
+  # silently became non-atomic.
+  local ino_before; ino_before="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  [ ! -L "$FAKE_HOME/.codex/config.toml" ]
+  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
+  grep -q "/some/existing/path" "$FAKE_HOME/.codex/config.toml"
+  local ino_after; ino_after="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
+  [ "$ino_after" != "$ino_before" ]
+}
+
 
 # --- hermes Agent skill (~/.hermes/skills/<name>/SKILL.md) ---
 
@@ -714,14 +821,18 @@ PY
 
 @test "install: bare --update (no --cmd) does NOT force-steal a Codex shim owned by a different install (#553)" {
   # Unlike --update --cmd <name>, a bare --update resolves its target by
-  # scanning for an existing install rather than the caller naming one --- and
-  # on this base (#599's fail-closed fix, PR #659, is not yet merged here),
-  # that resolution does not even fail closed when more than one install is
-  # present. Forcing the shim reclaim unconditionally for bare --update would
-  # let whichever install a glob happens to land on steal the shim from
-  # another one the caller never named at all (review finding). This pins
-  # that a shim already owned by a DIFFERENT install survives a bare --update
-  # of the install that does NOT own it.
+  # scanning for an existing install rather than the caller naming one.
+  # Forcing the shim reclaim unconditionally for bare --update would let
+  # whichever install the scan landed on steal the shim from another one the
+  # caller never named at all (review finding). This pins that a shim already
+  # owned by a DIFFERENT install survives a bare --update.
+  #
+  # Since #599 (PR #659) the scan fails closed when more than one install is
+  # present, so with two installs a bare --update now refuses before it
+  # touches anything -- which is the strongest form of "does not steal": the
+  # refusal is asserted, and the shim's owner line is asserted unchanged
+  # across it. The single-install case, where a bare --update does proceed,
+  # is the next test.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
@@ -731,13 +842,9 @@ PY
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --agent-type codex >/dev/null
   grep -q "/skills/agmsg/" "$shim"  # still the first install's, per the earlier tests
 
-  # Bare --update, no --cmd: this base's ambiguous-candidate handling means
-  # which of the two real installs it lands on isn't the point of this test
-  # (that's #599 / #659's concern) -- what matters here is that whichever one
-  # it is, it must not walk away with a shim it was never explicitly told to
-  # claim.
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
   local after; after="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
   [ "$before" = "$after" ]
 }
