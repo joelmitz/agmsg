@@ -24,6 +24,16 @@ name: Sync fork with upstream
 # fork-sync API は fast-forward できなければ merge commit を作る。競合して
 # 同期できない場合は merge_type=none となり、このワークフローは失敗する
 # （強制上書きは一切しない）。
+#
+# ★2026-08-30 追加: merge-upstream API 自体も、対象差分に workflow ファイル
+#   （.github/workflows/*）が含まれると同じ理由で拒否することを実測した
+#   （実行 33247189985: "refusing to allow a GitHub App to create or update
+#   workflow `.github/workflows/tests.yml` without `workflows` permission"、
+#   HTTP 422）。上の「失敗2」注記は git push の話だったが、fork-sync API も
+#   呼び出しトークンの workflow scope を見ている。`permissions:` ブロックに
+#   `workflows` というキーは存在しない（YAML解析エラーで実測済み）ため、
+#   `workflow` スコープ付きの既存 gh 認証トークンを SYNC_UPSTREAM_TOKEN という
+#   repository secret に保存し、この 1 ステップだけそれを使う。
 
 on:
   schedule:
@@ -45,7 +55,7 @@ jobs:
       # 試みるだけにして、成否は次の step で **実際の同期状態**を見て決める。
       - name: Sync main from upstream
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
         run: |
           set -uo pipefail
           out="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
