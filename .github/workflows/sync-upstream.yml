@@ -33,13 +33,6 @@ on:
 permissions:
   contents: write
   issues: write
-  # ★2026-08-30 追加: merge-upstream API 自体が、対象差分に workflow ファイル
-  #   （.github/workflows/*）が含まれると同じ理由で拒否することを実測した
-  #   （実行 33247189985: "refusing to allow a GitHub App to create or update
-  #   workflow `.github/workflows/tests.yml` without `workflows` permission"、
-  #   HTTP 422）。上の「失敗2」注記は git push の話だったが、fork-sync API も
-  #   同じ permission を見ている。
-  workflows: write
 
 jobs:
   sync:
