@@ -1,7 +1,20 @@
 name: tests
 
-# Run the full Bats suite on PRs targeting main or integration/remote and on
-# pushes to main. The suite is
+# Run the full Bats suite on PRs targeting main or any `integration/**` branch,
+# and on pushes to either. The push leg on integration branches is what tests
+# the MERGED shape: a PR is only ever tested as "my head against the base I was
+# opened on", so with several PRs collecting on one integration branch, the
+# state that is actually dogfooded -- all of them together at the tip -- is a
+# tree no PR run ever saw.
+#
+# The filter is a pattern rather than a list of branch
+# names because a list goes quiet exactly when a new integration branch
+# appears: a PR onto an unlisted base has no required checks, so GitHub reports
+# `mergeStateStatus: CLEAN` -- "nothing to check", not "everything checked" --
+# and the PR's summary status alone cannot tell those apart (measured
+# 2026-08-31). The detail views can: `gh pr checks`, `gh run list` and the
+# Checks tab all show zero runs. That is why the merge gate reads a run whose
+# headSha matches the head being merged, and never the PR's status. The suite is
 # fast (~2 min) and this repo is public, so GitHub-hosted runners are free —
 # running everything every time is simpler and safer than selectively running
 # "only the changed tests", which would miss regressions in shared libs
@@ -47,9 +60,9 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   pull_request:
-    branches: [main, integration/remote]
+    branches: [main, 'integration/**']
 
 permissions:
   contents: read
@@ -59,12 +72,34 @@ permissions:
 # and the account runs at most five macOS jobs at once (measured 2026-08-21:
 # 35 runs that day, 140 macOS jobs, queue waits of 0-50 min, one PR's shard
 # waiting 50 min behind runs whose heads had already been replaced). So a new
-# run for the same PR cancels the one before it. A push to main is never
-# cancelled: its group is its own run id, and that run is what a release reads
-# (#848).
+# run for the same PR cancels the one before it. The same reasoning applies to
+# an integration branch, which is only ever dogfooded at its tip. A push to main
+# is the one case that is never cancelled: its group is its own run id, and that
+# run is what a release reads (#848). The block below spells out all three.
 concurrency:
-  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Three cases, and they want different things.
+  #
+  #   pull_request        -- group by PR. A head that has moved makes the run
+  #                          worthless, so cancel the one before it.
+  #   push to main        -- group by run id, i.e. never cancel. A release reads
+  #                          the run for the commit it ships (#848); a main run
+  #                          that another main run cancelled would leave that
+  #                          commit with no verdict at all.
+  #   push to integration -- group by ref, and cancel. An integration branch
+  #                          collects several PRs one after another, and it is
+  #                          only ever dogfooded at its tip. Without this the
+  #                          five merges of one release queue five full suites
+  #                          that all compete for the same five macOS slots
+  #                          (the header above measured 0-50 min queue waits at
+  #                          that contention), and four of the five verdicts are
+  #                          about a tip that no longer exists by the time they
+  #                          land.
+  group: >-
+    tests-${{ github.event_name == 'pull_request'
+    && format('pr-{0}', github.event.pull_request.number)
+    || (github.ref == 'refs/heads/main' && github.run_id
+    || format('push-{0}', github.ref)) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
 
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
@@ -87,8 +122,11 @@ env:
   WINDOWS_SQLITE_SHA256: 'f46ee2475de4cbe287e6e5f7d43c838796b14e7379cd216bdbb28d391429f9fc'
 
 jobs:
-  # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
-  # run the full suite (docs_only=false) — main must stay fully verified.
+  # Cheap gate: is this PR's diff entirely documentation? The gate is scoped to
+  # pull_request by event name, so EVERY push runs the full suite
+  # (docs_only=false) — main because it must stay fully verified, an integration
+  # branch because its tip is what gets dogfooded and a docs-only merge still
+  # changes that tip.
   changes:
     name: detect docs-only
     runs-on: ubuntu-latest
@@ -204,7 +242,14 @@ jobs:
           echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
 
   bats-shard:
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)
+    # The docs-only skip below reports this check green without running the
+    # suite -- correctly, so the required aggregate can be satisfied -- but a
+    # green that measured nothing must not read like one that ran 24 files
+    # (#798). The name says which it was. Only the shard checks change name;
+    # the required contexts are `bats` (the aggregate) and the Windows install
+    # leg, and neither is renamed, so branch protection sees exactly what it
+    # saw. `needs` is one of the contexts a job name may read.
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -244,7 +289,9 @@ jobs:
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+        run: |
+          echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+          echo "::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files; its green satisfies the required check and measures nothing (#798)"
 
       - name: Compute this shard's test files
         if: needs.changes.outputs.docs_only != 'true'
@@ -421,7 +468,15 @@ jobs:
 
       - name: Docs-only change — no shard manifests to verify
         if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Diff is documentation-only; shard manifests are not expected."
+        # Same conclusion as a full pass -- this is the required context and a
+        # docs-only PR must stay mergeable -- but the run says which green it
+        # is, where a person reads it: the checks tab (annotation) and the run
+        # summary. `gh pr checks` still prints `bats pass`; the shard lines
+        # beside it now carry "docs-only, suite skipped" (#798).
+        run: |
+          echo "Diff is documentation-only; shard manifests are not expected."
+          echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
+          printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download shard manifests
         if: needs.changes.outputs.docs_only != 'true'
@@ -443,6 +498,10 @@ jobs:
               status=1
             fi
           done
+          # The other green, named the same way (#798): how many files the
+          # shards ran, so a full pass and a skip never read alike.
+          count="$(printf '%s\n' "$expected" | grep -c .)"
+          printf '%s\n' "## bats: suite ran" "" "The shards ran $count test files on ubuntu-latest and macos-latest and every shard passed." >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
@@ -771,7 +830,8 @@ jobs:
   # cargo check + tsc --noEmit is a few minutes, not the full-bundle cost.
   # Same always-report pattern as bats: the job always completes, and only
   # the heavy steps are gated, so it can be promoted to a required check
-  # without ever leaving a PR stuck pending. Pushes to main always run it.
+  # without ever leaving a PR stuck pending. Every push runs it (the gate is
+  # scoped to pull_request by event name), main and integration alike.
   # Fail-open mirrors bats too: steps skip only on an EXPLICIT
   # app_changed=false — if the changes job breaks and its output is empty,
   # the typecheck runs rather than green-washing a possibly-app diff.

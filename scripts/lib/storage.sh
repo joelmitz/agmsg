@@ -225,6 +225,22 @@ _agmsg_escape_flag() {
   printf '%s' "$_AGMSG_ESCAPE_FLAG"
 }
 
+# Run the escape probe in THIS shell, before a pipeline starts.
+#
+# `agmsg_sqlite` memoises the probe so it costs one sqlite3 process per shell
+# rather than one per call (#462). The right-hand side of a pipeline is a
+# subshell: it inherits the memo, but a memo it sets there dies with it. So a
+# process whose FIRST database access is piped records nothing, and every piped
+# call after it probes again -- measured at two sqlite3 processes per call, and
+# it never converges.
+#
+# A REDIRECTION IS NOT A PIPE. `agmsg_sqlite db < file` runs in the current
+# shell and memoises normally; only `... | agmsg_sqlite ...` needs this. Call it
+# on the line before the pipeline, not inside it.
+agmsg_sqlite_warm() {
+  [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
+}
+
 agmsg_sqlite() {
   # Probe in THIS shell, not in a command substitution. `$(_agmsg_escape_flag)`
   # ran the function in a subshell, so the memo it set was discarded on exit and
@@ -238,7 +254,18 @@ agmsg_sqlite() {
     return
   fi
   # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+  local _agmsg_sqlite_rc=0
+  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" || _agmsg_sqlite_rc=$?
+  # SQLITE_BUSY after the full timeout used to pass in silence: the caller saw
+  # a non-zero it often swallowed, and the operator saw a command that hung
+  # for the timeout and said nothing (#1001 -- two people diagnosed two
+  # different commands as broken). One line on stderr turns "hung" into
+  # "waited and gave up", names the likely writer, and costs nothing when
+  # there is no contention.
+  if [ "$_agmsg_sqlite_rc" -eq 5 ]; then
+    echo "agmsg: the message store is busy: this call waited ${AGMSG_BUSY_TIMEOUT:-5000}ms behind another writer (a sync engine cycle may be running) and gave up (#1001)" >&2
+  fi
+  return "$_agmsg_sqlite_rc"
 }
 
 # The same call, recording how it ended. With AGMSG_SQLITE_OUTCOME_FILE set,

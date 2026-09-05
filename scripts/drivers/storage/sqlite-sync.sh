@@ -62,6 +62,7 @@ _SQLITE_SYNC_COMMIT_BYTES=131072
 _sqlite_sync_commit_chunk() {
   local db="$1" sql="$2"
   [ -n "$sql" ] || return 0
+  agmsg_sqlite_warm
   printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1
 }
 
@@ -867,7 +868,7 @@ storage_sync_reconcile_push() {
 
   # Stdin, for the same reason as the pull outcomes (#882): `$values` gains an
   # entry per acked message and a full catch-up push carries a thousand.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_sync_acks(
       local_position INTEGER UNIQUE,wire_id TEXT UNIQUE,server_seq TEXT UNIQUE);
     INSERT INTO incoming_sync_acks VALUES $values;
@@ -939,7 +940,7 @@ storage_sync_reconcile_push() {
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null 2>&1 || return 12
+    COMMIT;" >/dev/null 2>&1 || return 12
 
   _sqlite_data "$team" "SELECT json_object('type','sync_reconcile_result','push_cursor',
     CAST(push_cursor AS TEXT)) FROM sync_bindings WHERE local_team='$tl'
@@ -965,7 +966,9 @@ storage_sync_apply_pull() {
   _AGMSG_SYNC_JQ_ERR=""
   trap 'case "${_AGMSG_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-sql.*) rm -f "$_AGMSG_SYNC_SQL_FILE" ;; esac
         case "${_AGMSG_SYNC_JQ_ERR:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-jq.*) rm -f "$_AGMSG_SYNC_JQ_ERR" ;; esac' EXIT INT TERM HUP
-  printf '%s\n' 'BEGIN IMMEDIATE;' > "$sql_file"
+  printf '%s\n' 'BEGIN IMMEDIATE;
+    CREATE TEMP TABLE sync_apply_envelope(blob TEXT);
+    INSERT INTO temp.sync_apply_envelope VALUES(NULL);' > "$sql_file"
 
   # ONE jq FOR THE WHOLE PAGE, AND NO eval AT ALL (#908 item 3, #940).
   #
@@ -1143,12 +1146,13 @@ storage_sync_apply_pull() {
     _sqlite_sync_lit_into "$at"; at_q="$_SQLITE_SYNC_LIT"
     q="'$key_id_q'"; [ -n "$key_id" ] || q=NULL
     printf "%s\n" "
+      UPDATE temp.sync_apply_envelope SET blob='$blob_q';
       INSERT OR IGNORE INTO sync_conflicts
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'server sequence maps to another wire id',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1164,7 +1168,7 @@ storage_sync_apply_pull() {
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'wire id maps to another sequence or envelope',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1173,21 +1177,21 @@ storage_sync_apply_pull() {
           AND (qx.server_seq<>'$seq' OR qx.envelope_v<>$v
             OR qx.cipher<>'$cipher_q'
             OR COALESCE(qx.key_id,'')<>'$key_id_q'
-            OR qx.blob<>'$blob_q'))
+            OR qx.blob<>(SELECT blob FROM temp.sync_apply_envelope)))
          OR EXISTS(SELECT 1 FROM sync_messages mx
         WHERE mx.server_instance_id='$server' AND mx.remote_team_id='$remote'
           AND mx.protocol_version=$protocol AND mx.wire_id='$wire'
           AND (mx.server_seq IS NOT NULL AND mx.server_seq<>'$seq'
             OR mx.envelope_v<>$v OR mx.cipher<>'$cipher_q'
             OR COALESCE(mx.key_id,'')<>'$key_id_q'
-            OR mx.blob<>'$blob_q'));
+            OR mx.blob<>(SELECT blob FROM temp.sync_apply_envelope)));
       INSERT OR IGNORE INTO sync_quarantine
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,server_received_at,envelope_v,
          cipher,key_id,blob,status,policy_revision,local_security_revision,reason)
       VALUES('$tl','$server','$remote',$protocol,'$generation','$seq','$wire',
         '$received_q',$v,'$cipher_q',$q,
-        '$blob_q','$status','$policy_q',
+        (SELECT blob FROM temp.sync_apply_envelope),'$status','$policy_q',
         '$local_rev_q','$reason_q');
       UPDATE sync_quarantine SET status='$status',
           policy_revision='$policy_q',
@@ -1198,14 +1202,14 @@ storage_sync_apply_pull() {
          AND server_seq='$seq' AND envelope_v=$v
          AND cipher='$cipher_q'
          AND COALESCE(key_id,'')='$key_id_q'
-         AND blob='$blob_q'
+         AND blob=(SELECT blob FROM temp.sync_apply_envelope)
          AND status NOT IN ('corrupt_state','imported','reconciled');
       UPDATE sync_quarantine SET status='corrupt_state',reason='wire envelope mismatch'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
          AND (server_seq<>'$seq' OR envelope_v<>$v OR cipher<>'$cipher_q'
               OR COALESCE(key_id,'')<>'$key_id_q'
-              OR blob<>'$blob_q');
+              OR blob<>(SELECT blob FROM temp.sync_apply_envelope));
       UPDATE sync_quarantine SET status='corrupt_state',reason='binding sequence conflict'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
@@ -1219,13 +1223,13 @@ storage_sync_apply_pull() {
              AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
              AND m.wire_id='$wire' AND (m.envelope_v<>$v OR m.cipher<>'$cipher_q'
                OR COALESCE(m.key_id,'')<>'$key_id_q'
-               OR m.blob<>'$blob_q'
+               OR m.blob<>(SELECT blob FROM temp.sync_apply_envelope)
                OR (m.server_seq IS NOT NULL AND m.server_seq<>'$seq')));
       UPDATE sync_messages SET server_seq='$seq' WHERE server_instance_id='$server'
         AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
         AND envelope_v=$v AND cipher='$cipher_q'
         AND COALESCE(key_id,'')='$key_id_q'
-        AND blob='$blob_q' AND (server_seq IS NULL OR server_seq='$seq')
+        AND blob=(SELECT blob FROM temp.sync_apply_envelope) AND (server_seq IS NULL OR server_seq='$seq')
         AND EXISTS(SELECT 1 FROM sync_quarantine qx
           WHERE qx.server_instance_id='$server' AND qx.remote_team_id='$remote'
             AND qx.protocol_version=$protocol AND qx.wire_id='$wire'
@@ -1318,7 +1322,7 @@ storage_sync_apply_pull() {
            driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
            key_id,blob,server_seq,direction)
         SELECT '$tl','$server','$remote',$protocol,'$generation',seq,id,'$wire',$v,
-               '$cipher_q',$q,'$blob_q','$seq','pull'
+               '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),'$seq','pull'
           FROM events WHERE id='$local_id';
         UPDATE sync_quarantine SET status='imported' WHERE server_instance_id='$server'
           AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
@@ -1470,6 +1474,53 @@ storage_sync_prepare_read_state() {
       (.members|length)<=1000 and all(.members[];
         ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0)) | "ok"' \
       2>/dev/null)" = ok ] || { _sqlite_sync_why; return 13; }
+  # ...and the roster list on its own line, so a refusal here is told apart
+  # from the eight context checks above by the line number _sqlite_sync_why
+  # prints (#911) -- and says what it is in words as well. The bound is the
+  # size the contract test actually passes through this path (10,000): the
+  # list is one entry per roster mutation the team ever applied, so a team
+  # past it has had ten thousand joins, leaves or renames, which is a signal
+  # to look at the design, not a size to wave through. Over the bound is
+  # refused (13), which leaves the frontier where it was -- the safe side.
+  # Shape and size in jq, then the DOMAIN per entry through
+  # _sqlite_sync_sequence -- the same bound (9223372036854775807) this
+  # function already holds current_seq to, a hundred lines above. Two review
+  # findings shaped this:
+  #   - Shape alone let 9223372036854775808..9999999999999999999 through. The
+  #     temp table's INTEGER PRIMARY KEY (a rowid alias) refuses such a value
+  #     outright, so the whole read-prepare transaction died with a datatype
+  #     mismatch -- neither a 13 nor "no evidence", a way of failing the
+  #     contract does not name. Hence the domain check.
+  #   - The shape test is anchored \A..\z, not ^..$: in jq's regex engine $
+  #     also matches before one trailing newline, so "1\n" passed as a
+  #     sequence; the per-entry loop below then read "1", skipped the empty
+  #     line, and the SQL got (1\n), which SQLite accepts as 1 -- a malformed
+  #     entry exempting a real sequence, the one direction this must never
+  #     take. With absolute anchors no accepted entry can carry a newline, so
+  #     the line-framed loop sees exactly the entries jq accepted.
+  # Pure bash per entry, no fork; at most 10,000 entries.
+  # The jq program lives in a variable: bash 3.2 misparses the backslashes of
+  # \A and \z when they sit in a quoted string inside $( ), and the check
+  # then fails closed for every list (macOS CI, and the same 3.2 divergence
+  # #928 met with a quote). The same reason _SQLITE_SYNC_WIRE_RE is a variable.
+  local roster_seqs_jq
+  roster_seqs_jq='select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
+      (.roster_seqs|length)<=10000 and all(.roster_seqs[];
+        (type=="string") and test("\\A(0|[1-9][0-9]{0,18})\\z")))) | "ok"'
+  [ "$(printf '%s\n' "$context" | jq -r "$roster_seqs_jq" 2>/dev/null)" = ok ] || {
+    echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 canonical sequences (#968)" >&2
+    _sqlite_sync_why; return 13
+  }
+  local roster_seq
+  while IFS= read -r roster_seq; do
+    [ -n "$roster_seq" ] || continue
+    _sqlite_sync_sequence "$roster_seq" || {
+      echo "agmsg: sqlite-sync: roster_seqs carries '$roster_seq', which is not a canonical sequence (#968)" >&2
+      _sqlite_sync_why; return 13
+    }
+  done <<EOF
+$(printf '%s\n' "$context" | jq -r '.roster_seqs // [] | .[]')
+EOF
   floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
   current=$(printf '%s\n' "$context" | jq -r '.current_seq')
   case "$floor:$current" in *[!0-9:]*) _sqlite_sync_why; return 13 ;; esac
@@ -1498,17 +1549,35 @@ EOF
   if [ "$count" -gt 0 ]; then
     insert_members="INSERT INTO incoming_read_members VALUES $values;"
   fi
+  # Sequences the engine knows to be roster mutations (#968). They occupy
+  # server sequence numbers but are, by design, not messages: the engine routes
+  # them to the roster driver, so they never gain a sync_messages mapping and
+  # (on the engine pull path) never enter sync_quarantine at all. Without this
+  # list the contiguity check below reads every one of them as a hole and pins
+  # the frontier at the first -- which is seq 1, the founding member_joined, on
+  # every team ever created. Validated above as decimal strings, so they are
+  # emitted as integers here without further quoting. Absent list => empty
+  # table => today's behavior (a frontier that cannot advance), never a
+  # frontier advanced on evidence that was not supplied.
+  local insert_roster_seqs="" roster_values
+  roster_values=$(printf '%s\n' "$context" |
+    jq -r '[.roster_seqs // [] | .[] | "(" + . + ")"] | join(",")')
+  if [ -n "$roster_values" ]; then
+    insert_roster_seqs="INSERT OR IGNORE INTO roster_read_seqs VALUES $roster_values;"
+  fi
   if [ -n "$local_values" ]; then
     insert_local_agents="INSERT INTO local_read_agents VALUES $local_values;"
   fi
 
   # Stdin, third of the same kind (#882): `$insert_members` carries one row per
   # roster member and `$insert_local_agents` one per local agent.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
+    CREATE TEMP TABLE roster_read_seqs(server_seq INTEGER PRIMARY KEY);
     $insert_members
     $insert_local_agents
+    $insert_roster_seqs
     UPDATE sync_read_members SET active=0 WHERE local_team='$tl'
       AND server_instance_id='$server' AND remote_team_id='$remote'
       AND protocol_version=$protocol AND driver_generation='$generation';
@@ -1554,32 +1623,57 @@ EOF
     INSERT INTO sync_read_prepared
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,member_id,server_seq)
-    WITH ordered AS (
+    WITH held AS (
+      -- The sequence space this client is expected to hold (#968): every
+      -- message in quarantine, plus every sequence the roster driver applied
+      -- as a roster mutation. A roster sequence that also has a quarantine row
+      -- (the bootstrap path quarantines them) is one row here, flagged roster.
+      SELECT q.local_team,q.server_instance_id,q.remote_team_id,q.protocol_version,
+             q.driver_generation,CAST(q.server_seq AS INTEGER) AS seq,q.status,q.wire_id,
+             EXISTS(SELECT 1 FROM roster_read_seqs r
+                     WHERE r.server_seq=CAST(q.server_seq AS INTEGER)) AS roster
+        FROM sync_quarantine q
+       WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+         AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+         AND q.driver_generation='$generation'
+      UNION ALL
+      SELECT '$tl','$server','$remote',$protocol,'$generation',r.server_seq,'imported',NULL,1
+        FROM roster_read_seqs r
+       WHERE NOT EXISTS(SELECT 1 FROM sync_quarantine q
+                         WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+                           AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+                           AND q.driver_generation='$generation'
+                           AND CAST(q.server_seq AS INTEGER)=r.server_seq)
+    ), ordered AS (
       SELECT rm.member_id,rm.agent,CAST(rm.remote_server_seq AS INTEGER) AS base,
              CAST(b.transport_cursor AS INTEGER) AS tip,
-             CAST(q.server_seq AS INTEGER) AS seq,q.status,m.local_position,e.to_agent,
-             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY CAST(q.server_seq AS INTEGER)) AS rn
+             h.seq,h.status,h.roster,m.local_position,e.to_agent,
+             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY h.seq) AS rn
         FROM sync_read_members rm JOIN sync_bindings b
           ON b.local_team=rm.local_team AND b.server_instance_id=rm.server_instance_id
          AND b.remote_team_id=rm.remote_team_id AND b.protocol_version=rm.protocol_version
          AND b.driver_generation=rm.driver_generation
-        LEFT JOIN sync_quarantine q ON q.local_team=rm.local_team
-         AND q.server_instance_id=rm.server_instance_id AND q.remote_team_id=rm.remote_team_id
-         AND q.protocol_version=rm.protocol_version AND q.driver_generation=rm.driver_generation
-         AND CAST(q.server_seq AS INTEGER)>CAST(rm.remote_server_seq AS INTEGER)
-         AND CAST(q.server_seq AS INTEGER)<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
+        LEFT JOIN held h ON h.local_team=rm.local_team
+         AND h.server_instance_id=rm.server_instance_id AND h.remote_team_id=rm.remote_team_id
+         AND h.protocol_version=rm.protocol_version AND h.driver_generation=rm.driver_generation
+         AND h.seq>CAST(rm.remote_server_seq AS INTEGER)
+         AND h.seq<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
         LEFT JOIN sync_messages m ON m.server_instance_id=rm.server_instance_id
          AND m.remote_team_id=rm.remote_team_id AND m.protocol_version=rm.protocol_version
-         AND m.wire_id=q.wire_id
+         AND m.wire_id=h.wire_id
         LEFT JOIN events e ON e.seq=m.local_position
        WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
          AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
          AND rm.driver_generation='$generation' AND rm.active=1
          AND rm.name_mismatch=0
     ), bad AS (
+      -- A roster sequence is accounted for by being a roster sequence: it has
+      -- no message mapping and never will. Everything else keeps the strict
+      -- reading -- a message sequence with no mapping, or missing from the
+      -- space entirely, is still a hole, so a lost message still pins.
       SELECT member_id,MIN(base+rn) AS seq FROM ordered
        WHERE seq IS NULL OR seq<>base+rn OR status NOT IN ('imported','reconciled')
-          OR local_position IS NULL
+          OR (local_position IS NULL AND roster=0)
           OR (to_agent=agent AND local_position>COALESCE((SELECT local_position
                 FROM read_cursors c WHERE c.team='$tl' AND c.agent=ordered.agent),0)
               AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
@@ -1599,7 +1693,7 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null || { _sqlite_sync_why; return 13; }
+    COMMIT;" >/dev/null || { _sqlite_sync_why; return 13; }
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
       'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm
