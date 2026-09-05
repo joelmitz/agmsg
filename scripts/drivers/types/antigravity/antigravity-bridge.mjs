@@ -31,6 +31,7 @@ export class Bridge {
     if(r.status!==0) {
       const error=Error(`${command}失敗: ${r.stderr.trim()}`);
       if(command==='peek')error.code='PEEK_TRANSPORT';
+      if(r.signal==='SIGINT'||r.signal==='SIGTERM')error.code='SIGNAL_TRANSPORT';
       throw error;
     }
     return r.stdout;
@@ -194,7 +195,8 @@ export class Bridge {
     if(!await this.acquire()){await this.stop();return;}
     await this.launch();
     this.timer=setInterval(()=>{if(this.ticking||this.stopping)return;this.ticking=true;this.tick().catch(e=>{
-      this.fail(e);
+      if(e.code==='SIGNAL_TRANSPORT'&&!this.busy&&this.phase==='IDLE'&&!this.state?.batch)this.stop().catch(stopError=>console.error(stopError.message));
+      else this.fail(e);
     }).finally(()=>this.ticking=false);},Number(this.o.poll||2000));
     process.once('SIGINT',()=>this.stop());process.once('SIGTERM',()=>this.stop());
   }
