@@ -15,7 +15,13 @@ esac
 bash "$SKILL_DIR/scripts/identities.sh" "$project" antigravity | awk -F '\t' -v t="$team" -v a="$role" '$1==t && $2==a { found=1 } END {exit !found}' || { echo '未登録role' >&2; exit 1; }
 case "$command" in
  claim) actas_lock_claim "$team" "$role" "$owner"; exit ;;
- verify) [ "$(actas_lock_owner "$team" "$role")" = "$owner" ]; exit ;;
+ verify)
+   if [ -n "${AGMSG_TEST_VERIFY_SIGNAL:-}" ]; then
+     _n=0; [ -f "${AGMSG_TEST_VERIFY_SIGNAL}.count" ] && _n=$(cat "${AGMSG_TEST_VERIFY_SIGNAL}.count")
+     _n=$((_n + 1)); printf '%s\n' "$_n" > "${AGMSG_TEST_VERIFY_SIGNAL}.count"
+     if [ "$_n" -ge 3 ]; then kill -TERM $$; fi
+   fi
+   [ "$(actas_lock_owner "$team" "$role")" = "$owner" ]; exit ;;
  release) actas_lock_release "$team" "$role" "$owner"; exit ;;
  record) agmsg_role_session_record "$team" "$role" "${6:?}" "$project"; exit ;;
 esac

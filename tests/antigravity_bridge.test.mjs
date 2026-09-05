@@ -143,6 +143,20 @@ test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
   } finally { await f.close(); }
 });
 
+test('IDLE中verifyのSIGTERM終了は正常停止として扱う',async()=>{
+  const signal=path.join(os.tmpdir(),`agmsg-verify-signal-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal});
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    await waitFor(()=>f.child.exitCode!==null);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    assert.match(f.output(),/停止/);
+    assert.equal(f.state().batch,null);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('antigravity-reservation.')&&name.endsWith('.json')),false);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
+  } finally { fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
+});
+
 test('completed batchの明示ack復旧はモデルを再実行しない',async()=>{
   const f=fixture('sqlite','attack');
   try {
