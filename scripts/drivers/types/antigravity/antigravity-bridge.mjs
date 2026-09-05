@@ -175,7 +175,11 @@ export class Bridge {
   async run(){
     if(!await this.acquire()){await this.stop();return;}
     await this.launch();
-    this.timer=setInterval(()=>{if(this.ticking||this.stopping)return;this.ticking=true;this.tick().catch(e=>this.fail(e)).finally(()=>this.ticking=false);},Number(this.o.poll||2000));
+    this.timer=setInterval(()=>{if(this.ticking||this.stopping)return;this.ticking=true;this.tick().catch(e=>{
+      if(!this.busy&&this.phase==='IDLE'&&!this.state?.batch){
+        this.stopping=true;this.stop().catch(stopError=>console.error(stopError.message));
+      } else this.fail(e);
+    }).finally(()=>this.ticking=false);},Number(this.o.poll||2000));
     process.once('SIGINT',()=>this.stop());process.once('SIGTERM',()=>this.stop());
   }
 }

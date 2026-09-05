@@ -115,6 +115,24 @@ test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する
   } finally { fs.rmSync(`${barrier}.release`,{force:true}); fs.rmSync(`${barrier}.reached`,{force:true}); await f.close(); }
 });
 
+test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',async()=>{
+  const failure=path.join(os.tmpdir(),`agmsg-peek-failure-${process.pid}-${Date.now()}`);
+  const f=fixture();
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    const failedPeek=spawnSync('bash',[path.join(f.install,'scripts/drivers/types/antigravity/inbox-transport.sh'),'peek',f.project,'fixture','worker',f.state().owner],{env:{...f.env,AGMSG_TEST_PEEK_FAILURE:failure},encoding:'utf8'});
+    assert.equal(failedPeek.status,42,failedPeek.stderr);
+    assert.equal(fs.existsSync(`${failure}.reached`),true);
+    f.child.kill('SIGTERM');
+    await waitFor(()=>f.child.exitCode!==null);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    assert.match(f.output(),/停止/);
+    assert.equal(f.state().batch,null);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('antigravity-reservation.')&&name.endsWith('.json')),false);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
+  } finally { fs.rmSync(`${failure}.reached`,{force:true}); await f.close(); }
+});
+
 test('completed batchの明示ack復旧はモデルを再実行しない',async()=>{
   const f=fixture('sqlite','attack');
   try {
