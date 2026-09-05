@@ -23,11 +23,17 @@ function fixture(driver='sqlite',mode='success') {
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
   sh('delivery.sh',['set','monitor','antigravity',project]);
-  let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100'],{env,stdio:['pipe','pipe','pipe']});
+  let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100'],{env,stdio:['pipe','pipe','pipe'],detached:true});
+  const children=[child];
   child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
   const unread=()=>sh('drivers/types/antigravity/inbox-transport.sh',['peek',project,'fixture','worker',state().owner]).trim();
   const state=()=>{const f=fs.readdirSync(path.join(install,'run')).find(f=>f.endsWith('.state.json'));return JSON.parse(fs.readFileSync(path.join(install,'run',f),'utf8'));};
-  return {dir,install,project,env,sh,child,state,unread,output:()=>output,async close(){if(child.exitCode===null){child.kill('SIGTERM');await Promise.race([once(child,'close'),delay(5000)]);}if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');}};
+  return {dir,install,project,env,sh,child,state,unread,output:()=>output,track(c){children.push(c);},async close(){
+    for(const c of children){
+      if(c.exitCode===null){try{process.kill(-c.pid,'SIGTERM');}catch{} await Promise.race([once(c,'close'),delay(5000)]);}
+      if(c.exitCode===null&&c.signalCode===null)c.kill('SIGKILL');
+    }
+  }};
 }
 for(const driver of ['sqlite','jsonl'])test(`隔離${driver}: 2通をSUCCESS後だけ既読化`,async()=>{
   const f=fixture(driver);try {
@@ -55,6 +61,32 @@ test('予約なしの陽性対照ではinboxの既読化が進む',async()=>{
     f.sh('send.sh',['fixture','sender','worker','positive control']);
     const out=f.sh('inbox.sh',['fixture','worker']);
     assert.match(out,/positive control/);
+  } finally { await f.close(); }
+});
+
+test('既知turn rulefileだけをmonitor markerへ移行する',async()=>{
+  const f=fixture();
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    await f.close();
+    f.sh('delivery.sh',['set','turn','antigravity',f.project]);
+    const turn=fs.readFileSync(path.join(f.project,'.agent/rules/agmsg.md'),'utf8');
+    assert.match(turn,/PostToolUse/);
+    f.sh('delivery.sh',['set','monitor','antigravity',f.project]);
+    assert.match(fs.readFileSync(path.join(f.project,'.agent/rules/agmsg.md'),'utf8'),/^<!-- agmsg:antigravity:monitor -->/);
+  } finally { await f.close(); }
+});
+
+test('未知rulefileのmonitor移行は拒否して内容を保持する',async()=>{
+  const f=fixture();
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    await f.close();
+    const file=path.join(f.project,'.agent/rules/agmsg.md');
+    fs.writeFileSync(file,'# local rule\n');
+    const r=spawnSync('bash',[path.join(f.install,'scripts/delivery.sh'),'set','monitor','antigravity',f.project],{env:f.env,encoding:'utf8'});
+    assert.notEqual(r.status,0);
+    assert.equal(fs.readFileSync(file,'utf8'),'# local rule\n');
   } finally { await f.close(); }
 });
 
@@ -95,7 +127,8 @@ test('uncertain batchの明示replayは保存済みIDと本文を再投入する
     const body=before.batch.messages[0].body;
     await f.close();
     f.env.FAKE_AGY_MODE='success';
-    const child=spawn('bash',[path.join(f.install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',f.project,'--team','fixture','--name','worker','--agy',path.join(f.dir,'agy'),'--action','replay','--batch',before.batch.id,'--confirm-ids',ids.join(',') ,'--poll','100'],{env:f.env,stdio:['pipe','pipe','pipe']});
+    const child=spawn('bash',[path.join(f.install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',f.project,'--team','fixture','--name','worker','--agy',path.join(f.dir,'agy'),'--action','replay','--batch',before.batch.id,'--confirm-ids',ids.join(',') ,'--poll','100'],{env:f.env,stdio:['pipe','pipe','pipe'],detached:true});
+    f.track(child);
     let output='';child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
     await waitFor(()=>f.state().batch===null);
     child.kill('SIGTERM');

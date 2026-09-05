@@ -14,7 +14,21 @@ agmsg_delivery_apply() {
     return 0
   fi
   if [ -f "$file" ] && [ -s "$file" ]; then
-    echo '既存rulefileはagmsg形式ではありません' >&2; return 1
+    # turn が生成した既知の内容だけを monitor marker へ移行する。
+    # 独自 rulefile は内容を失わないよう従来どおり拒否する。
+    local expected actual
+    expected="$(cat <<EOF
+# agmsg Integration Rule
+
+## PostToolUse
+After each tool call, automatically check the agmsg inbox for unread messages.
+- Command: '$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'
+EOF
+)"
+    actual="$(cat "$file")"
+    if [ "$actual" != "$expected" ]; then
+      echo '既存rulefileはagmsg形式ではありません' >&2; return 1
+    fi
   fi
   {
     printf '%s\n' '<!-- agmsg:antigravity:monitor -->'
