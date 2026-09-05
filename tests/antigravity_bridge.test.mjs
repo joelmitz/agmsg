@@ -132,6 +132,17 @@ test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',a
   } finally { fs.rmSync(`${failure}.reached`,{force:true}); await f.close(); }
 });
 
+test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
+  const f=fixture();
+  try {
+    await waitFor(()=>f.output().includes('ready'));
+    f.sh('send.sh',['fixture','sender','worker','x'.repeat(65537)]);
+    await waitFor(()=>f.output().includes('NEEDS_ATTENTION'));
+    assert.match(f.output(),/本文上限超過/);
+    assert.equal(f.state().batch,null);
+  } finally { await f.close(); }
+});
+
 test('completed batchの明示ack復旧はモデルを再実行しない',async()=>{
   const f=fixture('sqlite','attack');
   try {

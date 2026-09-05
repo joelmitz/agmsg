@@ -28,7 +28,11 @@ export class Bridge {
   }
   call(command,extra=[]) {
     const r=spawnSync('bash',[transport,command,this.project,this.team,this.role,this.owner,...extra],{encoding:'utf8'});
-    if(r.status!==0) throw Error(`${command}失敗: ${r.stderr.trim()}`);
+    if(r.status!==0) {
+      const error=Error(`${command}失敗: ${r.stderr.trim()}`);
+      if(command==='peek')error.code='PEEK_TRANSPORT';
+      throw error;
+    }
     return r.stdout;
   }
   save(){atomic(this.file,this.state);}
@@ -140,7 +144,15 @@ export class Bridge {
   async tick() {
     this.check();if(this.deadline&&Date.now()>this.deadline)throw Error('ターン時間超過');
     if(this.busy||this.phase!=='IDLE')return;
-    const rows=this.call('peek').trim();if(!rows)return;
+    let rows;
+    try { rows=this.call('peek').trim(); }
+    catch(error) {
+      if(error.code==='PEEK_TRANSPORT'&&!this.busy&&this.phase==='IDLE'&&!this.state?.batch) this.stop().catch(stopError=>console.error(stopError.message));
+      else this.fail(error);
+      return;
+    }
+    if(this.stopping||this.failed)return;
+    if(!rows)return;
     const messages=rows.split('\n').map(JSON.parse);let bytes=0;const batch=[];
     for(const m of messages){const size=Buffer.byteLength(m.body);if(size>65536)throw Error(`本文上限超過 id=${m.id}`);if(bytes+size>65536)break;bytes+=size;batch.push(m);}
     this.state.batch={id:randomUUID(),phase:'prepared',messages:batch};this.save();
@@ -182,9 +194,7 @@ export class Bridge {
     if(!await this.acquire()){await this.stop();return;}
     await this.launch();
     this.timer=setInterval(()=>{if(this.ticking||this.stopping)return;this.ticking=true;this.tick().catch(e=>{
-      if(!this.busy&&this.phase==='IDLE'&&!this.state?.batch){
-        this.stop().catch(stopError=>console.error(stopError.message));
-      } else this.fail(e);
+      this.fail(e);
     }).finally(()=>this.ticking=false);},Number(this.o.poll||2000));
     process.once('SIGINT',()=>this.stop());process.once('SIGTERM',()=>this.stop());
   }
