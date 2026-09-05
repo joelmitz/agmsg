@@ -22,7 +22,12 @@ esac
 [ "$(actas_lock_owner "$team" "$role")" = "$owner" ] || { echo '所有権不一致' >&2; exit 1; }
 agmsg_storage_load
 case "$command" in
- peek) storage_list_unread "$team" "$role" --limit 20 ;;
+ peek)
+   if [ -n "${AGMSG_TEST_PEEK_BARRIER:-}" ]; then
+     : > "$AGMSG_TEST_PEEK_BARRIER.reached"
+     while [ ! -e "$AGMSG_TEST_PEEK_BARRIER.release" ]; do sleep 0.02; done
+   fi
+   storage_list_unread "$team" "$role" --limit 20 ;;
  ack)
    IFS= read -r _AGMSG_BRIDGE_ACK_CAP <&3
    exec 3<&-

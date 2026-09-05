@@ -11,14 +11,14 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // 並列時は各fixtureが複数のbash/node子プロセスを生成するため、15秒では
 // 正常なNEEDS_ATTENTION到達をtimeoutと誤判定しうる。上限を60秒にする。
 async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('待機timeout');}
-function fixture(driver='sqlite',mode='success') {
+function fixture(driver='sqlite',mode='success',extra={}) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-test-'));
   const install=path.join(dir,'install'),project=path.join(dir,'project');
   fs.mkdirSync(install);fs.mkdirSync(project);
   fs.cpSync(path.join(repo,'scripts'),path.join(install,'scripts'),{recursive:true});
   fs.copyFileSync(path.join(repo,'tests/fixtures/fake-antigravity.mjs'),path.join(dir,'fake.mjs'));
   const fake=path.join(dir,'agy');fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
-  const env={...process.env,AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install};
+  const env={...process.env,AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra};
   const sh=(name,args=[])=>{const r=spawnSync('bash',[path.join(install,'scripts',name),...args],{env,encoding:'utf8'});assert.equal(r.status,0,r.stderr+r.stdout);return r.stdout;};
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
@@ -97,6 +97,22 @@ test('二重起動を拒否する',async()=>{
     const second=spawnSync('bash',[path.join(f.install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',f.project,'--team','fixture','--name','worker','--agy',path.join(f.dir,'agy'),'--poll','100'],{env:f.env,encoding:'utf8'});
     assert.notEqual(second.status,0);
   } finally { await f.close(); }
+});
+
+test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する',async()=>{
+  const barrier=path.join(os.tmpdir(),`agmsg-peek-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_BARRIER:barrier});
+  try {
+    await waitFor(()=>f.output().includes('ready')&&fs.existsSync(`${barrier}.reached`));
+    f.child.kill('SIGTERM');
+    fs.writeFileSync(`${barrier}.release`,'');
+    await waitFor(()=>f.child.exitCode!==null);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    assert.match(f.output(),/停止/);
+    assert.equal(f.state().batch,null);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('antigravity-reservation.')&&name.endsWith('.json')),false);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
+  } finally { fs.rmSync(`${barrier}.release`,{force:true}); fs.rmSync(`${barrier}.reached`,{force:true}); await f.close(); }
 });
 
 test('completed batchの明示ack復旧はモデルを再実行しない',async()=>{

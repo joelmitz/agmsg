@@ -147,6 +147,9 @@ export class Bridge {
     await this.input(JSON.stringify(this.state.batch));
   }
   fail(error) {
+    // SIGINT/SIGTERM後のin-flight peek終了は正常停止の一部であり、
+    // NEEDS_ATTENTIONへ上書きして予約解放を競合させない。
+    if(this.stopping)return;
     if(this.failed)return;this.failed=true;this.phase='NEEDS_ATTENTION';
     if(this.state?.batch&&this.state.batch.phase!=='completed'){this.state.batch.phase='uncertain';try{this.save();}catch{}}
     this.log(error.message);this.stop().catch(e=>console.error(e.message));
