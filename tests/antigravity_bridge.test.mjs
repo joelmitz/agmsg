@@ -117,13 +117,12 @@ test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する
 
 test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',async()=>{
   const failure=path.join(os.tmpdir(),`agmsg-peek-failure-${process.pid}-${Date.now()}`);
-  const f=fixture();
+  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_FAILURE:failure});
   try {
     await waitFor(()=>f.output().includes('ready'));
-    const failedPeek=spawnSync('bash',[path.join(f.install,'scripts/drivers/types/antigravity/inbox-transport.sh'),'peek',f.project,'fixture','worker',f.state().owner],{env:{...f.env,AGMSG_TEST_PEEK_FAILURE:failure},encoding:'utf8'});
-    assert.equal(failedPeek.status,42,failedPeek.stderr);
+    await waitFor(()=>fs.existsSync(`${failure}.reached`));
     assert.equal(fs.existsSync(`${failure}.reached`),true);
-    f.child.kill('SIGTERM');
+    try { process.kill(-f.child.pid,'SIGTERM'); } catch {}
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
     assert.match(f.output(),/停止/);

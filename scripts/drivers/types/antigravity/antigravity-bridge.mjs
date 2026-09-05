@@ -168,16 +168,22 @@ export class Bridge {
       }
     }
     if(this.state?.batch){this.log('batch保持。status/resolveが必要');process.exitCode=1;return;}
-    this.call('verify');
-    if(read(this.reservation).owner===this.owner)fs.unlinkSync(this.reservation);
-    this.call('release');this.phase='STOPPED';this.log('停止');
+    // process group signal may kill a transport child while verify/release is
+    // running.  Revalidate the durable owner record locally, then remove only
+    // our own reservation and matching actas lock.
+    const reservation=read(this.reservation);
+    if(reservation.owner!==this.owner||reservation.start!==this.start)throw Error('予約所有権不一致');
+    if(fs.readFileSync(this.actas,'utf8').trim()!==this.owner)throw Error('actas所有権不一致');
+    fs.unlinkSync(this.reservation);
+    fs.unlinkSync(this.actas);
+    this.phase='STOPPED';this.log('停止');
   }
   async run(){
     if(!await this.acquire()){await this.stop();return;}
     await this.launch();
     this.timer=setInterval(()=>{if(this.ticking||this.stopping)return;this.ticking=true;this.tick().catch(e=>{
       if(!this.busy&&this.phase==='IDLE'&&!this.state?.batch){
-        this.stopping=true;this.stop().catch(stopError=>console.error(stopError.message));
+        this.stop().catch(stopError=>console.error(stopError.message));
       } else this.fail(e);
     }).finally(()=>this.ticking=false);},Number(this.o.poll||2000));
     process.once('SIGINT',()=>this.stop());process.once('SIGTERM',()=>this.stop());
