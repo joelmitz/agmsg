@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Linux-only PTY owner for one Antigravity TUI and one agmsg role."""
-import argparse, hashlib, json, os, pty, re, select, signal, subprocess, sys, termios, time, tty, uuid
+import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -18,6 +18,111 @@ def atomic(path, value):
 def proc_start(pid):
     return Path(f'/proc/{pid}/stat').read_text().split(') ',1)[1].split()[19]
 
+class TerminalScreen:
+    """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
+    def __init__(self, rows, cols):
+        self.rows=max(1,rows); self.cols=max(1,cols); self.cells=[[' ']*self.cols for _ in range(self.rows)]
+        self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False
+    def resize(self, rows, cols):
+        rows=max(1,rows); cols=max(1,cols); new=[[' ']*cols for _ in range(rows)]
+        for r in range(min(rows,self.rows)):
+            for c in range(min(cols,self.cols)): new[r][c]=self.cells[r][c]
+        self.rows=rows; self.cols=cols; self.cells=new; self.row=min(self.row,rows-1); self.col=min(self.col,cols-1)
+    def clear(self):
+        self.cells=[[' ']*self.cols for _ in range(self.rows)]; self.row=0; self.col=0
+    def _scroll(self):
+        while self.row>=self.rows: self.cells.pop(0); self.cells.append([' ']*self.cols); self.row-=1
+    def _linefeed(self): self.row+=1; self._scroll()
+    def _write(self, ch):
+        width=0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ('W','F') else 1
+        if width==0:
+            if self.col: self.cells[self.row][self.col-1]+=ch
+            return
+        if self.col+width>self.cols: self.col=0; self._linefeed()
+        self.cells[self.row][self.col]=ch
+        if width==2 and self.col+1<self.cols:self.cells[self.row][self.col+1]=''
+        self.col+=width
+        if self.col>=self.cols:self.col=self.cols
+    @staticmethod
+    def _params(body):
+        body=body.lstrip('?><=!')
+        body=re.sub(r'[ -/]', '', body)
+        return [int(x) if x.isdigit() else 0 for x in body.split(';')] if body else [0]
+    def _csi(self, sequence):
+        final=sequence[-1]; body=sequence[:-1]; p=self._params(body); n=p[0] or 1
+        if final=='A': self.row=max(0,self.row-n)
+        elif final=='B': self.row=min(self.rows-1,self.row+n)
+        elif final=='C': self.col=min(self.cols,self.col+n)
+        elif final=='D': self.col=max(0,self.col-n)
+        elif final=='E': self.row=min(self.rows-1,self.row+n); self.col=0
+        elif final=='F': self.row=max(0,self.row-n); self.col=0
+        elif final=='G': self.col=min(self.cols-1,n-1)
+        elif final in ('H','f'):
+            self.row=min(self.rows-1,max(0,(p[0] or 1)-1)); self.col=min(self.cols-1,max(0,(p[1] if len(p)>1 else 1)-1))
+        elif final=='d': self.row=min(self.rows-1,max(0,n-1))
+        elif final=='J':
+            if p[0] in (2,3): self.clear()
+            elif p[0]==0:
+                self.cells[self.row][self.col:]=[' ']*(self.cols-self.col)
+                for r in range(self.row+1,self.rows):self.cells[r]=[' ']*self.cols
+            elif p[0]==1:
+                for r in range(self.row):self.cells[r]=[' ']*self.cols
+                self.cells[self.row][:self.col+1]=[' ']*(self.col+1)
+        elif final=='K':
+            if p[0]==0:self.cells[self.row][self.col:]=[' ']*(self.cols-self.col)
+            elif p[0]==1:self.cells[self.row][:self.col+1]=[' ']*(self.col+1)
+            elif p[0]==2:self.cells[self.row]=[' ']*self.cols
+        elif final=='X': self.cells[self.row][self.col:min(self.cols,self.col+n)]=[' ']*min(n,self.cols-self.col)
+        elif final=='P':
+            end=min(self.cols,self.col+n); self.cells[self.row][self.col:]=self.cells[self.row][end:]+[' ']*(end-self.col)
+        elif final=='@': self.cells[self.row][self.col:]=([' ']*n+self.cells[self.row][self.col:])[:self.cols-self.col]
+        elif final=='s': self.saved=(self.row,self.col)
+        elif final=='u' and not body.startswith(('?','>','=')): self.row,self.col=self.saved
+        elif final in ('m','h','l','p','q','t','u','~'): pass
+        else:self.uncertain=True
+    def feed(self, data):
+        for ch in self.decoder.decode(data):
+            if self.state=='osc':
+                if ch=='\x07':self.state='normal'
+                elif ch=='\x1b':self.state='osc-esc'
+                continue
+            if self.state=='osc-esc':
+                self.state='normal' if ch=='\\' else 'osc'
+                continue
+            if self.state=='esc':
+                if ch=='[':self.state='csi';self.sequence=''
+                elif ch==']':self.state='osc'
+                elif ch in ('(',')','#'):self.state='esc-one'
+                elif ch=='7':self.saved=(self.row,self.col);self.state='normal'
+                elif ch=='8':self.row,self.col=self.saved;self.state='normal'
+                elif ch=='D':self._linefeed();self.state='normal'
+                elif ch=='E':self._linefeed();self.col=0;self.state='normal'
+                elif ch=='M':self.row=max(0,self.row-1);self.state='normal'
+                elif ch=='c':self.clear();self.state='normal'
+                elif ch in ('=','>'):self.state='normal'
+                else:self.uncertain=True;self.state='normal'
+                continue
+            if self.state=='esc-one':
+                self.state='normal'
+                continue
+            if self.state=='csi':
+                self.sequence+=ch
+                if '@'<=ch<='~':self._csi(self.sequence);self.state='normal';self.sequence=''
+                continue
+            if ch=='\x1b':self.state='esc'
+            elif ch=='\r':self.col=0
+            elif ch=='\n':self._linefeed()
+            elif ch=='\b':self.col=max(0,self.col-1)
+            elif ch=='\t':self.col=min(self.cols,((self.col//8)+1)*8)
+            elif ch>=' ':self._write(ch)
+    def lines(self): return [''.join(line).rstrip() for line in self.cells]
+    def has_line(self, expected): return any(line.strip()==expected for line in self.lines())
+    def lines_after(self, expected):
+        lines=self.lines()
+        for index,line in enumerate(lines):
+            if line.strip()==expected:return '\n'.join(lines[index+1:])
+        return None
+
 class Supervisor:
     def __init__(self, args):
         self.a=args; self.project=str(Path(args.project).resolve()); self.owner=f'{uuid.uuid4()}.{os.getpid()}'
@@ -27,14 +132,29 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False; self.resize_requested=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
+        signal.signal(signal.SIGWINCH, self.request_resize)
     def request_stop(self, signum, _frame):
         self.stop_reason=f'外部停止要求({signal.Signals(signum).name})'
     def request_resume(self, _signum, _frame):
         self.resume_requested=True
+    def request_resize(self, _signum, _frame):
+        self.resize_requested=True
+    @staticmethod
+    def read_winsize(fd):
+        return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+    def sync_winsize(self):
+        if self.master is None:return
+        winsize=self.read_winsize(sys.stdin.fileno())
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, winsize)
+        if getattr(self,'screen',None):
+            rows,cols,_,_=struct.unpack('HHHH',winsize);self.screen.resize(rows,cols)
+        try:
+            if self.child and proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGWINCH)
+        except (FileNotFoundError,ProcessLookupError): pass
     def call(self, command, extra=(), input=None, cap=False):
         fds=()
         passfds=()
@@ -84,24 +204,29 @@ class Supervisor:
         # bridge-read-guard は fd 3 から改行を除いた値をハッシュする。
         atomic(self.reservation,{'owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
     def launch(self):
+        winsize=self.read_winsize(sys.stdin.fileno())
         pid, master=pty.fork()
         if pid==0:
+            fcntl.ioctl(0,termios.TIOCSWINSZ,winsize)
             attrs=termios.tcgetattr(0); attrs[3]&=~(termios.ECHO|termios.ECHONL); termios.tcsetattr(0,termios.TCSANOW,attrs)
             os.chdir(self.project); os.execvp(self.a.agy,[self.a.agy])
-        self.child=pid; self.master=master; self.old=termios.tcgetattr(sys.stdin.fileno()); tty.setraw(sys.stdin.fileno())
+        rows,cols,_,_=struct.unpack('HHHH',winsize)
+        self.child=pid; self.master=master; self.screen=TerminalScreen(rows,cols); self.old=termios.tcgetattr(sys.stdin.fileno()); tty.setraw(sys.stdin.fileno())
         self.state.update({'childPid':pid,'childStart':proc_start(pid),'supervisorPhase':'WAITING_FOR_IDLE'}); self.save()
+        self.sync_winsize()
     def envelope(self, batch):
         out=[f'[agmsg batch id={batch["id"]} count={len(batch["messages"])}]']
         for m in batch['messages']:
             body=m['body'].replace('\x1b','\\x1b')
             out += [f'[agmsg message id={m["id"]}]',f'from: {m["from"]}',f'at: {m["at"]}','body:',body,'[/agmsg message]']
-        out += ['[/agmsg batch]','この受信を読んだら、AGMSG_RECEIVED と batch id を使った定型の受領確認行を最初に1行だけ出力し、その後に通常どおり処理してください。']
+        out += ['[/agmsg batch]','この受信を読んだら、英字 AGMSG_RECEIVED、ASCIIコロン（U+003A）、batch idを空白なしで連結した1行だけを最初に出力し、その後に通常どおり処理してください。形式を調べるためのツール実行は不要です。']
         return '\n'.join(out)
     def inject(self):
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         self.result_buffer=''
+        if getattr(self,'screen',None):self.screen.uncertain=False
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def exact_line(text, expected):
@@ -143,6 +268,8 @@ class Supervisor:
         if self.idle_ready and not self.human_input_seen: self.inject()
     def loop(self):
         while not self.stopping:
+            if self.resize_requested:
+                self.resize_requested=False; self.sync_winsize()
             if self.resume_requested:
                 self.resume_requested=False
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中のresume要求を拒否'); continue
@@ -161,15 +288,16 @@ class Supervisor:
             if self.master in r:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
-                os.write(sys.stdout.fileno(),data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
-                if self.exact_line(text,'? for shortcuts') and not self.state.get('batch'):
+                os.write(sys.stdout.fileno(),data); self.screen.feed(data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
+                if self.screen.has_line('? for shortcuts') and not self.state.get('batch'):
                     self.idle_ready=True
                 b=self.state.get('batch')
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
-                    receipt_tail=self.after_exact_line(self.result_buffer,b.get('receipt'))
+                    receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
-                        if self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
+                        if self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
+                        elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
                 elif b and self.state.get('supervisorPhase')=='PREPARED' and self.idle_ready and not self.human_input_seen:
                     self.inject()

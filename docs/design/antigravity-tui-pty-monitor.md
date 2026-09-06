@@ -1,6 +1,6 @@
 # Antigravity TUI PTY monitor 設計
 
-状態: 安全側へ設計変更。入力欄と画面描画を完全には証明できないため、曖昧な場合は自動注入・自動ackを行わない。設計再レビューとpushは未実施。
+状態: 実装・隔離実機試験済み。軽量画面モデル、端末サイズ同期、receipt構成規則の変更は再レビュー前で、pushは未実施。
 作成者: luna。作成日: 2026-09-06（JST）。
 
 ## 1. 結論と根拠
@@ -40,7 +40,7 @@ agmsg unread snapshot ──┘          │
                                     └─ inbox-transport peek / ack
 ```
 
-PTY backend には Python 3 の標準ライブラリ `pty` と `termios` を採用する。agmsg には既存の Python 3 事前検査があり、追加パッケージや native build を導入しない。stdout を pipe にする実装は TUI の端末制御列、サイズ通知、貼り付けモードを失うため採用しない。supervisor は child の stdin/stdout を直接所有し、親 terminal の raw input を relay する。
+PTY backend には Python 3 の標準ライブラリ `pty` と `termios` を採用する。agmsg には既存の Python 3 事前検査があり、追加パッケージや native build を導入しない。stdout を pipe にする実装は TUI の端末制御列、サイズ通知、貼り付けモードを失うため採用しない。supervisor は child の stdin/stdout を直接所有し、親 terminal の raw input を relay する。起動前に親 terminal の `TIOCGWINSZ` を child PTY へ `TIOCSWINSZ` で設定し、親の `SIGWINCH` ごとに同じ同期と child への通知を行う。PTY は入れ子間で端末サイズを自動継承しないため、この同期を起動条件とする。
 
 `antigravity-tui-monitor.sh` は引数検証と Linux/TTY 検証だけを行い、supervisor を `exec` する。supervisor は `actas_lock_claim` と既存の bridge reservation を利用し、同じ role を headless bridge、turn rule、別 supervisor が同時に既読化できないようにする。reservation は既存 ack 認可に必要な `owner`、`pid`、`start`、`state`、`actas`、`violations`、`capHash` をすべて持つ。ack transport は supervisor の直接の子として起動し、capability を fd 3 だけで渡す。これにより `parent.ppid===reservation.pid`、PID/start token、capHash、batch ID 集合の既存検査を満たす。capability は agy child や人間入力を読む relay へ継承しない。
 
@@ -109,7 +109,7 @@ body:
 
 batch 内の `messages[]` は envelope の message block と ID で一対一に対応する。envelope の count、各 ID、順序、本文ハッシュを prepared state と照合し、一件でも不一致なら注入しない。
 
-PTY への書込成功は受領確認に使わない。注入後、supervisor は receipt を ANSI除去後の完全な一行として累積出力から照合する。envelope由来の描画、折り返し、再描画、チャンク境界を receipt と区別できない場合は `NEEDS_ATTENTION` にして自動ackしない。注入後に human input、error、cancel、interrupt、permission、picker のいずれも観測していない場合だけ `batch.phase='completed'` として ack する。画面描画がバージョンで変わり signature が不確かな場合、または terminal resize/escape sequence により表示解析を失った場合は `NEEDS_ATTENTION` にして ack しない。
+PTY への書込成功は受領確認に使わない。注入後、supervisor は receipt を ANSI除去後の完全な一行として累積出力から照合する。receiptのリテラルはenvelopeへ含めず、英字 `AGMSG_RECEIVED`、ASCIIコロン（U+003A）、batch idを空白なしで連結する構成規則だけを指示する。これによりenvelope由来の描画、折り返し、再描画からreceipt行が合成されないようにする。注入後にhuman inputを観測した場合は`NEEDS_ATTENTION`にして自動ackしない。error、cancel、interrupt、permission、pickerはreceipt行以後に同一出力として観測できた場合だけ補助的に検査し、receiptが無ければackしない。画面描画がバージョンで変わりreceiptを完全な一行として確認できない場合はackしない。
 
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 
@@ -138,8 +138,7 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 | ファイル | 役割 |
 |---|---|
 | `scripts/drivers/types/antigravity/antigravity-tui-monitor.sh` | 明示起動、TTY/Linux 検証、supervisor exec |
-| `scripts/drivers/types/antigravity/antigravity-tui-supervisor.py` | Python標準ライブラリのPTY、画面状態、入力仲介、batch state、停止 |
-| `scripts/drivers/types/antigravity/antigravity-tui-signatures.mjs` | version 固定の画面 parser と fixture contract |
+| `scripts/drivers/types/antigravity/antigravity-tui-supervisor.py` | Python標準ライブラリのPTY、`TerminalScreen`によるversion固定の画面parser、入力仲介、batch state、停止 |
 | `scripts/drivers/types/antigravity/inbox-transport.sh` | capability・reservation 対応済みの `peek`/`ack` を無変更で再利用するか、TUI専用 status を最小追加するかを確認 |
 | `scripts/drivers/types/antigravity/_delivery.sh` | monitor 起動案内と、active TUI を検知した turn/off 変更の拒否 |
 | `scripts/drivers/types/antigravity/antigravity-mode.mjs` | headless と TUI PTY の runtime/status を区別し、mode変更前に active TUI を報告 |
@@ -151,7 +150,7 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 ## 10. 検証計画
 
 1. 偽 PTY で、idle signature が完全一致するときだけ bracketed paste と一度の Enter が出ること。
-2. 入力途中、生成中、permission、trust、picker、未知画面、resize 後では注入せず batch を保持すること。
+2. 入力途中、生成中、permission、trust、picker、未知画面では注入せず batch を保持すること。resize 後は親 terminal と child PTY のサイズ一致を確認してからidle判定を再開すること。
 3. injected 後の任意の human input、error、cancel、interrupt、completion signature欠落では `uncertain` となり、自動 ack・自動 replay をしないこと。
 4. `peek → batch.phase=prepared → sent → completed → ack` の順序、supervisorPhaseとの分離、ack が保存済み ID だけに限られること。
 5. 最大20件の batch envelope が全 message ID、本文、送信元、時刻を一対一に表し、ID/hash/count不一致を拒否すること。
@@ -161,11 +160,13 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 9. 実機では使い捨て project・別 role・限定本文で、idle 受信、文脈保持、relay中の人間入力、入力途中保留、permission 保留、stop/restart、送信元への返信まで確認すること。
 10. 実機の表示を screenshot と raw PTY transcript の両方で保存し、child PID/start token、conversation ID、terminal attach状態、現在 TUI に届いたことを人間が確認すること。
 
-実装着手前に、この設計を独立レビューへ提出する。実装後は fake PTY のテスト、隔離 store の end-to-end、実機 TUI の限定試験、レビュー PASS を順に通し、commit/push の可否はその結果を見て判断する。
+2026-09-06の隔離実機試験では、使い捨てproject `/tmp/agmsg-agy-screen-e2e-np6JfK/project`、隔離SQLite、`agy 1.1.27`を使用した。batch `46e6cd17-ccca-4dae-8a91-da567d993adc`について、trust後の明示resume、注入、差分描画されたreceiptの画面復元、ack、停止後の`No new messages.`を確認した。agy child PIDは`3867910`、start tokenは`3820534`、stdinは`/dev/pts/6`で、raw transcriptは`/tmp/agmsg-agy-screen-e2e-np6JfK/raw-pty.transcript`へ保存した。保存済みtranscriptを67 byte単位で再生してもreceipt行を復元し、注入後の未知制御列が無いことを確認した。conversation IDとscreenshotはTUI出力から取得できず、この試験の未取得項目として残す。
+
+設計変更と実装は同じcommitへ記録し、fake PTYのテスト、隔離storeのend-to-end、実機TUIの限定試験を通した後、そのcommitを独立レビューへ提出する。pushの可否はレビュー結果を見て判断する。
 
 ## 11. 未解決事項
 
-- `agy 1.1.27` の安定した idle/permission transcript をどの形式で fixture 化するか。
+- `agy 1.1.27` のpermission・picker transcriptをどの形式で匿名化してfixture化するか。
 - terminal emulator ごとの差、IME、tmux/SSH、alternate screen の観測範囲。
 - user が既存 `agy` を直接起動した場合に、monitor wrapper の再起動へどこまで案内するか。
 

@@ -36,6 +36,7 @@ assert text.index('id=m-1') < text.index('id=m-2')
 assert text.count('[/agmsg message]') == 2
 assert '\\\\x1b' in text
 assert 'AGMSG_RECEIVED:batch-1' not in text
+assert 'ASCIIコロン（U+003A）、batch idを空白なしで連結' in text
 `);
 });
 
@@ -74,6 +75,51 @@ expected = 'AGMSG_RECEIVED:batch-3'
 assert not module.Supervisor.exact_line('AGMSG_REC', expected)
 assert module.Supervisor.exact_line('AGMSG_REC' + 'EIVED:batch-3\\n', expected)
 assert module.Supervisor.after_exact_line('envelope error: text\\n' + expected + '\\n? for shortcuts\\n', expected) == '? for shortcuts'
+`);
+});
+
+test('実agy型の差分描画からreceipt行を復元し未知制御は不確実とする', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+screen = module.TerminalScreen(40, 120)
+target = 'AGMSG_RECEIVED:batch-4'
+screen.feed(b'\\x1b[10;3HAGMSG_RECEIV')
+screen.feed(b'\\x1b[10;15HED:batch-4\\r\\n')
+assert screen.has_line(target)
+assert screen.lines_after(target) is not None
+assert not screen.uncertain
+screen.feed(b'\\x1b[1z')
+assert screen.uncertain
+`);
+});
+
+test('親terminalのwinsizeをagy PTYへ同期する', () => {
+  runPython(`
+import fcntl
+import importlib.util
+import os
+import struct
+import termios
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+outer_master, outer_slave = os.openpty()
+inner_master, inner_slave = os.openpty()
+expected = struct.pack('HHHH', 41, 121, 0, 0)
+fcntl.ioctl(outer_slave, termios.TIOCSWINSZ, expected)
+s = module.Supervisor.__new__(module.Supervisor)
+s.master = inner_master
+s.child = None
+s.state = {}
+original_stdin = module.sys.stdin
+s.read_winsize = lambda _fd: fcntl.ioctl(outer_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+s.sync_winsize()
+actual = fcntl.ioctl(inner_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+assert actual == expected
+for fd in (outer_master, outer_slave, inner_master, inner_slave): os.close(fd)
 `);
 });
 
@@ -130,7 +176,7 @@ process.stdin.on('data', chunk => {
   run('delivery.sh', ['set', 'monitor', 'antigravity', project]);
 
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-  const command = [
+  const command = 'stty rows 40 cols 120; exec ' + [
     'bash', quote(path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-monitor.sh')),
     '--project', quote(project), '--team', 'fixture', '--name', 'worker', '--agy', quote(fake), '--poll', '0.05',
   ].join(' ');
