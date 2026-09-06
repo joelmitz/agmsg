@@ -65,16 +65,19 @@ os.close(r); os.close(w)
 `);
 });
 
-test('receiptはread chunk境界をまたいでも累積判定できる', () => {
+test('receiptはread chunk境界をまたいでも画面上の完全行として判定できる', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 expected = 'AGMSG_RECEIVED:batch-3'
-assert not module.Supervisor.exact_line('AGMSG_REC', expected)
-assert module.Supervisor.exact_line('AGMSG_REC' + 'EIVED:batch-3\\n', expected)
-assert module.Supervisor.after_exact_line('envelope error: text\\n' + expected + '\\n? for shortcuts\\n', expected) == '? for shortcuts'
+screen = module.TerminalScreen(4, 80)
+screen.feed(b'AGMSG_REC')
+assert not screen.has_line(expected)
+screen.feed(b'EIVED:batch-3\\r\\n? for shortcuts')
+assert screen.has_line(expected)
+assert screen.lines_after(expected).splitlines()[0] == '? for shortcuts'
 `);
 });
 
@@ -92,6 +95,41 @@ assert screen.has_line(target)
 assert screen.lines_after(target) is not None
 assert not screen.uncertain
 screen.feed(b'\\x1b[1z')
+assert screen.uncertain
+screen = module.TerminalScreen(40, 120)
+screen.feed(b'\\x1b[?1049h')
+assert screen.uncertain
+`);
+});
+
+test('全角セルの片側上書きや編集で偽receiptを合成しない', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+target = 'AGMSG_RECEIVED:batch-wide'
+for column in (15, 16):
+    screen = module.TerminalScreen(3, 80)
+    screen.feed('AGMSG_RECEIVED、batch-wide'.encode())
+    screen.feed(f'\\x1b[1;{column}H:'.encode())
+    assert not screen.has_line(target), screen.lines()
+    assert not any(cell == '' and (index == 0 or not screen._wide_lead(screen.cells[0][index - 1])) for index, cell in enumerate(screen.cells[0]))
+`);
+});
+
+test('受信turn中のresizeは画面判定を不確実にする', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+target = 'AGMSG_RECEIVED:batch-resize'
+screen = module.TerminalScreen(2, 80)
+screen.feed((target + ' suffix').encode())
+assert not screen.has_line(target)
+assert screen.resize(2, len(target))
+assert screen.has_line(target)
 assert screen.uncertain
 `);
 });
@@ -113,12 +151,22 @@ fcntl.ioctl(outer_slave, termios.TIOCSWINSZ, expected)
 s = module.Supervisor.__new__(module.Supervisor)
 s.master = inner_master
 s.child = None
-s.state = {}
-original_stdin = module.sys.stdin
+s.state = {'supervisorPhase': 'WAITING_FOR_RESULT'}
+s.screen = module.TerminalScreen(40, 120)
+s.idle_ready = True
 s.read_winsize = lambda _fd: fcntl.ioctl(outer_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
 s.sync_winsize()
 actual = fcntl.ioctl(inner_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
 assert actual == expected
+assert (s.screen.rows, s.screen.cols) == (41, 121)
+assert s.screen.uncertain
+s.state = {'supervisorPhase': 'WAITING_FOR_IDLE'}
+s.idle_ready = True
+fcntl.ioctl(outer_slave, termios.TIOCSWINSZ, struct.pack('HHHH', 42, 122, 0, 0))
+s.sync_winsize()
+assert (s.screen.rows, s.screen.cols) == (42, 122)
+assert not s.screen.uncertain
+assert not s.idle_ready
 for fd in (outer_master, outer_slave, inner_master, inner_slave): os.close(fd)
 `);
 });

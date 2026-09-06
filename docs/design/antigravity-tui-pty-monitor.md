@@ -78,7 +78,7 @@ PTY の bytes だけでは「入力欄が空」「モデルが idle」「承認�
 5. permission、trust、選択 UI、slash-command picker、生成中、エラー、alt-screen 切替中の signature がない。
 6. supervisor が前回注入した batch を持たない。
 
-条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。初期実装は入力欄の実内容を完全に復元するスクリーンモデルを持たないため、人間入力を一 byteでも観測した後は `manualResumeRequired=true` として自動注入を停止する。利用者が入力欄を空にしたことを目視確認した後、明示的な `antigravity-tui-monitor.sh resume` を実行した場合だけ再評価する。終了時に prepared batch があれば `uncertain` として停止する。
+条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。軽量画面モデルはreceipt行とidle footerの復元に限定し、入力欄の実内容が空であることまでは証明しない。そのため人間入力を一 byteでも観測した後は `manualResumeRequired=true` として自動注入を停止する。利用者が入力欄を空にしたことを目視確認した後、明示的な `antigravity-tui-monitor.sh resume` を実行した場合だけ再評価する。終了時に prepared batch があれば `uncertain` として停止する。
 
 screen parser の完了 marker は ack の十分条件ではない。injected batch ごとに、対応バージョンの正常完了 transcript を replay して確認済みの positive completion signature、注入した envelope の echo、エラー・cancel・interrupt signature の不在が同時に必要である。どれかを判別できないバージョンでは自動 ack を有効にせず `NEEDS_ATTENTION` にする。
 
@@ -109,7 +109,11 @@ body:
 
 batch 内の `messages[]` は envelope の message block と ID で一対一に対応する。envelope の count、各 ID、順序、本文ハッシュを prepared state と照合し、一件でも不一致なら注入しない。
 
-PTY への書込成功は受領確認に使わない。注入後、supervisor は receipt を ANSI除去後の完全な一行として累積出力から照合する。receiptのリテラルはenvelopeへ含めず、英字 `AGMSG_RECEIVED`、ASCIIコロン（U+003A）、batch idを空白なしで連結する構成規則だけを指示する。これによりenvelope由来の描画、折り返し、再描画からreceipt行が合成されないようにする。注入後にhuman inputを観測した場合は`NEEDS_ATTENTION`にして自動ackしない。error、cancel、interrupt、permission、pickerはreceipt行以後に同一出力として観測できた場合だけ補助的に検査し、receiptが無ければackしない。画面描画がバージョンで変わりreceiptを完全な一行として確認できない場合はackしない。
+PTY への書込成功は受領確認に使わない。注入後、supervisor は agy が出力した端末制御列を軽量画面モデルへ適用し、画面上の完全な一行として receipt を照合する。receiptのリテラルはenvelopeへ含めず、英字 `AGMSG_RECEIVED`、ASCIIコロン（U+003A）、batch idを空白なしで連結する構成規則だけを指示する。これはuuid4のbatch idを知る前の事前構成を防ぐが、画面セル上での合成不可能性までは保証しない。
+
+安全境界は、画面モデルへ入力される端末制御列を出力できる主体をagy childに限定することに置く。人間の入力byteはPTY masterへ転送するだけで画面モデルへ直接入力せず、外部メッセージ本文のESCは表示可能な文字列へ無害化する。agyのレンダラがenvelope上のglyphをreceiptへ意図的に再配置しないことを信頼する。この境界を崩す本文ESCの素通し、人間入力の`screen.feed()`、agy以外の出力の混入を禁止する。
+
+注入後にhuman inputを観測した場合は`NEEDS_ATTENTION`にして自動ackしない。error、cancel、interrupt、permission、pickerはreceipt行より画面上で後ろに残っている場合だけ補助的に検査し、上書き済み表示は検知できない。receiptが無ければackしない。受信turn中のresizeまたは未対応制御列は画面を`uncertain`にし、receiptが見えてもackしない。待機中のresizeは画面モデルとidle判定を初期化し、同期後に新しいidle描画を観測してから注入を再評価する。
 
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 
@@ -150,7 +154,7 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 ## 10. 検証計画
 
 1. 偽 PTY で、idle signature が完全一致するときだけ bracketed paste と一度の Enter が出ること。
-2. 入力途中、生成中、permission、trust、picker、未知画面では注入せず batch を保持すること。resize 後は親 terminal と child PTY のサイズ一致を確認してからidle判定を再開すること。
+2. 入力途中、生成中、permission、trust、picker、未知画面では注入せず batch を保持すること。待機中のresize後は画面モデルを初期化して親terminalとchild PTYのサイズ一致および新しいidle描画を確認してから注入を再開し、受信turn中のresizeではbatchを`uncertain`にしてackしないこと。
 3. injected 後の任意の human input、error、cancel、interrupt、completion signature欠落では `uncertain` となり、自動 ack・自動 replay をしないこと。
 4. `peek → batch.phase=prepared → sent → completed → ack` の順序、supervisorPhaseとの分離、ack が保存済み ID だけに限られること。
 5. 最大20件の batch envelope が全 message ID、本文、送信元、時刻を一対一に表し、ID/hash/count不一致を拒否すること。
@@ -168,6 +172,8 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 
 - `agy 1.1.27` のpermission・picker transcriptをどの形式で匿名化してfixture化するか。
 - terminal emulator ごとの差、IME、tmux/SSH、alternate screen の観測範囲。
+- alternate screen切替は`uncertain`として安全側に停止するため、receipt turnで恒常的に使われるバージョンではack不能になる。
+- 未対応のIL/DL、SU/SD、DECSTBM、DSR、DAをagyがreceipt turnで使うと安全側に停止し、ack不能になる可用性リスクがある。
 - user が既存 `agy` を直接起動した場合に、monitor wrapper の再起動へどこまで案内するか。
 
 これらは実装前レビューで決める。未解決のまま signature を緩めたり、既存 TUI への best-effort 注入を追加したりしない。

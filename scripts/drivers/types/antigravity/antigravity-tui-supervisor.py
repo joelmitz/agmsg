@@ -24,21 +24,51 @@ class TerminalScreen:
         self.rows=max(1,rows); self.cols=max(1,cols); self.cells=[[' ']*self.cols for _ in range(self.rows)]
         self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False
     def resize(self, rows, cols):
-        rows=max(1,rows); cols=max(1,cols); new=[[' ']*cols for _ in range(rows)]
+        rows=max(1,rows); cols=max(1,cols)
+        if (rows,cols)==(self.rows,self.cols): return False
+        new=[[' ']*cols for _ in range(rows)]
         for r in range(min(rows,self.rows)):
             for c in range(min(cols,self.cols)): new[r][c]=self.cells[r][c]
         self.rows=rows; self.cols=cols; self.cells=new; self.row=min(self.row,rows-1); self.col=min(self.col,cols-1)
+        for r in range(self.rows): self._normalize_row(r)
+        self.uncertain=True
+        return True
     def clear(self):
         self.cells=[[' ']*self.cols for _ in range(self.rows)]; self.row=0; self.col=0
     def _scroll(self):
         while self.row>=self.rows: self.cells.pop(0); self.cells.append([' ']*self.cols); self.row-=1
     def _linefeed(self): self.row+=1; self._scroll()
+    @staticmethod
+    def _wide_lead(cell):
+        return bool(cell) and unicodedata.east_asian_width(cell[0]) in ('W','F')
+    def _detach_cell(self, row, col):
+        if not (0<=col<self.cols): return
+        if self.cells[row][col]=='':
+            self.cells[row][col]=' '
+            if col and self._wide_lead(self.cells[row][col-1]): self.cells[row][col-1]=' '
+        elif self._wide_lead(self.cells[row][col]):
+            self.cells[row][col]=' '
+            if col+1<self.cols and self.cells[row][col+1]=='': self.cells[row][col+1]=' '
+    def _normalize_row(self, row):
+        for col in range(self.cols):
+            cell=self.cells[row][col]
+            if cell=='':
+                if not col or not self._wide_lead(self.cells[row][col-1]): self.cells[row][col]='�'
+            elif self._wide_lead(cell) and (col+1>=self.cols or self.cells[row][col+1]!=''):
+                self.cells[row][col]='�'
+    def _clear_range(self, row, start, end):
+        start=max(0,start); end=min(self.cols,end)
+        if start<end and self.cells[row][start]=='': start=max(0,start-1)
+        if start<end and end<self.cols and self.cells[row][end]=='': end+=1
+        self.cells[row][start:end]=[' ']*(end-start)
     def _write(self, ch):
         width=0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ('W','F') else 1
         if width==0:
             if self.col: self.cells[self.row][self.col-1]+=ch
             return
         if self.col+width>self.cols: self.col=0; self._linefeed()
+        self._detach_cell(self.row,self.col)
+        if width==2:self._detach_cell(self.row,self.col+1)
         self.cells[self.row][self.col]=ch
         if width==2 and self.col+1<self.cols:self.cells[self.row][self.col+1]=''
         self.col+=width
@@ -63,21 +93,25 @@ class TerminalScreen:
         elif final=='J':
             if p[0] in (2,3): self.clear()
             elif p[0]==0:
-                self.cells[self.row][self.col:]=[' ']*(self.cols-self.col)
+                self._clear_range(self.row,self.col,self.cols)
                 for r in range(self.row+1,self.rows):self.cells[r]=[' ']*self.cols
             elif p[0]==1:
                 for r in range(self.row):self.cells[r]=[' ']*self.cols
-                self.cells[self.row][:self.col+1]=[' ']*(self.col+1)
+                self._clear_range(self.row,0,self.col+1)
         elif final=='K':
-            if p[0]==0:self.cells[self.row][self.col:]=[' ']*(self.cols-self.col)
-            elif p[0]==1:self.cells[self.row][:self.col+1]=[' ']*(self.col+1)
+            if p[0]==0:self._clear_range(self.row,self.col,self.cols)
+            elif p[0]==1:self._clear_range(self.row,0,self.col+1)
             elif p[0]==2:self.cells[self.row]=[' ']*self.cols
-        elif final=='X': self.cells[self.row][self.col:min(self.cols,self.col+n)]=[' ']*min(n,self.cols-self.col)
+        elif final=='X': self._clear_range(self.row,self.col,min(self.cols,self.col+n))
         elif final=='P':
             end=min(self.cols,self.col+n); self.cells[self.row][self.col:]=self.cells[self.row][end:]+[' ']*(end-self.col)
-        elif final=='@': self.cells[self.row][self.col:]=([' ']*n+self.cells[self.row][self.col:])[:self.cols-self.col]
+            self._normalize_row(self.row)
+        elif final=='@':
+            self.cells[self.row][self.col:]=([' ']*n+self.cells[self.row][self.col:])[:self.cols-self.col]
+            self._normalize_row(self.row)
         elif final=='s': self.saved=(self.row,self.col)
         elif final=='u' and not body.startswith(('?','>','=')): self.row,self.col=self.saved
+        elif final in ('h','l') and body.startswith('?') and any(value in (47,1047,1049) for value in p): self.uncertain=True
         elif final in ('m','h','l','p','q','t','u','~'): pass
         else:self.uncertain=True
     def feed(self, data):
@@ -151,7 +185,10 @@ class Supervisor:
         winsize=self.read_winsize(sys.stdin.fileno())
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, winsize)
         if getattr(self,'screen',None):
-            rows,cols,_,_=struct.unpack('HHHH',winsize);self.screen.resize(rows,cols)
+            rows,cols,_,_=struct.unpack('HHHH',winsize)
+            if (rows,cols)!=(self.screen.rows,self.screen.cols):
+                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.screen.resize(rows,cols)
+                else: self.screen=TerminalScreen(rows,cols); self.idle_ready=False
         try:
             if self.child and proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGWINCH)
         except (FileNotFoundError,ProcessLookupError): pass
@@ -228,17 +265,6 @@ class Supervisor:
         self.result_buffer=''
         if getattr(self,'screen',None):self.screen.uncertain=False
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
-    @staticmethod
-    def exact_line(text, expected):
-        clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
-        return any(line.strip()==expected for line in clean.splitlines())
-    @staticmethod
-    def after_exact_line(text, expected):
-        clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
-        lines=clean.splitlines()
-        for index, line in enumerate(lines):
-            if line.strip()==expected: return '\n'.join(lines[index+1:])
-        return None
     @staticmethod
     def failure_signature(text):
         clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
