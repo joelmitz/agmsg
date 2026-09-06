@@ -227,6 +227,26 @@ install_windows_helpers() {
   fi
 }
 
+install_antigravity_tui_shim() {
+  local source target
+  source="$1"
+  target="$AGENTS_DIR/bin/agy-tui"
+  mkdir -p "$(dirname "$target")"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
+      cp "$source" "$target"
+      chmod +x "$target"
+      echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
+    else
+      echo "  ~ left existing ~/.agents/bin/agy-tui untouched"
+    fi
+    return 0
+  fi
+  cp "$source" "$target"
+  chmod +x "$target"
+  echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
+}
+
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -478,6 +498,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   chmod +x "$SKILL_DIR/scripts/"*.sh
   chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
+  install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
   # older install keeps its stale baked exec path after the
@@ -596,6 +617,7 @@ cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && chmod +x 
 cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
 chmod +x "$SKILL_DIR/scripts/"*.sh
 chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
+install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
 # older layout (no-op when no agmsg shim is present). See the --update block
 # above. NOT forced (#553): unlike --update, a fresh install here gives no
