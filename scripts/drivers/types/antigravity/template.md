@@ -80,6 +80,8 @@ Four possible outputs:
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
+AntigravityのTUI monitorを明示起動している場合は、以下の通常の既定動作を適用しないでください。bare `$__SKILL_NAME__`、`inbox.sh`、`check-inbox.sh` を実行せず、必要な状態確認は `bash ~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh status --project <project> --team <team> --name <role>`（tui-monitor status）で行ってください。本文の再表示や既読化は行いません。
+
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
 2. Do NOT ask the user what to do — just run the inbox check.

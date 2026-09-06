@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Linux-only PTY owner for one Antigravity TUI and one agmsg role."""
-import argparse, hashlib, json, os, pty, select, signal, subprocess, sys, termios, time, tty, uuid
+import argparse, hashlib, json, os, pty, re, select, signal, subprocess, sys, termios, time, tty, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -98,7 +98,11 @@ class Supervisor:
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}:{hashlib.sha256(",".join(m["id"] for m in b["messages"]).encode()).hexdigest()[:16]}'
-        self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
+        self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
+    @staticmethod
+    def exact_line(text, expected):
+        clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
+        return any(line.strip()==expected for line in clean.splitlines())
     def ack(self):
         self.check_guard()
         b=self.state['batch']; b['phase']='completed'; self.state['supervisorPhase']='ACK_PENDING'; self.save()
@@ -138,15 +142,19 @@ class Supervisor:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
                 os.write(sys.stdout.fileno(),data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
-                if '? for shortcuts' in text and not self.state.get('batch'): self.idle_ready=True
+                if self.exact_line(text,'? for shortcuts') and not self.state.get('batch'):
+                    self.idle_ready=True
+                    if self.human_input_seen and ('\x1b[2K' in text or '\x1b[K' in text): self.human_input_seen=False
                 b=self.state.get('batch')
-                if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and b.get('receipt') in self.buffer:
+                if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.exact_line(text,b.get('receipt')):
                     self.ack()
-                elif b and self.state.get('supervisorPhase')=='PREPARED' and '? for shortcuts' in self.buffer[-4096:]:
+                elif b and self.state.get('supervisorPhase')=='PREPARED' and self.idle_ready and not self.human_input_seen:
                     self.inject()
             self.maybe_poll()
     def run(self):
-        self.acquire(); self.launch(); self.loop()
+        self.acquire()
+        if (self.state.get('batch') or {}).get('phase')=='completed': self.ack()
+        self.launch(); self.loop()
     def close(self):
         if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
         if self.child:
@@ -211,7 +219,9 @@ def main():
             for _,reservation,state,live in matches:
                 batch=state.get('batch')
                 print(f"runtime: {state.get('role')} tui-pty {'busy' if batch else 'running' if live else '停止/要確認'}")
-                if batch: print(f"batch: {batch.get('id')} phase={batch.get('phase')} messages={len(batch.get('messages',[]))}")
+                if batch:
+                    print(f"batch: {batch.get('id')} phase={batch.get('phase')} messages={len(batch.get('messages',[]))}")
+                    for message in batch.get('messages',[]): print(f"message: id={message.get('id')} from={message.get('from')} at={message.get('at')}")
             return
         live=[x for x in matches if x[3]]
         if len(live)!=1: raise RuntimeError('停止対象のTUI supervisorが一意に特定できません')

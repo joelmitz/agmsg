@@ -86,7 +86,7 @@ process.stdin.on('data', chunk => {
   input += chunk.toString();
   const match = input.match(/\\[agmsg batch id=([^ ]+) receipt=([^ ]+)/);
   if (!match || !input.includes('[/agmsg batch]')) return;
-  if (input.includes('NO_RECEIPT')) { input = ''; return; }
+  if (input.includes('NO_RECEIPT')) { process.stdout.write(input + '\\n? for shortcuts\\n'); input = ''; return; }
   process.stdout.write('AGMSG_RECEIVED:' + match[1] + ':' + match[2] + '\\n? for shortcuts\\n');
   input = '';
 });
@@ -145,6 +145,8 @@ process.stdin.on('data', chunk => {
     await waitFor(() => child.exitCode !== null);
     assert.match(stop.stdout, /停止要求を送信しました/);
     assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
+    const rejected = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', 'wrong-id'], { env, encoding: 'utf8' });
+    assert.notEqual(rejected.status, 0);
     const recover = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id], { env, encoding: 'utf8' });
     assert.equal(recover.status, 0, recover.stderr);
     assert.match(recover.stdout, /復旧ackを完了しました/);
