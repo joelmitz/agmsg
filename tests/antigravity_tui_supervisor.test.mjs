@@ -73,6 +73,7 @@ spec.loader.exec_module(module)
 expected = 'AGMSG_RECEIVED:batch-3'
 assert not module.Supervisor.exact_line('AGMSG_REC', expected)
 assert module.Supervisor.exact_line('AGMSG_REC' + 'EIVED:batch-3\\n', expected)
+assert module.Supervisor.after_exact_line('envelope error: text\\n' + expected + '\\n? for shortcuts\\n', expected) == '? for shortcuts'
 `);
 });
 
@@ -107,10 +108,8 @@ process.stdin.on('data', chunk => {
   if (!input.includes('[/agmsg batch]')) return;
   if (input.includes('NO_RECEIPT')) { process.stdout.write(input + '\\n? for shortcuts\\n'); input = ''; return; }
   const receipt = 'AGMSG_RECEIVED:' + match[1];
-  if (input.includes('SPLIT_RECEIPT')) {
-    process.stdout.write(receipt.slice(0, 9));
-    process.stdout.write(receipt.slice(9) + '\\n? for shortcuts\\n');
-  } else process.stdout.write(receipt + '\\n? for shortcuts\\n');
+  if (input.includes('RENDER_THEN_RECEIPT')) process.stdout.write(input + '\\n' + receipt + '\\n? for shortcuts\\n');
+  else process.stdout.write(receipt + '\\n? for shortcuts\\n');
   input = '';
 });
 `);
@@ -159,6 +158,10 @@ process.stdin.on('data', chunk => {
     const resume = spawnSync('python3', [path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py'), '--action', 'resume', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(resume.status, 0, resume.stderr);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === false);
+    run('send.sh', ['fixture', 'sender', 'worker', 'RENDER_THEN_RECEIPT']);
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.messages?.some(message => message.body === 'RENDER_THEN_RECEIPT'));
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
+    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
     run('send.sh', ['fixture', 'sender', 'worker', 'NO_RECEIPT']);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
     await new Promise(resolve => setTimeout(resolve, 300));

@@ -27,7 +27,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False; self.render_seen=False
+        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -101,12 +101,19 @@ class Supervisor:
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
-        self.result_buffer=''; self.render_seen=False
+        self.result_buffer=''
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def exact_line(text, expected):
         clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
         return any(line.strip()==expected for line in clean.splitlines())
+    @staticmethod
+    def after_exact_line(text, expected):
+        clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
+        lines=clean.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip()==expected: return '\n'.join(lines[index+1:])
+        return None
     @staticmethod
     def failure_signature(text):
         clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
@@ -160,10 +167,9 @@ class Supervisor:
                 b=self.state.get('batch')
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
-                    if f'[agmsg batch id={b["id"]}' in text or '[/agmsg batch]' in text: self.render_seen=True
-                    if self.failure_signature(text): self.fail('TUI error/cancel/permission signatureを検知')
-                    elif self.exact_line(self.result_buffer,b.get('receipt')):
-                        if self.render_seen: self.fail('receiptがTUI描画由来か判別できないためackしません')
+                    receipt_tail=self.after_exact_line(self.result_buffer,b.get('receipt'))
+                    if receipt_tail is not None:
+                        if self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
                 elif b and self.state.get('supervisorPhase')=='PREPARED' and self.idle_ready and not self.human_input_seen:
                     self.inject()
