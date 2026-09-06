@@ -76,6 +76,7 @@ class Supervisor:
             if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
             self.state=saved
             self.state['owner']=self.owner
+            self.human_input_seen=bool(self.state.get('manualResumeRequired'))
         self.claim_reservation()
     def claim_reservation(self):
         self.call('claim'); self.state['owner']=self.owner; self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
@@ -90,23 +91,26 @@ class Supervisor:
         self.child=pid; self.master=master; self.old=termios.tcgetattr(sys.stdin.fileno()); tty.setraw(sys.stdin.fileno())
         self.state.update({'childPid':pid,'childStart':proc_start(pid),'supervisorPhase':'WAITING_FOR_IDLE'}); self.save()
     def envelope(self, batch):
-        digest=hashlib.sha256(','.join(m['id'] for m in batch['messages']).encode()).hexdigest()[:16]
-        out=[f'[agmsg batch id={batch["id"]} receipt={digest} count={len(batch["messages"])}]']
+        out=[f'[agmsg batch id={batch["id"]} count={len(batch["messages"])}]']
         for m in batch['messages']:
             body=m['body'].replace('\x1b','\\x1b')
             out += [f'[agmsg message id={m["id"]}]',f'from: {m["from"]}',f'at: {m["at"]}','body:',body,'[/agmsg message]']
-        out += ['[/agmsg batch]',f'この受信を読んだら、最初に AGMSG_RECEIVED:{batch["id"]}:{digest} だけを出力し、その後に通常どおり処理してください。']
+        out += ['[/agmsg batch]','この受信を読んだら、AGMSG_RECEIVED と batch id を使った定型の受領確認行を最初に1行だけ出力し、その後に通常どおり処理してください。']
         return '\n'.join(out)
     def inject(self):
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
-        b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}:{hashlib.sha256(",".join(m["id"] for m in b["messages"]).encode()).hexdigest()[:16]}'
+        b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         self.result_buffer=''; self.render_seen=False
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def exact_line(text, expected):
         clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
         return any(line.strip()==expected for line in clean.splitlines())
+    @staticmethod
+    def failure_signature(text):
+        clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
+        return any(re.match(r'^\s*(?:error|cancel(?:led)?|interrupt(?:ed)?|permission denied|trust required|picker)\s*[:：]', line, re.I) for line in clean.splitlines())
     def ack(self):
         self.check_guard()
         b=self.state['batch']; b['phase']='completed'; self.state['supervisorPhase']='ACK_PENDING'; self.save()
@@ -157,7 +161,7 @@ class Supervisor:
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
                     if f'[agmsg batch id={b["id"]}' in text or '[/agmsg batch]' in text: self.render_seen=True
-                    if re.search(r'(?i)\b(?:error|cancel(?:led)?|interrupt(?:ed)?|permission|trust|picker)\b', self.result_buffer): self.fail('TUI error/cancel/permission signatureを検知')
+                    if self.failure_signature(text): self.fail('TUI error/cancel/permission signatureを検知')
                     elif self.exact_line(self.result_buffer,b.get('receipt')):
                         if self.render_seen: self.fail('receiptがTUI描画由来か判別できないためackしません')
                         else: self.ack()
@@ -238,7 +242,9 @@ def main():
                     for message in batch.get('messages',[]): print(f"message: id={message.get('id')} from={message.get('from')} at={message.get('at')}")
             return
         live=[x for x in matches if x[3]]
-        if len(live)!=1: raise RuntimeError('停止対象のTUI supervisorが一意に特定できません')
+        if len(live)!=1:
+            print('停止/再開対象のTUI supervisorが一意に特定できません', file=sys.stderr)
+            sys.exit(1)
         _,reservation,_,_=live[0]
         if a.action=='resume':
             os.kill(int(reservation['pid']),signal.SIGUSR1)

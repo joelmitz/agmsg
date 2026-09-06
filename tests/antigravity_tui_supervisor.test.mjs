@@ -35,7 +35,7 @@ assert 'count=2' in text
 assert text.index('id=m-1') < text.index('id=m-2')
 assert text.count('[/agmsg message]') == 2
 assert '\\\\x1b' in text
-assert 'AGMSG_RECEIVED:batch-1:' in text
+assert 'AGMSG_RECEIVED:batch-1' not in text
 `);
 });
 
@@ -59,8 +59,20 @@ assert data.startswith(b'\\x1b[200~')
 assert data.endswith(b'\\x1b[201~\\r')
 assert s.state['batch']['phase'] == 'sent'
 assert s.state['supervisorPhase'] == 'WAITING_FOR_RESULT'
-assert s.state['batch']['receipt'].startswith('AGMSG_RECEIVED:batch-2:')
+assert s.state['batch']['receipt'] == 'AGMSG_RECEIVED:batch-2'
 os.close(r); os.close(w)
+`);
+});
+
+test('receiptはread chunk境界をまたいでも累積判定できる', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+expected = 'AGMSG_RECEIVED:batch-3'
+assert not module.Supervisor.exact_line('AGMSG_REC', expected)
+assert module.Supervisor.exact_line('AGMSG_REC' + 'EIVED:batch-3\\n', expected)
 `);
 });
 
@@ -87,14 +99,18 @@ process.stdout.write('? for shortcuts\\n');
 let input = '';
 process.stdin.on('data', chunk => {
   input += chunk.toString();
-  const match = input.match(/\\[agmsg batch id=([^ ]+) receipt=([^ ]+)/);
+  const match = input.match(/\\[agmsg batch id=([^ ]+) count=/);
   if (!match) {
     if (input.includes('D')) { process.stdout.write('? for shortcuts\\n'); input = ''; }
     return;
   }
   if (!input.includes('[/agmsg batch]')) return;
   if (input.includes('NO_RECEIPT')) { process.stdout.write(input + '\\n? for shortcuts\\n'); input = ''; return; }
-  process.stdout.write('AGMSG_RECEIVED:' + match[1] + ':' + match[2] + '\\n? for shortcuts\\n');
+  const receipt = 'AGMSG_RECEIVED:' + match[1];
+  if (input.includes('SPLIT_RECEIPT')) {
+    process.stdout.write(receipt.slice(0, 9));
+    process.stdout.write(receipt.slice(9) + '\\n? for shortcuts\\n');
+  } else process.stdout.write(receipt + '\\n? for shortcuts\\n');
   input = '';
 });
 `);
