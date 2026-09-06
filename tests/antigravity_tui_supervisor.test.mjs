@@ -87,6 +87,81 @@ assert notice.getvalue().count('$agmsg resume') == 1
 `);
 });
 
+test('read-denied停止には安全な復旧案内を表示する', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.state = {'batch': None}
+s.save = lambda: None
+s.stopping = False
+out = io.StringIO()
+with contextlib.redirect_stderr(out):
+    s.fail('通常inboxによる既読試行を検知')
+assert 'agy-tui reset-guard' in out.getvalue()
+assert 'ackせず停止します' in out.getvalue()
+`);
+});
+
+test('reset-guardは停止中かつbatchなしの場合だけviolationを解除する', () => {
+  runPython(`
+import importlib.util
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(tempfile.mkdtemp())
+s = module.Supervisor.__new__(module.Supervisor)
+s.project = '/tmp/project'
+s.a = SimpleNamespace(team='demo', name='agy')
+s.owner = 'owner'
+s.state = {'project': s.project, 'team': 'demo', 'role': 'agy'}
+s.state_file = root / 'state.json'
+s.reservation = root / 'reservation.json'
+s.violations = root / 'reservation.json.violations'
+s.actas = root / 'actas.lock'
+s.state_file.write_text(json.dumps({**s.state, 'batch': None}))
+s.violations.write_text('{"event":"read-denied","pid":1}\\n')
+calls = []
+s.call = lambda command: calls.append(command)
+s.reset_guard()
+assert s.violations.read_text() == ''
+assert calls == ['claim', 'release']
+s.violations.write_text('keep')
+s.state_file.write_text(json.dumps({**s.state, 'batch': {'id': 'batch-1', 'phase': 'completed'}}))
+try:
+    s.reset_guard()
+except RuntimeError as error:
+    assert '未解決batch' in str(error)
+else:
+    raise AssertionError('未解決batchを拒否しなかった')
+assert s.violations.read_text() == 'keep'
+assert calls == ['claim', 'release']
+s.state_file.write_text(json.dumps({**s.state, 'batch': None}))
+s.reservation.write_text(json.dumps({
+    'state': str(s.state_file),
+    'kind': 'tui-pty',
+    'pid': __import__('os').getpid(),
+    'start': module.proc_start(__import__('os').getpid()),
+}))
+try:
+    s.reset_guard()
+except RuntimeError as error:
+    assert '稼働中' in str(error)
+else:
+    raise AssertionError('稼働中supervisorを拒否しなかった')
+assert s.violations.read_text() == 'keep'
+assert calls == ['claim', 'release', 'claim', 'release']
+`);
+});
+
 test('receiptはread chunk境界をまたいでも画面上の完全行として判定できる', () => {
   runPython(`
 import importlib.util

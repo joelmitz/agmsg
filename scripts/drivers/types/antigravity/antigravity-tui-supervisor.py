@@ -208,12 +208,18 @@ class Supervisor:
             p=subprocess.run(['bash',TRANSPORT,command,self.project,self.a.team,self.a.name,self.owner,*extra],input=input,text=True,capture_output=True,pass_fds=passfds,preexec_fn=preexec)
         finally:
             for fd in fds: os.close(fd)
-        if p.returncode: raise RuntimeError(f'{command}失敗: {p.stderr.strip()}')
+        if p.returncode:
+            detail=(p.stderr.strip() or p.stdout.strip() or f'exit {p.returncode}')
+            raise RuntimeError(f'{command}失敗: {detail}')
         return p.stdout
     def save(self): atomic(self.state_file,self.state)
     def fail(self, why):
         if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.state['batch']['phase']='uncertain'
-        self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); print(f'\r\n{why}; ackせず停止します',file=sys.stderr); self.stopping=True
+        self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save()
+        message=f'\r\n{why}; ackせず停止します'
+        if why=='通常inboxによる既読試行を検知':
+            message+='\n復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください'
+        print(message,file=sys.stderr); self.stopping=True
     def check_guard(self):
         reservation=json.loads(self.reservation.read_text())
         if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('予約所有権不一致')
@@ -245,6 +251,34 @@ class Supervisor:
         self.violations.touch(mode=0o600,exist_ok=True); Path(str(self.violations)+'.lock').touch(mode=0o600,exist_ok=True)
         # bridge-read-guard は fd 3 から改行を除いた値をハッシュする。
         atomic(self.reservation,{'owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
+    def reset_guard(self):
+        if not self.state_file.exists(): raise RuntimeError('復旧対象のstateがありません')
+        state=json.loads(self.state_file.read_text())
+        if any(state.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
+        if state.get('batch'): raise RuntimeError('未解決batchがあります。reset-guardでは解除できません')
+        self.call('claim')
+        try:
+            if self.reservation.exists():
+                reservation=json.loads(self.reservation.read_text())
+                if reservation.get('state')!=str(self.state_file) or reservation.get('kind')!='tui-pty': raise RuntimeError('別の予約が存在します')
+                if 'pid' not in reservation or 'start' not in reservation: raise RuntimeError('予約情報が壊れています')
+                try:
+                    if proc_start(int(reservation['pid']))==reservation['start']: raise RuntimeError('TUI supervisorが稼働中です')
+                except (FileNotFoundError,ProcessLookupError,ValueError): pass
+            self.violations.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+            lock_path=Path(str(self.violations)+'.lock')
+            with lock_path.open('a') as lock:
+                acquired=False
+                for _ in range(50):
+                    try:
+                        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True; break
+                    except BlockingIOError:
+                        time.sleep(0.1)
+                if not acquired: raise RuntimeError('violations lockを取得できません')
+                self.violations.write_text('')
+            print('read-denied guardを解除しました。未読メッセージとack状態は変更していません')
+        finally:
+            self.call('release')
     def launch(self):
         winsize=self.read_winsize(sys.stdin.fileno())
         pid, master=pty.fork()
@@ -379,11 +413,15 @@ def recover(a):
         s.close()
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
+    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','reset-guard','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
     a=p.parse_args()
     if a.action in ('ack','replay'):
         if not a.batch or not a.confirm_ids: raise RuntimeError('--batch と --confirm-id が必要です')
         recover(a); return
+    if a.action=='reset-guard':
+        try: Supervisor(a).reset_guard()
+        except Exception as e: print(f'reset-guard失敗: {e}',file=sys.stderr); sys.exit(1)
+        return
     if a.action in ('status','stop','resume'):
         matches=[]
         for file in (ROOT/'run').glob('antigravity-reservation.*.json'):

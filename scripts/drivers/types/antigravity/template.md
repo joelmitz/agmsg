@@ -107,6 +107,8 @@ If argument is "resume":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/antigravity-resume.sh "$(pwd)"`
 2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
 
+If `agy-tui` stopped with `通常inboxによる既読試行を検知`, do not run bare `$__SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh` again. After confirming that no batch is pending, run `~/.agents/bin/agy-tui reset-guard --project "$(pwd)" --team <team> --name <role>` to clear only the read-denied guard; it does not read or ack messages.
+
 If argument is "config":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
 2. Show the output to the user.

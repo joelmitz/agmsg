@@ -10,12 +10,12 @@ ROLE="${AGMSG_ANTIGRAVITY_ROLE:-}"
 AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
-  printf '%s\n' 'Usage: agy-tui [status|stop|resume] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
+  printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
 }
 
 ACTION=""
 case "${1:-}" in
-  status|stop|resume) ACTION="$1"; shift ;;
+  status|stop|resume|reset-guard) ACTION="$1"; shift ;;
 esac
 
 while [ $# -gt 0 ]; do

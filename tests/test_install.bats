@@ -46,6 +46,11 @@ teardown() {
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 0 ]
   [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"復旧対象のstateがありません"* ]]
 }
 
 @test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {

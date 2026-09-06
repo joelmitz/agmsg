@@ -129,6 +129,8 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 
 予約中の TUI では bare `$agmsg`、`inbox.sh`、`check-inbox.sh` を通常受信に使わない。template の TUI-monitor 分岐はこれらの代わりに、既読化しない `tui-monitor status` を案内する。この状態表示は supervisor が保持する prepared batch の ID、送信元、到着時刻だけを返し、本文を再表示しない。agent または人間が通常の inbox 経路を実行して read-denied が記録された場合、これは第二書き手の試行として violations latch の対象に残す。supervisor は `NEEDS_ATTENTION` にして ack しない。headless と同じ既読ガードを緩めない。
 
+read-denied latch の後に supervisor が終了した場合、`agy-tui reset-guard --team <team> --name <role>` を明示実行して復旧する。この操作は、state の project/team/role が一致し、batch が phase にかかわらず存在せず、対象 identity の予約がなく（stale な予約を含む）、TUI supervisor が稼働しておらず、actas 排他を取得できた場合だけ violations latch を解除する。headless bridgeなど別kindの予約や壊れた予約情報が残っている場合も拒否する。未読メッセージと ack 状態は変更しない。条件を満たさない場合は fail-closed とし、通常の `resume` では代用しない。
+
 ## 8. 起動・停止・モード変更
 
 起動前に、role の登録、monitor marker、TTY、`agy 1.1.27`、PTY backend、既存 reservation、未解決 batch を確認する。いずれかが失敗したら agy を起動しない。
