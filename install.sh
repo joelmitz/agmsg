@@ -228,23 +228,40 @@ install_windows_helpers() {
 }
 
 install_antigravity_tui_shim() {
-  local source target
+  local source target target_dir owner expected_owner tmp quoted_source
   source="$1"
   target="$AGENTS_DIR/bin/agy-tui"
-  mkdir -p "$(dirname "$target")"
+  target_dir="$(dirname "$target")"
+  owner="# agmsg-shim-owner: $source"
+  expected_owner=""
+  mkdir -p "$target_dir"
   if [ -e "$target" ] || [ -L "$target" ]; then
-    if grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
-      cp "$source" "$target"
-      chmod +x "$target"
-      echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-    else
+    expected_owner="$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)"
+    if ! grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
       echo "  ~ left existing ~/.agents/bin/agy-tui untouched"
+      return 0
     fi
-    return 0
+    if [ "$expected_owner" != "$owner" ]; then
+      echo "  ~ left ~/.agents/bin/agy-tui owned by a different or legacy install untouched"
+      return 0
+    fi
   fi
-  cp "$source" "$target"
-  chmod +x "$target"
-  echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
+  printf -v quoted_source '%q' "$source"
+  tmp="$(mktemp "$target_dir/.agy-tui.XXXXXX")"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' '# agmsg Antigravity TUI launcher shim'
+    printf '%s\n' "$owner"
+    printf 'exec bash %s "$@"\n' "$quoted_source"
+  } > "$tmp"
+  chmod +x "$tmp"
+  mv "$tmp" "$target"
+  if [ -n "$expected_owner" ]; then
+    echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
+  else
+    echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
+  fi
 }
 
 # --- Parse args ---
