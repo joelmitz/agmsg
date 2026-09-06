@@ -30,8 +30,8 @@ export class Bridge {
     const r=spawnSync('bash',[transport,command,this.project,this.team,this.role,this.owner,...extra],{encoding:'utf8'});
     if(r.status!==0) {
       const error=Error(`${command}失敗: ${r.stderr.trim()}`);
-      if(command==='peek')error.code='PEEK_TRANSPORT';
       if(r.signal==='SIGINT'||r.signal==='SIGTERM')error.code='SIGNAL_TRANSPORT';
+      else if(command==='peek')error.code='PEEK_TRANSPORT';
       throw error;
     }
     return r.stdout;
@@ -148,7 +148,7 @@ export class Bridge {
     let rows;
     try { rows=this.call('peek').trim(); }
     catch(error) {
-      if(error.code==='PEEK_TRANSPORT'&&!this.busy&&this.phase==='IDLE'&&!this.state?.batch) this.stop().catch(stopError=>console.error(stopError.message));
+      if((error.code==='PEEK_TRANSPORT'||error.code==='SIGNAL_TRANSPORT')&&!this.busy&&this.phase==='IDLE'&&!this.state?.batch) this.stop().catch(stopError=>console.error(stopError.message));
       else this.fail(error);
       return;
     }

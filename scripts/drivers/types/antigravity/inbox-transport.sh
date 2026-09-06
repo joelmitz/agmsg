@@ -37,6 +37,10 @@ case "$command" in
      : > "$AGMSG_TEST_PEEK_FAILURE.reached"
      exit 42
    fi
+   if [ -n "${AGMSG_TEST_PEEK_SIGNAL:-}" ]; then
+     : > "$AGMSG_TEST_PEEK_SIGNAL.reached"
+     kill -TERM $$
+   fi
    storage_list_unread "$team" "$role" --limit 20 ;;
  ack)
    IFS= read -r _AGMSG_BRIDGE_ACK_CAP <&3

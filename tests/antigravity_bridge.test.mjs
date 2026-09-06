@@ -132,6 +132,20 @@ test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',a
   } finally { fs.rmSync(`${failure}.reached`,{force:true}); await f.close(); }
 });
 
+test('IDLE中peek subprocessのSIGTERM終了は正常停止として扱う',async()=>{
+  const signal=path.join(os.tmpdir(),`agmsg-peek-signal-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_SIGNAL:signal});
+  try {
+    await waitFor(()=>fs.existsSync(`${signal}.reached`));
+    await waitFor(()=>f.child.exitCode!==null);
+    assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
+    assert.match(f.output(),/停止/);
+    assert.equal(f.state().batch,null);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('antigravity-reservation.')&&name.endsWith('.json')),false);
+    assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
+  } finally { fs.rmSync(`${signal}.reached`,{force:true}); await f.close(); }
+});
+
 test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
   const f=fixture();
   try {
