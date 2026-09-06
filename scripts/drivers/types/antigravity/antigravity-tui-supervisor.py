@@ -26,12 +26,15 @@ class Supervisor:
         key=self.actas.name.removeprefix('actas.').removesuffix('.session')
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
-        self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','batch':None}
-        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False
+        self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'batch':None}
+        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False; self.render_seen=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
+        signal.signal(signal.SIGUSR1, self.request_resume)
     def request_stop(self, signum, _frame):
         self.stop_reason=f'外部停止要求({signal.Signals(signum).name})'
+    def request_resume(self, _signum, _frame):
+        self.resume_requested=True
     def call(self, command, extra=(), input=None, cap=False):
         fds=()
         passfds=()
@@ -98,6 +101,7 @@ class Supervisor:
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}:{hashlib.sha256(",".join(m["id"] for m in b["messages"]).encode()).hexdigest()[:16]}'
+        self.result_buffer=''; self.render_seen=False
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def exact_line(text, expected):
@@ -128,6 +132,11 @@ class Supervisor:
         if self.idle_ready and not self.human_input_seen: self.inject()
     def loop(self):
         while not self.stopping:
+            if self.resume_requested:
+                self.resume_requested=False
+                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中のresume要求を拒否'); continue
+                self.human_input_seen=False; self.idle_ready=True; self.state['manualResumeRequired']=False; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
+                print('\r\n入力欄を手動確認済みとしてmonitorを再開します',file=sys.stderr)
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
@@ -136,7 +145,7 @@ class Supervisor:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
-                else: self.human_input_seen=True; self.idle_ready=False
+                else: self.human_input_seen=True; self.idle_ready=False; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
                 os.write(self.master,data)
             if self.master in r:
                 data=os.read(self.master,65536)
@@ -144,10 +153,14 @@ class Supervisor:
                 os.write(sys.stdout.fileno(),data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
                 if self.exact_line(text,'? for shortcuts') and not self.state.get('batch'):
                     self.idle_ready=True
-                    if self.human_input_seen and ('\x1b[2K' in text or '\x1b[K' in text): self.human_input_seen=False
                 b=self.state.get('batch')
-                if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.exact_line(text,b.get('receipt')):
-                    self.ack()
+                if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
+                    self.result_buffer=(self.result_buffer+text)[-16384:]
+                    if f'[agmsg batch id={b["id"]}' in text or '[/agmsg batch]' in text: self.render_seen=True
+                    if re.search(r'(?i)\b(?:error|cancel(?:led)?|interrupt(?:ed)?|permission|trust|picker)\b', self.result_buffer): self.fail('TUI error/cancel/permission signatureを検知')
+                    elif self.exact_line(self.result_buffer,b.get('receipt')):
+                        if self.render_seen: self.fail('receiptがTUI描画由来か判別できないためackしません')
+                        else: self.ack()
                 elif b and self.state.get('supervisorPhase')=='PREPARED' and self.idle_ready and not self.human_input_seen:
                     self.inject()
             self.maybe_poll()
@@ -197,12 +210,12 @@ def recover(a):
         s.close()
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
+    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
     a=p.parse_args()
     if a.action in ('ack','replay'):
         if not a.batch or not a.confirm_ids: raise RuntimeError('--batch と --confirm-id が必要です')
         recover(a); return
-    if a.action in ('status','stop'):
+    if a.action in ('status','stop','resume'):
         matches=[]
         for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
             try:
@@ -218,7 +231,8 @@ def main():
             if not matches: print('runtime: tui-pty 未起動'); return
             for _,reservation,state,live in matches:
                 batch=state.get('batch')
-                print(f"runtime: {state.get('role')} tui-pty {'busy' if batch else 'running' if live else '停止/要確認'}")
+                status='paused' if state.get('manualResumeRequired') else 'busy' if batch else 'running' if live else '停止/要確認'
+                print(f"runtime: {state.get('role')} tui-pty {status}")
                 if batch:
                     print(f"batch: {batch.get('id')} phase={batch.get('phase')} messages={len(batch.get('messages',[]))}")
                     for message in batch.get('messages',[]): print(f"message: id={message.get('id')} from={message.get('from')} at={message.get('at')}")
@@ -226,6 +240,10 @@ def main():
         live=[x for x in matches if x[3]]
         if len(live)!=1: raise RuntimeError('停止対象のTUI supervisorが一意に特定できません')
         _,reservation,_,_=live[0]
+        if a.action=='resume':
+            os.kill(int(reservation['pid']),signal.SIGUSR1)
+            print('再開要求を送信しました。入力欄を空にしたことを確認済みの場合だけ使用してください')
+            return
         os.kill(int(reservation['pid']),signal.SIGTERM)
         print('停止要求を送信しました')
         return

@@ -69,6 +69,9 @@ test('TUI monitor は対話端末でない起動を拒否する', () => {
   const result = spawnSync('bash', [wrapper, '--help'], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /対話端末/);
+  const status = spawnSync('bash', [wrapper, 'status', '--project', '/tmp', '--team', 'no-such-team', '--name', 'no-such-role'], { encoding: 'utf8' });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /tui-pty 未起動/);
 });
 
 test('偽TUIを実PTYで起動し、受信後のreceipt確認からackまで進める', async () => {
@@ -85,7 +88,11 @@ let input = '';
 process.stdin.on('data', chunk => {
   input += chunk.toString();
   const match = input.match(/\\[agmsg batch id=([^ ]+) receipt=([^ ]+)/);
-  if (!match || !input.includes('[/agmsg batch]')) return;
+  if (!match) {
+    if (input.includes('D')) { process.stdout.write('? for shortcuts\\n'); input = ''; }
+    return;
+  }
+  if (!input.includes('[/agmsg batch]')) return;
   if (input.includes('NO_RECEIPT')) { process.stdout.write(input + '\\n? for shortcuts\\n'); input = ''; return; }
   process.stdout.write('AGMSG_RECEIVED:' + match[1] + ':' + match[2] + '\\n? for shortcuts\\n');
   input = '';
@@ -131,6 +138,11 @@ process.stdin.on('data', chunk => {
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     assert.match(output, /AGMSG_RECEIVED:/);
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    child.stdin.write('D');
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === true);
+    const resume = spawnSync('python3', [path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py'), '--action', 'resume', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
+    assert.equal(resume.status, 0, resume.stderr);
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === false);
     run('send.sh', ['fixture', 'sender', 'worker', 'NO_RECEIPT']);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
     await new Promise(resolve => setTimeout(resolve, 300));

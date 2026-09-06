@@ -1,6 +1,6 @@
 # Antigravity TUI PTY monitor 設計
 
-状態: 実装中。設計レビューPASS済み、実装commit a32327eあり。修正レビューとpushは未実施。
+状態: 安全側へ設計変更。入力欄と画面描画を完全には証明できないため、曖昧な場合は自動注入・自動ackを行わない。設計再レビューとpushは未実施。
 作成者: luna。作成日: 2026-09-06（JST）。
 
 ## 1. 結論と根拠
@@ -78,7 +78,7 @@ PTY の bytes だけでは「入力欄が空」「モデルが idle」「承認�
 5. permission、trust、選択 UI、slash-command picker、生成中、エラー、alt-screen 切替中の signature がない。
 6. supervisor が前回注入した batch を持たない。
 
-条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。待機中も unread は `peek` 済みであるため、TUI の人間入力を受けた後に状態を再評価する。終了時に prepared batch があれば `uncertain` として停止する。
+条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。初期実装は入力欄の実内容を完全に復元するスクリーンモデルを持たないため、人間入力を一 byteでも観測した後は `manualResumeRequired=true` として自動注入を停止する。利用者が入力欄を空にしたことを目視確認した後、明示的な `antigravity-tui-monitor.sh resume` を実行した場合だけ再評価する。終了時に prepared batch があれば `uncertain` として停止する。
 
 screen parser の完了 marker は ack の十分条件ではない。injected batch ごとに、対応バージョンの正常完了 transcript を replay して確認済みの positive completion signature、注入した envelope の echo、エラー・cancel・interrupt signature の不在が同時に必要である。どれかを判別できないバージョンでは自動 ack を有効にせず `NEEDS_ATTENTION` にする。
 
@@ -109,13 +109,13 @@ body:
 
 batch 内の `messages[]` は envelope の message block と ID で一対一に対応する。envelope の count、各 ID、順序、本文ハッシュを prepared state と照合し、一件でも不一致なら注入しない。
 
-PTY への書込成功は受領確認に使わない。注入後、supervisor は転送した sequence と envelope echo を PTY output から照合し、同じ batch の後に positive completion signature を観測する。さらに、注入後に human input、error、cancel、interrupt、permission、picker のいずれも観測していない場合だけ `batch.phase='completed'` として ack する。画面描画がバージョンで変わり signature が不確かな場合、または terminal resize/escape sequence により表示解析を失った場合は `NEEDS_ATTENTION` にして ack しない。
+PTY への書込成功は受領確認に使わない。注入後、supervisor は receipt を ANSI除去後の完全な一行として累積出力から照合する。envelope由来の描画、折り返し、再描画、チャンク境界を receipt と区別できない場合は `NEEDS_ATTENTION` にして自動ackしない。注入後に human input、error、cancel、interrupt、permission、picker のいずれも観測していない場合だけ `batch.phase='completed'` として ack する。画面描画がバージョンで変わり signature が不確かな場合、または terminal resize/escape sequence により表示解析を失った場合は `NEEDS_ATTENTION` にして ack しない。
 
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 
 ## 7. 人間入力と衝突時の動作
 
-human input は常に先に PTY へ転送する。supervisor は人間入力を取り消し、書き換え、遅延送信しない。外部 batch が `PREPARED` または `WAITING_FOR_IDLE` の間に人間が任意のキーを入力した場合、idle 判定を無効化して次の完了 marker まで注入しない。
+human input は常に先に PTY へ転送する。supervisor は人間入力を取り消し、書き換え、遅延送信しない。外部 batch が `PREPARED` または `WAITING_FOR_IDLE` の間に人間が任意のキーを入力した場合、idle 判定を無効化して `manualResumeRequired=true` をラッチする。次の完了 markerだけでは解除せず、利用者が入力欄を空にしたことを目視確認してから明示 `antigravity-tui-monitor.sh resume` を実行する。
 
 `INJECTED` または `WAITING_FOR_RESULT` の間に human input byte を一つでも観測した場合、その batch を `uncertain` にして `NEEDS_ATTENTION` へ移る。入力は TUI へ転送するが、画面が idle に戻っても completed と ack してはならない。Ctrl-C、Esc、Enter を含むため、turn の中断と画面上の正常復帰を混同しない。
 
@@ -129,7 +129,7 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 
 起動前に、role の登録、monitor marker、TTY、`agy 1.1.27`、PTY backend、既存 reservation、未解決 batch を確認する。いずれかが失敗したら agy を起動しない。
 
-`delivery.sh set turn|off antigravity <project>` が active TUI supervisor を検知した場合、TUI を外部から終了させず失敗する。利用者は `antigravity-tui-monitor.sh stop --project ... --team ... --name ...` を TUI を閉じる意思で明示実行し、停止完了と reservation 解放を確認してから mode を変更する。停止中の batch は ack せず state に残す。headless bridge と TUI supervisor は同じ reservation namespace を使い、相互に起動を拒否する。
+`delivery.sh set turn|off antigravity <project>` が active TUI supervisor を検知した場合、TUI を外部から終了させず失敗する。利用者は入力欄を空にしたことを確認した後の再開に `antigravity-tui-monitor.sh resume`、TUIを閉じる意思の明示操作に `antigravity-tui-monitor.sh stop --project ... --team ... --name ...` を使う。停止中の batch は ack せず state に残す。headless bridge と TUI supervisor は同じ reservation namespace を使い、相互に起動を拒否する。
 
 正常停止は、新規 `peek` を止め、current turn がないことを確認し、child に EOF を送って終了を待つ。timeout 後に signal を送れるのは、起動時の child PID/start token が一致する child だけとする。reservation と actas lock は所有者一致を再検証してから解放する。`antigravity-mode.mjs status` は headless state と TUI PTY state を別名で表示し、mode 変更前の active TUI supervisor を識別できるようにする。
 
@@ -157,7 +157,7 @@ permission または trust UI を検知した場合は、ユーザーが TUI 上
 5. 最大20件の batch envelope が全 message ID、本文、送信元、時刻を一対一に表し、ID/hash/count不一致を拒否すること。
 6. bare `$agmsg` / inbox 経路の read-denied が violations latch となり、TUI supervisor が ack せず `NEEDS_ATTENTION` へ移ること。TUI-monitor status は既読化しないこと。
 7. headless bridge と TUI supervisor の同時起動を互いに拒否し、既存 `tests/antigravity_bridge.test.mjs` と `tests/test_delivery.bats` が回帰しないこと。
-8. active TUI のある turn/off mode変更が拒否され、明示 stop 後だけ rulefile を更新すること。headless と TUI の status を区別して表示すること。
+8. active TUI のある turn/off mode変更が拒否され、明示 stop 後だけ rulefile を更新すること。headless と TUI の status を区別して表示すること。人間入力後は明示 resume 前に注入しないこと。
 9. 実機では使い捨て project・別 role・限定本文で、idle 受信、文脈保持、relay中の人間入力、入力途中保留、permission 保留、stop/restart、送信元への返信まで確認すること。
 10. 実機の表示を screenshot と raw PTY transcript の両方で保存し、child PID/start token、conversation ID、terminal attach状態、現在 TUI に届いたことを人間が確認すること。
 
