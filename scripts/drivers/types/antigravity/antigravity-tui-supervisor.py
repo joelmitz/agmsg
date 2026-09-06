@@ -177,6 +177,11 @@ class Supervisor:
         self.resume_requested=True
     def request_resize(self, _signum, _frame):
         self.resize_requested=True
+    def pause_for_human_input(self):
+        already_paused=self.state.get('manualResumeRequired',False)
+        self.human_input_seen=True; self.idle_ready=False; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
+        if not already_paused:
+            print('\r\n[agmsg] 人間の入力を検知したため自動配送を一時停止しました。再開: $agmsg resume',file=sys.stderr)
     @staticmethod
     def read_winsize(fd):
         return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -309,7 +314,7 @@ class Supervisor:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
-                else: self.human_input_seen=True; self.idle_ready=False; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
+                else: self.pause_for_human_input()
                 os.write(self.master,data)
             if self.master in r:
                 data=os.read(self.master,65536)

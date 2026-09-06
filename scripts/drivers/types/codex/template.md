@@ -113,6 +113,10 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+If argument is "resume":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/antigravity-resume.sh "$(pwd)"`
+2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
+
 If argument is "config":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
 2. Show the output to the user.

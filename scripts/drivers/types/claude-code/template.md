@@ -157,6 +157,10 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+If argument is "resume":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/antigravity-resume.sh "$(pwd)"`
+2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
+
 If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" claude-code` to see whether the role is already registered for this (project, type).

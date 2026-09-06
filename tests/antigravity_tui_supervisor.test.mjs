@@ -65,6 +65,28 @@ os.close(r); os.close(w)
 `);
 });
 
+test('人間入力によるpauseは一度だけ再開方法を通知する', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.state = {'manualResumeRequired': False, 'supervisorPhase': 'WAITING_FOR_IDLE'}
+s.save = lambda: None
+notice = io.StringIO()
+with contextlib.redirect_stderr(notice):
+    s.pause_for_human_input()
+    s.pause_for_human_input()
+assert s.state['manualResumeRequired'] is True
+assert s.human_input_seen is True
+assert s.idle_ready is False
+assert notice.getvalue().count('$agmsg resume') == 1
+`);
+});
+
 test('receiptはread chunk境界をまたいでも画面上の完全行として判定できる', () => {
   runPython(`
 import importlib.util
