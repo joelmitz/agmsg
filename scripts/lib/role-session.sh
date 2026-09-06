@@ -94,16 +94,18 @@ _agmsg_role_session_path() {
 }
 
 # Read the two fields the codex bridge launcher needs in ONE pass, into the
-# caller's shell: AGMSG_ROLE_SESSION_UUID and AGMSG_ROLE_SESSION_PROJECT. Both
-# are empty when the record or the field is absent. This exists so the poll path
+# caller's shell: AGMSG_ROLE_SESSION_UUID, AGMSG_ROLE_SESSION_PROJECT, and
+# AGMSG_ROLE_SESSION_CODEX_HOME. All are empty when the record or the field is
+# absent. This exists so the poll path
 # can resolve a role without a single command substitution -- the getters below
 # are fine one-shot, but each one costs a subshell and its own read of the same
 # file, and the launcher wants both fields for the same pair several times a
 # second. First match wins per field, matching the getters exactly.
 agmsg_role_session_load() {
-  local team="$1" agent="$2" line path have_uuid=0 have_project=0
+  local team="$1" agent="$2" line path have_uuid=0 have_project=0 have_codex_home=0
   AGMSG_ROLE_SESSION_UUID=""
   AGMSG_ROLE_SESSION_PROJECT=""
+  AGMSG_ROLE_SESSION_CODEX_HOME=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
   [ -f "$path" ] || return 0
@@ -114,6 +116,9 @@ agmsg_role_session_load() {
         ;;
       project=*)
         [ "$have_project" = "1" ] || { AGMSG_ROLE_SESSION_PROJECT="${line#project=}"; have_project=1; }
+        ;;
+      codex_home=*)
+        [ "$have_codex_home" = "1" ] || { AGMSG_ROLE_SESSION_CODEX_HOME="${line#codex_home=}"; have_codex_home=1; }
         ;;
     esac
   done < "$path" 2>/dev/null
@@ -137,9 +142,10 @@ agmsg_role_session_load() {
 #                          (PR-D) needs it to rebuild the role's boot command
 #                          from the type manifest. Empty when unknown.
 #   project=<project>      the resolved project root
+#   codex_home=<path>      Codex state root; empty for non-Codex agent types
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
 agmsg_role_session_record() {
-  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
+  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}" codex_home="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts
   _agmsg_role_session_path_into "$team" "$agent"
@@ -148,6 +154,9 @@ agmsg_role_session_record() {
   mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  if [ "$type" = "codex" ] && [ -z "$codex_home" ]; then
+    codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
+  fi
   {
     printf 'session=%s\n' "$bare_sid"
     printf 'name=%s-%s\n' "$team" "$agent"
@@ -155,6 +164,7 @@ agmsg_role_session_record() {
     printf 'agent=%s\n' "$agent"
     printf 'type=%s\n' "$type"
     printf 'project=%s\n' "$project"
+    printf 'codex_home=%s\n' "$codex_home"
     printf 'updated_at=%s\n' "$ts"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null

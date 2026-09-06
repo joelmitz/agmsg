@@ -29,6 +29,8 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # good one. Only the writer can make that state unobservable.
 # shellcheck source=../../../lib/registry-lock.sh
 source "$SCRIPT_DIR/../../../lib/registry-lock.sh"
+# shellcheck source=_home.sh
+source "$SCRIPT_DIR/_home.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -43,6 +45,9 @@ Usage: codex-monitor.sh [--project <path>] [--codex-command <codex|resume>] [-- 
 Starts/reuses an agmsg-managed Codex app-server on a loopback ws:// port,
 enables agmsg Codex bridge delivery for this project, then execs:
   codex resume --remote ws://127.0.0.1:<port>
+
+Set AGMSG_CODEX_HOME to an absolute dedicated state directory to isolate the
+monitor app-server from Codex Desktop's default ~/.codex state.
 
 (--socket-path is accepted for compatibility but ignored: codex 0.141+ requires
 a ws:// transport for --remote. See #170.)
@@ -89,6 +94,29 @@ esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
 
+# An opt-in state root keeps agmsg's app-server, sessions, and remote-control
+# registration separate from Codex Desktop's default ~/.codex state. Export the
+# resolved value to the app-server, bridge launcher, hooks, and remote TUI.
+if [ -n "${AGMSG_CODEX_HOME:-}" ]; then
+  case "$AGMSG_CODEX_HOME" in
+    /*) ;;
+    *) echo "codex-monitor: AGMSG_CODEX_HOME must be an absolute path" >&2; exit 1 ;;
+  esac
+  case "$AGMSG_CODEX_HOME" in
+    *$'\n'*|*$'\r'*) echo "codex-monitor: AGMSG_CODEX_HOME must not contain newlines" >&2; exit 1 ;;
+  esac
+  [ "$AGMSG_CODEX_HOME" != "/" ] || { echo "codex-monitor: AGMSG_CODEX_HOME must not be /" >&2; exit 1; }
+  if [ ! -e "$AGMSG_CODEX_HOME" ]; then
+    (umask 077; mkdir -p "$AGMSG_CODEX_HOME")
+  fi
+  [ -d "$AGMSG_CODEX_HOME" ] || { echo "codex-monitor: AGMSG_CODEX_HOME is not a directory" >&2; exit 1; }
+  AGMSG_CODEX_HOME="$(cd "$AGMSG_CODEX_HOME" 2>/dev/null && pwd)"
+  export AGMSG_CODEX_HOME
+fi
+CODEX_HOME="$(agmsg_codex_effective_home)"
+[ -n "$CODEX_HOME" ] || { echo "codex-monitor: cannot resolve CODEX_HOME" >&2; exit 1; }
+export CODEX_HOME
+
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the
 # launch/port detection fails — hand off to a plain codex session (no --remote
@@ -117,6 +145,7 @@ PORT_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.port"
 # newer/older codex can't speak to an app-server from a different build, so a
 # stale server left running across a codex upgrade must not be reused.
 VERSION_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.version"
+HOME_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.home"
 CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
 
 mkdir -p "$RUN_DIR"
@@ -133,6 +162,11 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   existing_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
   existing_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
   existing_version="$(cat "$VERSION_FILE" 2>/dev/null || true)"
+  existing_home="$(cat "$HOME_FILE" 2>/dev/null || true)"
+  # Before this sidecar existed, every server used the default ~/.codex root.
+  if [ -z "$existing_home" ] && [ "${CODEX_HOME%/}" = "$(agmsg_codex_default_home)" ]; then
+    existing_home="$CODEX_HOME"
+  fi
   # Reuse only when OUR recorded app-server is still alive AND its port answers,
   # so a foreign process that grabbed the same port after ours died is not
   # mistaken for the bridge app-server.
@@ -157,18 +191,19 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
         # with "failed to connect to remote app server". Treat a version mismatch
         # as stale: kill the (confirmed-ours) old server and start fresh. If we
         # can't read the current version, fall back to liveness-only reuse.
-        if [ -z "$CODEX_VERSION" ] || [ "$existing_version" = "$CODEX_VERSION" ]; then
+        if { [ -z "$CODEX_VERSION" ] || [ "$existing_version" = "$CODEX_VERSION" ]; } \
+          && [ "${existing_home%/}" = "${CODEX_HOME%/}" ]; then
           PORT="$existing_port"
         else
           kill "$existing_pid" 2>/dev/null || true
-          rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE"
+          rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE" "$HOME_FILE"
         fi
         ;;
       *)
         # Can't confirm it's our app-server (pid reuse / a foreign listener on the
         # recorded port): do NOT kill it. Drop the stale artifacts and start a
         # fresh server of our own.
-        rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE"
+        rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE" "$HOME_FILE"
         ;;
     esac
   fi
@@ -212,13 +247,14 @@ if [ -z "$PORT" ]; then
     echo "codex-monitor: app-server did not report a listening port; starting codex without the agmsg bridge" >&2
     echo "codex-monitor: see $SERVER_LOG" >&2
     kill "$server_bg" 2>/dev/null || true
-    rm -f "$SERVER_PID" "$VERSION_FILE"
+    rm -f "$SERVER_PID" "$VERSION_FILE" "$HOME_FILE"
     exec_plain_codex
   fi
   agmsg_write_atomic "$PORT_FILE" "$PORT"
   # Stamp the version that owns this server so a later launch from a different
   # codex build recreates it instead of reusing a stale one.
   printf '%s' "$CODEX_VERSION" > "$VERSION_FILE"
+  agmsg_write_atomic "$HOME_FILE" "$CODEX_HOME"
 fi
 
 if ! port_alive "$PORT"; then
