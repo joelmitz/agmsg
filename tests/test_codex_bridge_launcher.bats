@@ -137,7 +137,7 @@ teardown() {
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "${7:-}"' \
     _ "$SCRIPTS" "$@"
 }
 
@@ -190,6 +190,12 @@ run_launcher() {
 @test "launcher: leaves a role with a foreign-project record unsubscribed (#150)" {
   put_record team alice other-thread "/some/other/project" codex
   run_launcher
+  [ ! -f "$CAPTURE" ]
+}
+
+@test "launcher: leaves a role recorded in another CODEX_HOME unsubscribed" {
+  put_record team alice other-home-thread "$PROJ" codex "$HOME/.codex"
+  AGMSG_CODEX_HOME="$TEST_SKILL_DIR/isolated-home" run_launcher
   [ ! -f "$CAPTURE" ]
 }
 

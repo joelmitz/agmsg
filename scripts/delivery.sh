@@ -442,6 +442,7 @@ EOF
       rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
             "$RUN_DIR/codex-app-server.$project_hash.port" \
             "$RUN_DIR/codex-app-server.$project_hash.version" \
+            "$RUN_DIR/codex-app-server.$project_hash.home" \
             "$RUN_DIR/codex-app-server.$project_hash.log"
     fi
   fi
