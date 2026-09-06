@@ -8,6 +8,7 @@ import test from 'node:test';
 
 const supervisor = new URL('../scripts/drivers/types/antigravity/antigravity-tui-supervisor.py', import.meta.url).pathname;
 const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const agyScreenFixture = new URL('./fixtures/agy-1.1.27-screen-transcripts.json', import.meta.url).pathname;
 
 function runPython(source) {
   const result = spawnSync('python3', ['-c', source], {
@@ -16,6 +17,125 @@ function runPython(source) {
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
+
+test('許可画面・draftでは投入せず、preparedだけを空の入力欄へ再投入する', () => {
+  runPython(`
+import importlib.util
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.a = SimpleNamespace(poll=0)
+s.last_poll = 0
+s.human_input_seen = False
+s.master = None
+s.state = {'batch': {'id': 'replay', 'phase': 'prepared'}}
+s.check_guard = lambda: None
+sent = []
+def inject():
+    sent.append('injected')
+    s.state['batch']['phase'] = 'sent'
+s.inject = inject
+def draw(text):
+    s.screen = module.TerminalScreen(30, 120)
+    s.screen.feed(text.encode())
+for text in [
+    '? for shortcuts',
+    '> draft\\r\\n? for shortcuts',
+    '>\\r\\nsecond draft line\\r\\n? for shortcuts',
+    '>\\r\\n? for shortcuts\\r\\n> draft\\r\\n? for shortcuts',
+    'Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\nesc to cancel',
+    'Do you trust the contents of this project?\\r\\n> Yes, I trust this folder\\r\\nNavigate · enter Confirm',
+    '> /\\r\\n/help\\r\\n/clear\\r\\nesc to cancel',
+    '▸ Generating...\\r\\n>\\r\\nesc to cancel',
+    'error: command failed\\r\\n> draft\\r\\n? for shortcuts',
+]:
+    draw(text)
+    s.maybe_poll()
+    assert sent == []
+draw('>\\r\\n? for shortcuts    Gemini 3.8 Flash')
+assert s.input_ready()
+draw('過去の受信本文: Requesting permission\\r\\n過去の受信本文: Do you want to proceed?\\r\\n>\\r\\n? for shortcuts')
+assert s.input_ready(), '過去の本文の語句で配送を止めない'
+for tail in [b'\\x1b[', b'\\x1b]title', b'\\xe3']:
+    draw('>\\r\\n? for shortcuts')
+    s.screen.feed(tail)
+    assert not s.input_ready(), '描画途中は投入しない'
+draw('>\\r\\n? for shortcuts')
+s.last_output = module.time.monotonic()
+assert not s.input_ready(), '出力直後は投入しない'
+s.last_output = 0
+s.state['manualResumeRequired'] = True
+s.maybe_poll()
+assert sent == [], '保存されたpauseも保持する'
+s.state['manualResumeRequired'] = False
+s.maybe_poll()
+assert sent == ['injected']
+s.maybe_poll()
+assert sent == ['injected'], 'sent batchは自動再送しない'
+s.state['batch']['phase'] = 'uncertain'
+s.maybe_poll()
+assert sent == ['injected'], 'uncertain batchは自動再送しない'
+`);
+});
+
+test('注入直前に未処理のchild出力または人間入力があればpreparedで保留する', () => {
+  runPython(`
+import importlib.util
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.a = SimpleNamespace(poll=0)
+s.last_poll = 0
+s.last_output = 0
+s.human_input_seen = False
+s.state = {'batch': None, 'manualResumeRequired': False, 'supervisorPhase': 'WAITING_FOR_IDLE'}
+s.check_guard = lambda: None
+s.call = lambda command: '{"id":"m1","body":"test"}' if command == 'peek' else ''
+s.save = lambda: None
+s.input_ready = lambda: True
+s.master = 99
+s.inject = lambda: (_ for _ in ()).throw(AssertionError('pending I/O中にinjectした'))
+saw = {'calls': 0}
+def pending_after_peek(*_args):
+    saw['calls'] += 1
+    return ([], [], []) if saw['calls'] == 1 else ([99], [], [])
+module.select.select = pending_after_peek
+s.maybe_poll()
+assert s.state['batch']['phase'] == 'prepared'
+`);
+});
+
+test('実agy 1.1.27のalternate screen断片はidleだけを注入可能と判定する', () => {
+  runPython(`
+import importlib.util
+import json
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+fixtures = json.loads(Path(${JSON.stringify(agyScreenFixture)}).read_text())
+for name, fixture in fixtures.items():
+    screen = module.TerminalScreen(fixture['rows'], fixture['cols'])
+    s = module.Supervisor.__new__(module.Supervisor)
+    s.screen = screen
+    s.last_output = 0
+    data = fixture['transcript'].encode()
+    results = []
+    for offset in range(0, len(data), 64):
+        screen.feed(data[offset:offset+64])
+        results.append(s.input_ready())
+    assert screen.alternate_screen is True, name
+    assert screen.uncertain is False, name
+    if fixture['idle']:
+        assert results[-1] is True, (name, screen.lines())
+    else:
+        assert not any(results), (name, screen.lines())
+`);
+});
 
 test('TUI envelope は複数メッセージをID順に一対一で表現する', () => {
   runPython(`
@@ -82,7 +202,7 @@ with contextlib.redirect_stderr(notice):
     s.pause_for_human_input()
 assert s.state['manualResumeRequired'] is True
 assert s.human_input_seen is True
-assert s.idle_ready is False
+assert s.state['supervisorPhase'] == 'WAITING_FOR_IDLE'
 assert notice.getvalue().count('$agmsg resume') == 1
 `);
 });
@@ -178,7 +298,7 @@ assert screen.lines_after(expected).splitlines()[0] == '? for shortcuts'
 `);
 });
 
-test('実agy型の差分描画からreceipt行を復元し未知制御は不確実とする', () => {
+test('実agy型の差分描画を復元し、alternate screen切替では旧画面を捨てる', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -194,7 +314,12 @@ assert not screen.uncertain
 screen.feed(b'\\x1b[1z')
 assert screen.uncertain
 screen = module.TerminalScreen(40, 120)
+screen.feed(b'stale primary screen')
 screen.feed(b'\\x1b[?1049h')
+assert screen.alternate_screen
+assert not screen.uncertain
+assert not any('stale primary screen' in line for line in screen.lines())
+screen.feed(b'\\x1b[1z')
 assert screen.uncertain
 `);
 });
@@ -250,7 +375,6 @@ s.master = inner_master
 s.child = None
 s.state = {'supervisorPhase': 'WAITING_FOR_RESULT'}
 s.screen = module.TerminalScreen(40, 120)
-s.idle_ready = True
 s.read_winsize = lambda _fd: fcntl.ioctl(outer_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
 s.sync_winsize()
 actual = fcntl.ioctl(inner_slave, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -258,12 +382,10 @@ assert actual == expected
 assert (s.screen.rows, s.screen.cols) == (41, 121)
 assert s.screen.uncertain
 s.state = {'supervisorPhase': 'WAITING_FOR_IDLE'}
-s.idle_ready = True
 fcntl.ioctl(outer_slave, termios.TIOCSWINSZ, struct.pack('HHHH', 42, 122, 0, 0))
 s.sync_winsize()
 assert (s.screen.rows, s.screen.cols) == (42, 122)
 assert not s.screen.uncertain
-assert not s.idle_ready
 for fd in (outer_master, outer_slave, inner_master, inner_slave): os.close(fd)
 `);
 });
@@ -287,20 +409,21 @@ test('偽TUIを実PTYで起動し、受信後のreceipt確認からackまで進�
   fs.cpSync(path.join(repo, 'scripts'), path.join(install, 'scripts'), { recursive: true });
   const fake = path.join(dir, 'agy');
   fs.writeFileSync(path.join(dir, 'fake.mjs'), `
-process.stdout.write('? for shortcuts\\n');
+process.stdin.setRawMode(true);
+process.stdout.write('>\\r\\n? for shortcuts\\r\\n');
 let input = '';
 process.stdin.on('data', chunk => {
   input += chunk.toString();
   const match = input.match(/\\[agmsg batch id=([^ ]+) count=/);
   if (!match) {
-    if (input.includes('D')) { process.stdout.write('? for shortcuts\\n'); input = ''; }
+    if (input === 'D') { process.stdout.write('\\x1b[2J\\x1b[H>\\r\\n? for shortcuts\\r\\n'); input = ''; }
     return;
   }
   if (!input.includes('[/agmsg batch]')) return;
-  if (input.includes('NO_RECEIPT')) { process.stdout.write(input + '\\n? for shortcuts\\n'); input = ''; return; }
+  if (input.includes('NO_RECEIPT') && !process.env.TEST_REPLAY_RECEIPT) { process.stdout.write(input + '\\r\\n>\\r\\n? for shortcuts\\r\\n'); input = ''; return; }
   const receipt = 'AGMSG_RECEIVED:' + match[1];
-  if (input.includes('RENDER_THEN_RECEIPT')) process.stdout.write(input + '\\n' + receipt + '\\n? for shortcuts\\n');
-  else process.stdout.write(receipt + '\\n? for shortcuts\\n');
+  if (input.includes('RENDER_THEN_RECEIPT')) process.stdout.write(input + '\\r\\n');
+  process.stdout.write('\\x1b[2J\\x1b[H' + receipt + '\\r\\n>\\r\\n? for shortcuts\\r\\n');
   input = '';
 });
 `);
@@ -346,6 +469,7 @@ process.stdin.on('data', chunk => {
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
     child.stdin.write('D');
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === true);
+    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty paused/);
     const resume = spawnSync('python3', [path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py'), '--action', 'resume', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(resume.status, 0, resume.stderr);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === false);
@@ -365,13 +489,26 @@ process.stdin.on('data', chunk => {
     const stop = spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(stop.status, 0, stop.stderr);
     await waitFor(() => child.exitCode !== null);
+    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty 停止\/要確認/);
+    const deadStatus = spawnSync('python3', [supervisorPath, '--action', 'status', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
+    assert.equal(deadStatus.status, 0, deadStatus.stderr);
+    assert.match(deadStatus.stdout, /runtime: worker tui-pty 停止\/要確認/);
     assert.match(stop.stdout, /停止要求を送信しました/);
     assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
     const rejected = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', 'wrong-id'], { env, encoding: 'utf8' });
     assert.notEqual(rejected.status, 0);
-    const recover = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id], { env, encoding: 'utf8' });
-    assert.equal(recover.status, 0, recover.stderr);
-    assert.match(recover.stdout, /復旧ackを完了しました/);
+    const replayCommand = 'stty rows 40 cols 120; exec ' + ['python3', supervisorPath, '--action', 'replay', '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake, '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id].map(quote).join(' ');
+    const replay = spawn('script', ['-qefc', replayCommand, '/dev/null'], { env: { ...env, TEST_REPLAY_RECEIPT: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let replayOutput = '';
+    replay.stdout.on('data', chunk => { replayOutput += chunk.toString(); });
+    replay.stderr.on('data', chunk => { replayOutput += chunk.toString(); });
+    try {
+      await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
+      assert.match(replayOutput, new RegExp('AGMSG_RECEIVED:' + uncertain.batch.id));
+    } finally {
+      spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
+      await waitFor(() => replay.exitCode !== null);
+    }
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
   } finally {
     if (child.exitCode === null) child.stdin.write('\x04');

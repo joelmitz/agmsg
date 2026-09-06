@@ -22,7 +22,7 @@ class TerminalScreen:
     """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
     def __init__(self, rows, cols):
         self.rows=max(1,rows); self.cols=max(1,cols); self.cells=[[' ']*self.cols for _ in range(self.rows)]
-        self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False
+        self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False; self.alternate_screen=False
     def resize(self, rows, cols):
         rows=max(1,rows); cols=max(1,cols)
         if (rows,cols)==(self.rows,self.cols): return False
@@ -111,7 +111,10 @@ class TerminalScreen:
             self._normalize_row(self.row)
         elif final=='s': self.saved=(self.row,self.col)
         elif final=='u' and not body.startswith(('?','>','=')): self.row,self.col=self.saved
-        elif final in ('h','l') and body.startswith('?') and any(value in (47,1047,1049) for value in p): self.uncertain=True
+        elif final in ('h','l') and body.startswith('?') and any(value in (47,1047,1049) for value in p):
+            # agy 1.1.27 は起動から終了までalternate screenを通常画面として使う。
+            # 切替時は旧画面を捨て、切替後の完全なidle描画を改めて要求する。
+            self.alternate_screen=final=='h'; self.clear(); self.uncertain=False
         elif final in ('m','h','l','p','q','t','u','~'): pass
         else:self.uncertain=True
     def feed(self, data):
@@ -166,7 +169,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False; self.resume_requested=False; self.resize_requested=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.human_input_seen=False; self.resume_requested=False; self.resize_requested=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -179,7 +182,7 @@ class Supervisor:
         self.resize_requested=True
     def pause_for_human_input(self):
         already_paused=self.state.get('manualResumeRequired',False)
-        self.human_input_seen=True; self.idle_ready=False; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
+        self.human_input_seen=True; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
         if not already_paused:
             print('\r\n[agmsg] 人間の入力を検知したため自動配送を一時停止しました。再開: $agmsg resume',file=sys.stderr)
     @staticmethod
@@ -193,7 +196,7 @@ class Supervisor:
             rows,cols,_,_=struct.unpack('HHHH',winsize)
             if (rows,cols)!=(self.screen.rows,self.screen.cols):
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.screen.resize(rows,cols)
-                else: self.screen=TerminalScreen(rows,cols); self.idle_ready=False
+                else: self.screen=TerminalScreen(rows,cols)
         try:
             if self.child and proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGWINCH)
         except (FileNotFoundError,ProcessLookupError): pass
@@ -316,9 +319,12 @@ class Supervisor:
             b['phase']='uncertain'; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); raise
         self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
     def maybe_poll(self):
-        if self.state['batch'] or time.monotonic()-self.last_poll<self.a.poll: return
+        if time.monotonic()-self.last_poll<self.a.poll: return
         self.check_guard()
-        if not self.idle_ready or self.human_input_seen: return
+        if not self.injection_ready() or self.human_input_seen or self.state.get('manualResumeRequired'): return
+        if self.state['batch']:
+            if self.state['batch'].get('phase')=='prepared': self.inject()
+            return
         self.last_poll=time.monotonic(); rows=self.call('peek').strip()
         if not rows:return
         msgs=[json.loads(x) for x in rows.splitlines()]; chosen=[]; size=0
@@ -329,8 +335,28 @@ class Supervisor:
             chosen.append(m);size+=n
         if not chosen:return
         self.state['batch']={'id':str(uuid.uuid4()),'phase':'prepared','messages':chosen}; self.state['supervisorPhase']='PREPARED'; self.save()
-        # 初期版は、直近出力に実測済みの prompt footer があるときだけ投入する。
-        if self.idle_ready and not self.human_input_seen: self.inject()
+        # peek/save中の画面遷移や人間入力も、注入直前に再検査する。
+        if self.injection_ready(): self.inject()
+    def input_ready(self):
+        # footerだけでは許可画面や入力途中を区別できない。空の入力欄も要求する。
+        screen=getattr(self,'screen',None)
+        if not screen or screen.uncertain or screen.state!='normal' or screen.decoder.getstate()[0]: return False
+        if time.monotonic()-getattr(self,'last_output',0)<0.3: return False
+        lines=screen.lines()
+        visible=[line.strip() for line in lines if line.strip()]
+        if not visible or not visible[-1].startswith('? for shortcuts'): return False
+        # 画面全体の本文には依存せず、最下部の入力領域だけを見る。
+        # これにより、過去の会話や受信本文の文言で配送を止めない。
+        before=visible[:-1]
+        while before and all(ch in '─━-' for ch in before[-1]): before.pop()
+        return bool(before) and before[-1]=='>'
+    def injection_ready(self):
+        if not self.input_ready(): return False
+        master=getattr(self,'master',None)
+        if master is None:return True
+        # 画面モデルへ未反映のchild出力、または未処理の人間入力があれば保留する。
+        readable,_,_=select.select([sys.stdin.fileno(),master],[],[],0)
+        return not readable and self.input_ready()
     def loop(self):
         while not self.stopping:
             if self.resize_requested:
@@ -338,8 +364,8 @@ class Supervisor:
             if self.resume_requested:
                 self.resume_requested=False
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中のresume要求を拒否'); continue
-                self.human_input_seen=False; self.idle_ready=True; self.state['manualResumeRequired']=False; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
-                print('\r\n入力欄を手動確認済みとしてmonitorを再開します',file=sys.stderr)
+                self.human_input_seen=False; self.state['manualResumeRequired']=False; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
+                print('\r\nmonitor再開要求を受け付けました。空の入力待ち画面を確認してから配送します',file=sys.stderr)
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
@@ -353,9 +379,8 @@ class Supervisor:
             if self.master in r:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
+                self.last_output=time.monotonic()
                 os.write(sys.stdout.fileno(),data); self.screen.feed(data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
-                if self.screen.has_line('? for shortcuts') and not self.state.get('batch'):
-                    self.idle_ready=True
                 b=self.state.get('batch')
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
@@ -364,8 +389,6 @@ class Supervisor:
                         if self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
                         elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
-                elif b and self.state.get('supervisorPhase')=='PREPARED' and self.idle_ready and not self.human_input_seen:
-                    self.inject()
             self.maybe_poll()
     def run(self):
         self.acquire()
@@ -401,7 +424,7 @@ def recover(a):
     if not batch or batch.get('id')!=a.batch: raise RuntimeError('復旧batch IDが一致しません')
     expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
     if expected!=actual: raise RuntimeError('復旧batchのID集合が一致しません')
-    s.state=state; s.reservation.unlink(); s.violations.write_text('')
+    s.state=state; s.human_input_seen=bool(state.get('manualResumeRequired')); s.reservation.unlink(); s.violations.write_text('')
     s.claim_reservation()
     try:
         if a.action=='ack':
@@ -438,7 +461,7 @@ def main():
             if not matches: print('runtime: tui-pty 未起動'); return
             for _,reservation,state,live in matches:
                 batch=state.get('batch')
-                status='paused' if state.get('manualResumeRequired') else 'busy' if batch else 'running' if live else '停止/要確認'
+                status='停止/要確認' if not live else 'paused' if state.get('manualResumeRequired') else 'busy' if batch else 'running'
                 print(f"runtime: {state.get('role')} tui-pty {status}")
                 if batch:
                     print(f"batch: {batch.get('id')} phase={batch.get('phase')} messages={len(batch.get('messages',[]))}")

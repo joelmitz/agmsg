@@ -75,10 +75,12 @@ PTY の bytes だけでは「入力欄が空」「モデルが idle」「承認�
 2. 起動後の初期化 turn、または直近の人間入力のいずれかに対応する TUI の完了マーカーを一度観測している。
 3. 直近の TUI 画面状態が、対応バージョンの idle prompt signature と完全一致する。
 4. input buffer の内容が空であることを、端末プロトコル上の消去・cursor 更新を含めて確認できる。
-5. permission、trust、選択 UI、slash-command picker、生成中、エラー、alt-screen 切替中の signature がない。
+5. permission、trust、選択 UI、slash-command picker、生成中、エラーの signature がなく、alt-screen切替後の完全な通常idle描画を観測している。
 6. supervisor が前回注入した batch を持たない。
 
-条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。軽量画面モデルはreceipt行とidle footerの復元に限定し、入力欄の実内容が空であることまでは証明しない。そのため人間入力を一 byteでも観測した後は `manualResumeRequired=true` として自動注入を停止する。利用者が入力欄を空にしたことを目視確認した後、明示的な `antigravity-tui-monitor.sh resume` を実行した場合だけ再評価する。終了時に prepared batch があれば `uncertain` として停止する。
+条件のどれかが不明なら `WAITING_FOR_IDLE` に留める。一定時間の経過で「idle と推定」してはならない。`agy 1.1.27` の実測では、通常 idle は最下部の空 prompt `>` と `? for shortcuts` footer の組であり、trust UI は `Do you trust the contents of this project?` と選択肢、permission UI は `Requesting permission for:` と選択肢、生成中は `Generating...` と `esc to cancel` footerを表示する。supervisorはブラックリスト語句を画面全体から探さず、最下部が実測済みの通常 idle signatureに一致する場合だけ許可する。これにより過去の会話本文にUI文言が含まれても停止せず、選択UI・生成中・エラー・alt-screen切替中は通常idleとして扱わない。slash-command pickerは実transcript未採取のため、通常idleと一致しない限り保留する。軽量画面モデルによる空欄判定は近似であって完全な証明ではなく、人間ラッチが引き続き権威である。そのため人間入力を一 byteでも観測した後は `manualResumeRequired=true` として自動注入を停止する。利用者が入力欄を空にしたことを目視確認した後、明示的な `antigravity-tui-monitor.sh resume` を実行した場合だけ再評価する。終了時に prepared batch があれば `uncertain` として停止する。
+
+`agy 1.1.27` は起動から終了までalternate screenを通常画面として使用する。したがってalternate screenに居ること自体は拒否条件にしない。`?47`、`?1047`、`?1049` の切替を観測した瞬間に旧画面モデルを破棄し、切替後の完全な通常idle描画を再び観測するまで保留する。注入する bracketed paste envelope は CR（Enter）で終わるため、通常idle以外へ送れば許可・選択UIを確定しうる。`peek` と prepared state の保存中にも画面は変化しうるため、注入直前に通常idle signatureを再評価し、PTY masterに未処理のchild出力または親terminalに未処理の人間入力があれば、batchをpreparedのまま保留する。これにより画面モデルを確認した後にpermission・trust・選択UI・生成中へ遷移した場合、末尾のEnterを送らない。
 
 screen parser の完了 marker は ack の十分条件ではない。injected batch ごとに、対応バージョンの正常完了 transcript を replay して確認済みの positive completion signature、注入した envelope の echo、エラー・cancel・interrupt signature の不在が同時に必要である。どれかを判別できないバージョンでは自動 ack を有効にせず `NEEDS_ATTENTION` にする。
 
@@ -172,9 +174,9 @@ read-denied latch の後に supervisor が終了した場合、`agy-tui reset-gu
 
 ## 11. 未解決事項
 
-- `agy 1.1.27` のpermission・picker transcriptをどの形式で匿名化してfixture化するか。
+- slash-command pickerの実transcriptは未採取。idle、trust、permission、生成中は匿名化した実画面断片を `tests/fixtures/agy-1.1.27-screen-transcripts.json` に固定済み。
 - terminal emulator ごとの差、IME、tmux/SSH、alternate screen の観測範囲。
-- alternate screen切替は`uncertain`として安全側に停止するため、receipt turnで恒常的に使われるバージョンではack不能になる。
+- alternate screen切替後の画面再構築が、terminal emulatorごとに同じ制御列となるかは未確認。
 - 未対応のIL/DL、SU/SD、DECSTBM、DSR、DAをagyがreceipt turnで使うと安全側に停止し、ack不能になる可用性リスクがある。
 - user が既存 `agy` を直接起動した場合に、monitor wrapper の再起動へどこまで案内するか。
 
