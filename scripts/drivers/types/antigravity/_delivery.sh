@@ -41,7 +41,8 @@ agmsg_delivery_status() {
   if [ -f "$file" ] && grep -q '^<!-- agmsg:antigravity:monitor -->$' "$file"; then echo 'mode: monitor'; else rulefile_status "$@"; fi
 }
 agmsg_delivery_on_enable() {
-  printf '明示起動: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-monitor.sh" "$3"
+  printf 'headless明示起動: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-monitor.sh" "$3"
+  printf 'TUI明示起動: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh" "$3"
 }
 agmsg_delivery_runtime_status() {
   node "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-mode.mjs" status "$2"
