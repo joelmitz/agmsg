@@ -1,6 +1,6 @@
 # Antigravity TUI PTY monitor 設計
 
-状態: 提案。実装、commit、push、既存インストールへの反映は未実施。
+状態: 実装中。設計レビューPASS済み、実装commit a32327eあり。修正レビューとpushは未実施。
 作成者: luna。作成日: 2026-09-06（JST）。
 
 ## 1. 結論と根拠

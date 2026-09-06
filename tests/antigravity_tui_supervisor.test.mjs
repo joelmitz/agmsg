@@ -85,7 +85,8 @@ let input = '';
 process.stdin.on('data', chunk => {
   input += chunk.toString();
   const match = input.match(/\\[agmsg batch id=([^ ]+) receipt=([^ ]+)/);
-  if (!match) return;
+  if (!match || !input.includes('[/agmsg batch]')) return;
+  if (input.includes('NO_RECEIPT')) { input = ''; return; }
   process.stdout.write('AGMSG_RECEIVED:' + match[1] + ':' + match[2] + '\\n? for shortcuts\\n');
   input = '';
 });
@@ -130,14 +131,24 @@ process.stdin.on('data', chunk => {
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     assert.match(output, /AGMSG_RECEIVED:/);
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    run('send.sh', ['fixture', 'sender', 'worker', 'NO_RECEIPT']);
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const uncertain = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
+    assert.notEqual(uncertain.batch, null);
     const supervisorPath = path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py');
     const status = spawnSync('python3', [supervisorPath, '--action', 'status', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(status.status, 0, status.stderr);
-    assert.match(status.stdout, /runtime: worker tui-pty running/);
+    assert.match(status.stdout, /runtime: worker tui-pty busy/);
     const stop = spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(stop.status, 0, stop.stderr);
     await waitFor(() => child.exitCode !== null);
     assert.match(stop.stdout, /停止要求を送信しました/);
+    assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
+    const recover = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id], { env, encoding: 'utf8' });
+    assert.equal(recover.status, 0, recover.stderr);
+    assert.match(recover.stdout, /復旧ackを完了しました/);
+    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
   } finally {
     if (child.exitCode === null) child.stdin.write('\x04');
     await Promise.race([once(child, 'close'), new Promise(resolve => setTimeout(resolve, 5000))]);

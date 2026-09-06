@@ -27,14 +27,11 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':1,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','batch':None}
-        self.master=None; self.child=None; self.old=None; self.stopping=False; self.buffer=''; self.last_poll=0
+        self.master=None; self.child=None; self.old=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.last_poll=0; self.idle_ready=False; self.human_input_seen=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
     def request_stop(self, signum, _frame):
-        if self.state.get('batch') and self.state['batch'].get('phase')!='completed':
-            self.fail(f'外部停止要求({signal.Signals(signum).name})')
-        else:
-            self.stopping=True
+        self.stop_reason=f'外部停止要求({signal.Signals(signum).name})'
     def call(self, command, extra=(), input=None, cap=False):
         fds=()
         passfds=()
@@ -52,17 +49,40 @@ class Supervisor:
     def fail(self, why):
         if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.state['batch']['phase']='uncertain'
         self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); print(f'\r\n{why}; ackせず停止します',file=sys.stderr); self.stopping=True
+    def check_guard(self):
+        reservation=json.loads(self.reservation.read_text())
+        if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('予約所有権不一致')
+        if proc_start(os.getpid())!=self.start: raise RuntimeError('supervisor start token不一致')
+        if self.actas.read_text().strip()!=self.owner: raise RuntimeError('actas所有権不一致')
+        if self.violations.exists() and self.violations.read_text().strip(): raise RuntimeError('通常inboxによる既読試行を検知')
+        if self.child and proc_start(self.child)!=self.state.get('childStart'): raise RuntimeError('agy child start token不一致')
     def acquire(self):
         mode=Path(self.project)/'.agent/rules/agmsg.md'
         if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor設定が必要')
-        if self.reservation.exists(): raise RuntimeError('既存Antigravity bridge/TUI supervisor が稼働または要確認です')
-        self.call('claim'); self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
+        if self.reservation.exists():
+            old=json.loads(self.reservation.read_text())
+            try:
+                if proc_start(int(old['pid']))==old['start']: raise RuntimeError('既存Antigravity bridge/TUI supervisor が稼働中です')
+            except (FileNotFoundError,ProcessLookupError,ValueError): pass
+            if self.state_file.exists():
+                old_state=json.loads(self.state_file.read_text())
+                if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError('未解決batchです。ack/replayで復旧してください')
+            self.reservation.unlink()
+        if self.state_file.exists():
+            saved=json.loads(self.state_file.read_text())
+            if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
+            self.state=saved
+            self.state['owner']=self.owner
+        self.claim_reservation()
+    def claim_reservation(self):
+        self.call('claim'); self.state['owner']=self.owner; self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
         self.violations.touch(mode=0o600,exist_ok=True); Path(str(self.violations)+'.lock').touch(mode=0o600,exist_ok=True)
         # bridge-read-guard は fd 3 から改行を除いた値をハッシュする。
         atomic(self.reservation,{'owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
     def launch(self):
         pid, master=pty.fork()
         if pid==0:
+            attrs=termios.tcgetattr(0); attrs[3]&=~(termios.ECHO|termios.ECHONL); termios.tcsetattr(0,termios.TCSANOW,attrs)
             os.chdir(self.project); os.execvp(self.a.agy,[self.a.agy])
         self.child=pid; self.master=master; self.old=termios.tcgetattr(sys.stdin.fileno()); tty.setraw(sys.stdin.fileno())
         self.state.update({'childPid':pid,'childStart':proc_start(pid),'supervisorPhase':'WAITING_FOR_IDLE'}); self.save()
@@ -80,11 +100,16 @@ class Supervisor:
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}:{hashlib.sha256(",".join(m["id"] for m in b["messages"]).encode()).hexdigest()[:16]}'
         self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     def ack(self):
+        self.check_guard()
         b=self.state['batch']; b['phase']='completed'; self.state['supervisorPhase']='ACK_PENDING'; self.save()
-        self.call('ack',input=json.dumps([m['id'] for m in b['messages']]),cap=True)
+        try: self.call('ack',input=json.dumps([m['id'] for m in b['messages']]),cap=True)
+        except Exception:
+            b['phase']='uncertain'; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); raise
         self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
     def maybe_poll(self):
         if self.state['batch'] or time.monotonic()-self.last_poll<self.a.poll: return
+        self.check_guard()
+        if not self.idle_ready or self.human_input_seen: return
         self.last_poll=time.monotonic(); rows=self.call('peek').strip()
         if not rows:return
         msgs=[json.loads(x) for x in rows.splitlines()]; chosen=[]; size=0
@@ -96,40 +121,79 @@ class Supervisor:
         if not chosen:return
         self.state['batch']={'id':str(uuid.uuid4()),'phase':'prepared','messages':chosen}; self.state['supervisorPhase']='PREPARED'; self.save()
         # 初期版は、直近出力に実測済みの prompt footer があるときだけ投入する。
-        if '? for shortcuts' in self.buffer[-4096:]: self.inject()
-    def run(self):
-        self.acquire(); self.launch()
+        if self.idle_ready and not self.human_input_seen: self.inject()
+    def loop(self):
         while not self.stopping:
+            if self.stop_reason:
+                if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
+                break
             r,_,_=select.select([sys.stdin.fileno(),self.master],[],[],0.2)
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
+                else: self.human_input_seen=True; self.idle_ready=False
                 os.write(self.master,data)
             if self.master in r:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
-                os.write(sys.stdout.fileno(),data); self.buffer=(self.buffer+data.decode(errors='replace'))[-65536:]
+                os.write(sys.stdout.fileno(),data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
+                if '? for shortcuts' in text and not self.state.get('batch'): self.idle_ready=True
                 b=self.state.get('batch')
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and b.get('receipt') in self.buffer:
                     self.ack()
                 elif b and self.state.get('supervisorPhase')=='PREPARED' and '? for shortcuts' in self.buffer[-4096:]:
                     self.inject()
             self.maybe_poll()
+    def run(self):
+        self.acquire(); self.launch(); self.loop()
     def close(self):
         if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
         if self.child:
-            try: os.kill(self.child,signal.SIGHUP)
-            except ProcessLookupError: pass
+            try: os.write(self.master,b'\x04')
+            except (OSError,TypeError): pass
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                try:
+                    if proc_start(self.child)!=self.state.get('childStart'): break
+                except (FileNotFoundError,ProcessLookupError): break
+                time.sleep(0.05)
+            try:
+                if proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGHUP)
+            except (FileNotFoundError,ProcessLookupError): pass
         if not self.state.get('batch'):
             try:
                 r=json.loads(self.reservation.read_text())
-                if r['owner']==self.owner and r['start']==self.start: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
+                if r['owner']==self.owner and r['start']==self.start and self.actas.read_text().strip()==self.owner: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
             except Exception: pass
 
+def recover(a):
+    s=Supervisor(a)
+    if not s.reservation.exists() or not s.state_file.exists(): raise RuntimeError('復旧対象の予約/stateがありません')
+    reservation=json.loads(s.reservation.read_text()); state=json.loads(s.state_file.read_text()); batch=state.get('batch')
+    try: live=proc_start(int(reservation['pid']))==reservation['start']
+    except (FileNotFoundError,ValueError): live=False
+    if live: raise RuntimeError('復旧対象のsupervisorが稼働中です')
+    if not batch or batch.get('id')!=a.batch: raise RuntimeError('復旧batch IDが一致しません')
+    expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
+    if expected!=actual: raise RuntimeError('復旧batchのID集合が一致しません')
+    s.state=state; s.reservation.unlink(); s.violations.write_text('')
+    s.claim_reservation()
+    try:
+        if a.action=='ack':
+            s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
+            print('復旧ackを完了しました')
+        else:
+            s.state['batch']['phase']='prepared'; s.state['supervisorPhase']='PREPARED'; s.save(); s.launch(); s.loop()
+    finally:
+        s.close()
+
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop'],default='run')
+    p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
     a=p.parse_args()
+    if a.action in ('ack','replay'):
+        if not a.batch or not a.confirm_ids: raise RuntimeError('--batch と --confirm-id が必要です')
+        recover(a); return
     if a.action in ('status','stop'):
         matches=[]
         for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
@@ -157,6 +221,6 @@ def main():
         return
     s=Supervisor(a)
     try:s.run()
-    except Exception as e: s.fail(str(e))
+    except Exception as e: s.fail(str(e)); sys.exit(1)
     finally:s.close()
 if __name__=='__main__': main()
