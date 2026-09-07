@@ -207,6 +207,49 @@ assert notice.getvalue().count('$agmsg resume') == 1
 `);
 });
 
+test('実測済みの許可UIだけは受信turn中の人間確認入力を許可する', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+fixtures = json.loads(Path(${JSON.stringify(agyScreenFixture)}).read_text())
+def screen(name):
+    fixture=fixtures[name]
+    value=module.TerminalScreen(fixture['rows'], fixture['cols'])
+    value.feed(fixture['transcript'].encode())
+    return value
+s = module.Supervisor.__new__(module.Supervisor)
+s.screen = screen('permission')
+assert s.permission_input_ready()
+s.screen = screen('trust')
+assert s.permission_input_ready()
+for name in ('idle', 'generating'):
+    s.screen = screen(name)
+    assert not s.permission_input_ready(), name
+s.screen = module.TerminalScreen(28, 120)
+s.screen.feed(b'Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n? for shortcuts')
+assert not s.permission_input_ready(), '受信本文の語句だけで許可しない'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n▸ Generating...\\r\\n>\\r\\n────────────────────────────────\\r\\nesc to cancel'.encode())
+assert not s.permission_input_ready(), '生成中chromeと受信本文の語句を許可UIと誤認しない'
+s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': False, 'supervisorPhase': 'WAITING_FOR_RESULT'}
+s.human_input_seen = False
+s.save = lambda: None
+notice = io.StringIO()
+with contextlib.redirect_stderr(notice): s.allow_permission_input()
+assert s.state['batch']['phase'] == 'sent'
+assert s.state['manualResumeRequired'] is True
+assert s.state['supervisorPhase'] == 'WAITING_FOR_RESULT'
+assert s.human_input_seen is True
+assert '受領確認は継続' in notice.getvalue()
+`);
+});
+
 test('read-denied停止には安全な復旧案内を表示する', () => {
   runPython(`
 import contextlib
@@ -412,14 +455,28 @@ test('偽TUIを実PTYで起動し、受信後のreceipt確認からackまで進�
 process.stdin.setRawMode(true);
 process.stdout.write('>\\r\\n? for shortcuts\\r\\n');
 let input = '';
+let permissionBatch = null;
 process.stdin.on('data', chunk => {
   input += chunk.toString();
+  if (permissionBatch) {
+    if (!input.includes('1')) return;
+    process.stdout.write('\\x1b[2J\\x1b[HAGMSG_RECEIVED:' + permissionBatch + '\\r\\n>\\r\\n? for shortcuts\\r\\n');
+    permissionBatch = null;
+    input = '';
+    return;
+  }
   const match = input.match(/\\[agmsg batch id=([^ ]+) count=/);
   if (!match) {
     if (input === 'D') { process.stdout.write('\\x1b[2J\\x1b[H>\\r\\n? for shortcuts\\r\\n'); input = ''; }
     return;
   }
   if (!input.includes('[/agmsg batch]')) return;
+  if (input.includes('PERMISSION_THEN_RECEIPT')) {
+    permissionBatch = match[1];
+    process.stdout.write('\\x1b[2J\\x1b[HCommand\\r\\n\\r\\nRequesting permission for:\\r\\n   fake safe command\\r\\n\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n  2. No\\r\\n\\r\\n  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\\r\\nesc to cancel                                                                        Gemini 3.8 Flash · high');
+    input = '';
+    return;
+  }
   if (input.includes('NO_RECEIPT') && !process.env.TEST_REPLAY_RECEIPT) { process.stdout.write(input + '\\r\\n>\\r\\n? for shortcuts\\r\\n'); input = ''; return; }
   const receipt = 'AGMSG_RECEIVED:' + match[1];
   if (input.includes('RENDER_THEN_RECEIPT')) process.stdout.write(input + '\\r\\n');
@@ -477,6 +534,21 @@ process.stdin.on('data', chunk => {
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.messages?.some(message => message.body === 'RENDER_THEN_RECEIPT'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    run('send.sh', ['fixture', 'sender', 'worker', 'PERMISSION_THEN_RECEIPT']);
+    await waitFor(() => output.includes('Requesting permission for:'));
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
+    child.stdin.write('1');
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
+    const afterPermission = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
+    assert.equal(afterPermission.manualResumeRequired, true, '許可後の次batchは明示resumeまで停止する');
+    run('send.sh', ['fixture', 'sender', 'worker', 'HELD_AFTER_PERMISSION']);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.match(run('history.sh', ['fixture', 'worker']), /● .*HELD_AFTER_PERMISSION/);
+    const resumeAfterPermission = spawnSync('python3', [path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py'), '--action', 'resume', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
+    assert.equal(resumeAfterPermission.status, 0, resumeAfterPermission.stderr);
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).manualResumeRequired === false);
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.messages?.some(message => message.body === 'HELD_AFTER_PERMISSION'));
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     run('send.sh', ['fixture', 'sender', 'worker', 'NO_RECEIPT']);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
     await new Promise(resolve => setTimeout(resolve, 300));

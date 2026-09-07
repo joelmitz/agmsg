@@ -185,6 +185,28 @@ class Supervisor:
         self.human_input_seen=True; self.state['manualResumeRequired']=True; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
         if not already_paused:
             print('\r\n[agmsg] 人間の入力を検知したため自動配送を一時停止しました。再開: $agmsg resume',file=sys.stderr)
+    def permission_input_ready(self):
+        """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
+        screen=getattr(self,'screen',None)
+        if not screen or screen.uncertain or screen.state!='normal' or screen.decoder.getstate()[0]: return False
+        visible=[line.strip() for line in screen.lines() if line.strip()]
+        if not visible: return False
+        # 受信本文に同じ語句があっても誤認しないよう、modal footer と直近の選択肢を同時に要求する。
+        if visible[-1].startswith('esc to cancel'):
+            # 実機のpermission UIは選択肢が4行あり、見出しは末尾から11行目になる。
+            tail=visible[-12:]
+            return (len(visible)>=2 and visible[-2].startswith('↑/↓ Navigate · tab Amend')
+                    and 'Requesting permission for:' in tail and 'Do you want to proceed?' in tail
+                    and any(re.fullmatch(r'>\s*1\. Yes', line) for line in tail))
+        if visible[-1].startswith('↑/↓ Navigate · enter Confirm'):
+            tail=visible[-8:]
+            return ('Do you trust the contents of this project?' in tail
+                    and '> Yes, I trust this folder' in tail)
+        return False
+    def allow_permission_input(self):
+        # 現在のbatchはreceiptを待つ。次のbatchを自動注入しないようpauseは維持する。
+        self.human_input_seen=True; self.state['manualResumeRequired']=True; self.save()
+        print('\r\n[agmsg] 許可UIへの人間入力をrelayしました。現在の受領確認は継続し、次の自動配送は $agmsg resume まで停止します',file=sys.stderr)
     @staticmethod
     def read_winsize(fd):
         return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -373,7 +395,8 @@ class Supervisor:
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
-                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
+                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
+                elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
                 else: self.pause_for_human_input()
                 os.write(self.master,data)
             if self.master in r:

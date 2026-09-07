@@ -115,7 +115,9 @@ PTY への書込成功は受領確認に使わない。注入後、supervisor �
 
 安全境界は、画面モデルへ入力される端末制御列を出力できる主体をagy childに限定することに置く。人間の入力byteはPTY masterへ転送するだけで画面モデルへ直接入力せず、外部メッセージ本文のESCは表示可能な文字列へ無害化する。agyのレンダラがenvelope上のglyphをreceiptへ意図的に再配置しないことを信頼する。この境界を崩す本文ESCの素通し、人間入力の`screen.feed()`、agy以外の出力の混入を禁止する。
 
-注入後にhuman inputを観測した場合は`NEEDS_ATTENTION`にして自動ackしない。error、cancel、interrupt、permission、pickerはreceipt行より画面上で後ろに残っている場合だけ補助的に検査し、上書き済み表示は検知できない。receiptが無ければackしない。受信turn中のresizeまたは未対応制御列は画面を`uncertain`にし、receiptが見えてもackしない。待機中のresizeは画面モデルとidle判定を初期化し、同期後に新しいidle描画を観測してから注入を再評価する。
+注入後にhuman inputを観測した場合は原則として`NEEDS_ATTENTION`にして自動ackしない。例外として、実測済みの permission または trust modal の footer・選択肢・見出しが同時に画面下部で一致する場合だけ、利用者の確認入力をそのままPTTYへrelayする。この例外でも次のbatchの自動注入は`manualResumeRequired=true`で停止し、現在のbatchは同じreceiptだけを待つ。receiptが画面上の完全行として確認できた場合だけackする。error、cancel、interrupt、permission、pickerはreceipt行より画面上で後ろに残っている場合だけ補助的に検査し、上書き済み表示は検知できない。receiptが無ければackしない。受信turn中のresizeまたは未対応制御列は画面を`uncertain`にし、receiptが見えてもackしない。待機中のresizeは画面モデルとidle判定を初期化し、同期後に新しいidle描画を観測してから注入を再評価する。
+
+permission modal は、最終行の `esc to cancel...` だけで判定しない。直前行の `↑/↓ Navigate · tab Amend...`、見出し、選択肢も同時に一致させる。生成中 UI は同じ最終 footer を持つため、受信本文に permission の語句があっても確認入力を relay しない。
 
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 
@@ -123,7 +125,7 @@ PTY への書込成功は受領確認に使わない。注入後、supervisor �
 
 human input は常に先に PTY へ転送する。supervisor は人間入力を取り消し、書き換え、遅延送信しない。外部 batch が `PREPARED` または `WAITING_FOR_IDLE` の間に人間が任意のキーを入力した場合、idle 判定を無効化して `manualResumeRequired=true` をラッチする。次の完了 markerだけでは解除せず、利用者が入力欄を空にしたことを目視確認してから明示 `antigravity-tui-monitor.sh resume` を実行する。
 
-`INJECTED` または `WAITING_FOR_RESULT` の間に human input byte を一つでも観測した場合、その batch を `uncertain` にして `NEEDS_ATTENTION` へ移る。入力は TUI へ転送するが、画面が idle に戻っても completed と ack してはならない。Ctrl-C、Esc、Enter を含むため、turn の中断と画面上の正常復帰を混同しない。
+`INJECTED` または `WAITING_FOR_RESULT` の間に human input byte を一つでも観測した場合、その batch を `uncertain` にして `NEEDS_ATTENTION` へ移る。ただし、上記の実測済み permission/trust modal が画面下部で確認できる場合の確認入力だけは例外とする。入力は TUI へ転送し、`manualResumeRequired=true` にして後続batchを止める。現在のbatchについては画面上の完全なreceiptを確認できたときだけ completed と ack してよい。Ctrl-C、Esc、Enter を含むため、modal確認なしの入力ではturnの中断と画面上の正常復帰を混同しない。
 
 入力途中に注入候補があっても、通知ベル、画面外ログ、prompt の追記では代替しない。TUI と会話の一貫性を壊さないことを優先し、保留状態を terminal の status line へ本文なしで表示する。
 
