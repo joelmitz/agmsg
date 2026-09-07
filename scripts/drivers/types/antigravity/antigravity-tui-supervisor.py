@@ -160,12 +160,23 @@ class TerminalScreen:
             elif ch=='\t':self.col=min(self.cols,((self.col//8)+1)*8)
             elif ch>=' ':self._write(ch)
     def lines(self): return [''.join(line).rstrip() for line in self.cells]
-    def has_line(self, expected): return any(line.strip()==expected for line in self.lines())
-    def lines_after(self, expected):
+    def _expected_end(self, expected):
         lines=self.lines()
-        for index,line in enumerate(lines):
-            if line.strip()==expected:return '\n'.join(lines[index+1:])
+        # agy のレンダラは狭い端末で、論理的には一行のreceiptを物理行へ折り返す。
+        # UUIDを含むexpected全体との一致だけを認め、空行をまたいだ合成はしない。
+        for start in range(len(lines)):
+            joined=''
+            for end in range(start,len(lines)):
+                piece=lines[end].strip()
+                if not piece: break
+                joined+=piece
+                if joined==expected: return end
+                if not expected.startswith(joined): break
         return None
+    def has_line(self, expected): return self._expected_end(expected) is not None
+    def lines_after(self, expected):
+        end=self._expected_end(expected)
+        return None if end is None else '\n'.join(self.lines()[end+1:])
 
 class Supervisor:
     def __init__(self, args):
