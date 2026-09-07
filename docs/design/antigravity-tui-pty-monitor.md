@@ -111,7 +111,7 @@ body:
 
 batch 内の `messages[]` は envelope の message block と ID で一対一に対応する。envelope の count、各 ID、順序、本文ハッシュを prepared state と照合し、一件でも不一致なら注入しない。
 
-PTY への書込成功は受領確認に使わない。注入後、supervisor は agy が出力した端末制御列を軽量画面モデルへ適用し、画面上の完全な receipt を照合する。狭い端末では agy のレンダラが論理一行を複数の連続した物理行へ折り返すため、空行をまたがない連続行を連結して UUID を含む receipt 全体と一致するときも同じreceiptとして扱う。receiptのリテラルはenvelopeへ含めず、英字 `AGMSG_RECEIVED`、ASCIIコロン（U+003A）、batch idを空白なしで連結する構成規則だけを指示する。これはuuid4のbatch idを知る前の事前構成を防ぐが、画面セル上での合成不可能性までは保証しない。
+PTY への書込成功は受領確認に使わない。注入後、supervisor は agy が出力した端末制御列を軽量画面モデルへ適用し、画面上の完全な receipt を照合する。狭い端末では agy のレンダラが論理一行を複数の連続した物理行へ折り返すため、空行をまたがない連続行を連結して UUID を含む receipt 全体と一致するときも同じreceiptとして扱う。ただし、凍結済みの受信本文が同じ規則でreceipt全体を含む場合は、画面上の一致が本文由来か区別できないためfail-closedとしackしない。receiptのリテラルはenvelopeへ含めず、英字 `AGMSG_RECEIVED`、ASCIIコロン（U+003A）、batch idを空白なしで連結する構成規則だけを指示する。これはuuid4のbatch idを知る前の事前構成を防ぐが、画面セル上での合成不可能性までは保証しない。
 
 安全境界は、画面モデルへ入力される端末制御列を出力できる主体をagy childに限定することに置く。人間の入力byteはPTY masterへ転送するだけで画面モデルへ直接入力せず、外部メッセージ本文のESCは表示可能な文字列へ無害化する。agyのレンダラがenvelope上のglyphをreceiptへ意図的に再配置しないことを信頼する。この境界を崩す本文ESCの素通し、人間入力の`screen.feed()`、agy以外の出力の混入を禁止する。
 

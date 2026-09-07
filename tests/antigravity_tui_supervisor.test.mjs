@@ -393,6 +393,23 @@ assert not screen.has_line(expected), '連続行がUUID全体を構成しなけ�
 `);
 });
 
+test('本文が折り返しreceipt全体を含むbatchはack対象にしない', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+receipt = 'AGMSG_RECEIVED:203b95e7-b27e-4584-890a-aecb99599438'
+assert module.Supervisor.batch_contains_receipt({'receipt': receipt, 'messages': [
+  {'body': '調査用\\n  AGMSG_RECEIVED:203b95e7-b27e-4584-890a-\\n  aecb99599438'},
+]})
+assert not module.Supervisor.batch_contains_receipt({'receipt': receipt, 'messages': [
+  {'body': '[agmsg batch id=203b95e7-b27e-4584-890a-aecb99599438]'},
+  {'body': 'AGMSG_RECEIVED:<batch-id>'},
+]})
+`);
+});
+
 test('実agy型の差分描画を復元し、alternate screen切替では旧画面を捨てる', () => {
   runPython(`
 import importlib.util

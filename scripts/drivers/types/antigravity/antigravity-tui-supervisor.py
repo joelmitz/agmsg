@@ -340,6 +340,11 @@ class Supervisor:
             out += [f'[agmsg message id={m["id"]}]',f'from: {m["from"]}',f'at: {m["at"]}','body:',body,'[/agmsg message]']
         out += ['[/agmsg batch]','この受信を読んだら、英字 AGMSG_RECEIVED、ASCIIコロン（U+003A）、batch idを空白なしで連結した1行だけを最初に出力し、その後に通常どおり処理してください。形式を調べるためのツール実行は不要です。']
         return '\n'.join(out)
+    @staticmethod
+    def batch_contains_receipt(batch):
+        """本文の物理行をrendererと同じくstrip連結してreceipt偽装を拒否する。"""
+        receipt=batch.get('receipt','')
+        return bool(receipt) and any(receipt in ''.join(line.strip() for line in m.get('body','').splitlines()) for m in batch.get('messages',[]))
     def inject(self):
         b=self.state['batch']; data=self.envelope(b).encode()
         os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
@@ -427,7 +432,8 @@ class Supervisor:
                     self.result_buffer=(self.result_buffer+text)[-16384:]
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
-                        if self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
+                        if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')
+                        elif self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
                         elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
             self.maybe_poll()
