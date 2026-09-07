@@ -152,6 +152,23 @@ assert screen.uncertain is True, '切替は旧画面を消しても未知CSIの�
 `);
 });
 
+test('agy Read表示のDECST8CとCBTは画面モデルで扱い、それ以外のWはfail-closedにする', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+screen = module.TerminalScreen(4, 40)
+screen.feed(b'\\x1b[?5W')
+assert not screen.uncertain, 'agyのDECST8Cは既定tab stopと同じ'
+screen.feed(b'123456789012\\x1b[ZX')
+assert screen.lines()[0].startswith('12345678X012')
+assert not screen.uncertain, 'Read後に出るCBTでreceipt判定を停止しない'
+screen.feed(b'\\x1b[?4W')
+assert screen.uncertain, '観測していないtab制御は許容しない'
+`);
+});
+
 test('TUI envelope は複数メッセージをID順に一対一で表現する', () => {
   runPython(`
 import importlib.util
@@ -471,7 +488,7 @@ test('偽TUIを実PTYで起動し、受信後のreceipt確認からackまで進�
   const fake = path.join(dir, 'agy');
   fs.writeFileSync(path.join(dir, 'fake.mjs'), `
 process.stdin.setRawMode(true);
-process.stdout.write('>\\r\\n? for shortcuts\\r\\n');
+process.stdout.write('\\x1b[?5W>\\r\\n? for shortcuts\\r\\n');
 let input = '';
 let permissionBatch = null;
 process.stdin.on('data', chunk => {
@@ -498,7 +515,7 @@ process.stdin.on('data', chunk => {
   if (input.includes('NO_RECEIPT') && !process.env.TEST_REPLAY_RECEIPT) { process.stdout.write(input + '\\r\\n>\\r\\n? for shortcuts\\r\\n'); input = ''; return; }
   const receipt = 'AGMSG_RECEIVED:' + match[1];
   if (input.includes('RENDER_THEN_RECEIPT')) process.stdout.write(input + '\\r\\n');
-  process.stdout.write('\\x1b[2J\\x1b[H' + receipt + '\\r\\n>\\r\\n? for shortcuts\\r\\n');
+  process.stdout.write('\\x1b[2J\\x1b[H' + receipt + '\\r\\n>\\r\\n? for shortcuts\\r\\n\\x1b[Z');
   input = '';
 });
 `);

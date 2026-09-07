@@ -87,6 +87,10 @@ class TerminalScreen:
         elif final=='E': self.row=min(self.rows-1,self.row+n); self.col=0
         elif final=='F': self.row=max(0,self.row-n); self.col=0
         elif final=='G': self.col=min(self.cols-1,n-1)
+        elif final=='Z' and not body.startswith(('?','>','=')):
+            # CBT (Cursor Backward Tabulation)。agy 1.1.27 の Read 表示で出力する。
+            # DECST8C で初期化される既定の8列tab stopだけを扱う。
+            for _ in range(n): self.col=max(0,((max(1,self.col)-1)//8)*8)
         elif final in ('H','f'):
             self.row=min(self.rows-1,max(0,(p[0] or 1)-1)); self.col=min(self.cols-1,max(0,(p[1] if len(p)>1 else 1)-1))
         elif final=='d': self.row=min(self.rows-1,max(0,n-1))
@@ -115,6 +119,9 @@ class TerminalScreen:
             # agy 1.1.27 は起動から終了までalternate screenを通常画面として使う。
             # 切替時は旧画面を捨て、切替後の完全なidle描画を改めて要求する。
             self.alternate_screen=final=='h'; self.clear()
+        elif final=='W' and body=='?5':
+            # DECST8C: tab stopを9列目から8列ごとへ戻す。上のCBT/HTの既定値と一致する。
+            pass
         elif final in ('m','h','l','p','q','t','u','~'): pass
         else:self.uncertain=True
     def feed(self, data):

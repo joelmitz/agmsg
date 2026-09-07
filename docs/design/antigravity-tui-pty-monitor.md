@@ -119,6 +119,8 @@ PTY への書込成功は受領確認に使わない。注入後、supervisor �
 
 permission modal は、最終行の `esc to cancel...` だけで判定しない。識別子は、その直前に `↑/↓ Navigate · tab Amend...` が隣接すること、見出し、選択肢の同時一致である。agy 1.1.27 の生成中 UI は同じ最終 footer を持つが、footer の直前は `>` と罫線であり Nav 行ではない。この観測済みの画面配置により、受信本文に permission の語句や Nav 行が含まれても、生成中 chrome を伴う画面では確認入力を relay しない。画面配置を変える agy の版を使う場合は、実画面を採取してこの判定を再検証する。
 
+agy 1.1.27 の `Read` 表示では、`CSI ?5W`（DECST8C、8列ごとのtab stop初期化）と `CSI Z`（CBT、逆方向tab移動）が出る。画面モデルは既定tab stopとしてこの二つだけを扱う。ほかの `W`、private な `Z`、および未対応の制御列は引き続き`uncertain`にして、receiptをackしない。
+
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 
 ## 7. 人間入力と衝突時の動作
