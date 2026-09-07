@@ -114,7 +114,7 @@ class TerminalScreen:
         elif final in ('h','l') and body.startswith('?') and any(value in (47,1047,1049) for value in p):
             # agy 1.1.27 は起動から終了までalternate screenを通常画面として使う。
             # 切替時は旧画面を捨て、切替後の完全なidle描画を改めて要求する。
-            self.alternate_screen=final=='h'; self.clear(); self.uncertain=False
+            self.alternate_screen=final=='h'; self.clear()
         elif final in ('m','h','l','p','q','t','u','~'): pass
         else:self.uncertain=True
     def feed(self, data):

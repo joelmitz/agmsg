@@ -117,7 +117,7 @@ PTY への書込成功は受領確認に使わない。注入後、supervisor �
 
 注入後にhuman inputを観測した場合は原則として`NEEDS_ATTENTION`にして自動ackしない。例外として、実測済みの permission または trust modal の footer・選択肢・見出しが同時に画面下部で一致する場合だけ、利用者の確認入力をそのままPTTYへrelayする。この例外でも次のbatchの自動注入は`manualResumeRequired=true`で停止し、現在のbatchは同じreceiptだけを待つ。receiptが画面上の完全行として確認できた場合だけackする。error、cancel、interrupt、permission、pickerはreceipt行より画面上で後ろに残っている場合だけ補助的に検査し、上書き済み表示は検知できない。receiptが無ければackしない。受信turn中のresizeまたは未対応制御列は画面を`uncertain`にし、receiptが見えてもackしない。待機中のresizeは画面モデルとidle判定を初期化し、同期後に新しいidle描画を観測してから注入を再評価する。
 
-permission modal は、最終行の `esc to cancel...` だけで判定しない。直前行の `↑/↓ Navigate · tab Amend...`、見出し、選択肢も同時に一致させる。生成中 UI は同じ最終 footer を持つため、受信本文に permission の語句があっても確認入力を relay しない。
+permission modal は、最終行の `esc to cancel...` だけで判定しない。識別子は、その直前に `↑/↓ Navigate · tab Amend...` が隣接すること、見出し、選択肢の同時一致である。agy 1.1.27 の生成中 UI は同じ最終 footer を持つが、footer の直前は `>` と罫線であり Nav 行ではない。この観測済みの画面配置により、受信本文に permission の語句や Nav 行が含まれても、生成中 chrome を伴う画面では確認入力を relay しない。画面配置を変える agy の版を使う場合は、実画面を採取してこの判定を再検証する。
 
 これは「モデルが業務を理解した」ことの保証ではない。agmsg の既読は TUI が受信 turn を終えたことだけを表す。
 

@@ -137,6 +137,21 @@ for name, fixture in fixtures.items():
 `);
 });
 
+test('alternate screen切替は以前に検知した未知CSIを正常状態へ戻さない', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+screen = module.TerminalScreen(24, 120)
+screen.feed(b'\\x1b[999z')
+assert screen.uncertain is True
+screen.feed(b'\\x1b[?1049h')
+assert screen.alternate_screen is True
+assert screen.uncertain is True, '切替は旧画面を消しても未知CSIの検知を消さない'
+`);
+});
+
 test('TUI envelope は複数メッセージをID順に一対一で表現する', () => {
   runPython(`
 import importlib.util
@@ -235,8 +250,11 @@ s.screen = module.TerminalScreen(28, 120)
 s.screen.feed(b'Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n? for shortcuts')
 assert not s.permission_input_ready(), '受信本文の語句だけで許可しない'
 s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n▸ Generating...\\r\\n>\\r\\n────────────────────────────────\\r\\nesc to cancel'.encode())
-assert not s.permission_input_ready(), '生成中chromeと受信本文の語句を許可UIと誤認しない'
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\n▸ Generating...\\r\\n>\\r\\n────────────────────────────────\\r\\nesc to cancel'.encode())
+assert not s.permission_input_ready(), '生成中chromeと受信本文の語句・Nav行を許可UIと誤認しない'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), 'Nav行を本文で供給できる合成画面は判定上modalと区別できない'
 s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': False, 'supervisorPhase': 'WAITING_FOR_RESULT'}
 s.human_input_seen = False
 s.save = lambda: None
