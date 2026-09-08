@@ -232,6 +232,17 @@ jobs:
     # week's number. The 2 known intermittent reds (ubuntu 4/4's
     # `_wait_pidfile`, windows runtime #567) are unrelated to this cap.
     timeout-minutes: 30
+    # macos-latest's default shell locale is not UTF-8-aware, so bash's own
+    # byte/char-boundary-sensitive string ops mis-split multi-byte @test names
+    # (this suite's Japanese test descriptions) mid-character, and bats fails
+    # to resolve the mangled name with "unknown test name" -- silently running
+    # fewer tests than the suite declares, never a red assertion. Reproduced:
+    # the exact same 3 test_antigravity_resume.bats names on macos-latest 3/4
+    # (only), Ubuntu unaffected. en_US.UTF-8 is present on both stock runner
+    # images; setting it job-wide is a no-op on Ubuntu (already UTF-8 there).
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
       # to sed/stat/mktemp/ps etc. whose flags differ between them.
