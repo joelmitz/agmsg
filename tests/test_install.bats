@@ -37,6 +37,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
@@ -45,7 +46,7 @@ teardown() {
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 0 ]
-  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
     --project /tmp/not-joined --team demo --name agy
@@ -64,7 +65,10 @@ teardown() {
 
   rm "$shim"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  sed -i 's/exec bash /# stale\nexec bash /' "$shim"
+  # `sed -i` needs a backup-suffix argument on BSD sed (macOS) but not GNU
+  # sed (Linux); a bash-native substitution sidesteps that split entirely.
+  local tampered; tampered="$(cat "$shim")"
+  printf '%s\n' "${tampered/exec bash /$'# stale\nexec bash '}" > "$shim"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   refute grep -q '^# stale$' "$shim"
 
@@ -88,6 +92,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"
