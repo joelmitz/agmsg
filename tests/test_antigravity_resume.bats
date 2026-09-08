@@ -34,16 +34,20 @@ teardown() {
 }
 
 @test "resume: paused なTUIが複数ならfail-closed" {
-  sed -i "s/runtime: beta tui-pty running/runtime: beta tui-pty paused/" \
-    "$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  # `sed -i` needs a backup-suffix argument on BSD sed (macOS) but not GNU sed
+  # (Linux); a bash-native substitution sidesteps that split entirely.
+  local monitor="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  local content; content="$(cat "$monitor")"
+  printf '%s\n' "${content/runtime: beta tui-pty running/runtime: beta tui-pty paused}" > "$monitor"
   run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が複数"* ]]
 }
 
 @test "resume: paused なTUIがなければfail-closed" {
-  sed -i "s/runtime: alpha tui-pty paused/runtime: alpha tui-pty running/" \
-    "$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  local monitor="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  local content; content="$(cat "$monitor")"
+  printf '%s\n' "${content/runtime: alpha tui-pty paused/runtime: alpha tui-pty running}" > "$monitor"
   run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が見つかりません"* ]]
