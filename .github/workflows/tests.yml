@@ -324,6 +324,27 @@ jobs:
         if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
+      # macos-latest's default /bin/bash is 3.2.57 (Apple has frozen it there
+      # since Bash 4.0's GPLv3 relicensing, 2007). Confirmed on this runner
+      # (2026-09-08, run 34258605278): LANG/LC_ALL/LC_CTYPE are correctly
+      # en_US.UTF-8 and `locale` reports it -- the runner's locale is not the
+      # problem. bats-core's bats_encode_test_name() (bats-preprocess) walks a
+      # test description one `${name:$i:1}` index at a time; 3.2's parameter
+      # expansion does not track multibyte character boundaries there even
+      # under a correct locale (that support only matured from bash 4.2
+      # onward), so it splits this suite's Japanese @test names mid-UTF-8-byte
+      # and bats then fails to resolve the mangled name ("unknown test name"),
+      # silently running fewer tests than the file declares. No Homebrew bash
+      # was present on this runner either (checked: neither
+      # /opt/homebrew/bin/bash nor /usr/local/bin/bash existed). Installing one
+      # and putting it first on PATH means every subsequent step's `#!/usr/bin/
+      # env bash` (bats-core's own shebang) resolves to it instead.
+      - name: Install a modern bash (macOS only)
+        if: runner.os == 'macOS' && needs.changes.outputs.docs_only != 'true'
+        run: |
+          brew install bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
       # HOME-local npm prefix. This avoids both the ubuntu runner's EACCES on
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
@@ -385,86 +406,6 @@ jobs:
           chmod +x "$RUNNER_TEMP/sampler.sh"
           nohup "$RUNNER_TEMP/sampler.sh" >/dev/null 2>&1 3>&- 4>&- &
           echo "sampler pid $!"
-
-      # Diagnostic-only, no behavior change (#macos-mojibake investigation).
-      # macos-latest 3/4 has been failing to resolve 3 Japanese @test names in
-      # tests/test_antigravity_resume.bats ("bats: unknown test name", byte-
-      # mangled). Reproduced locally: bats-core's bats_encode_test_name()
-      # (bats-preprocess) reads the description one array-index at a time via
-      # `${name:$i:1}` and hex-encodes non-alnum bytes; under a non-UTF-8-aware
-      # locale this walks UTF-8 continuation bytes as separate "characters".
-      # Setting LANG/LC_ALL=en_US.UTF-8 job-wide (prior commit) did not fix
-      # macos-latest 3/4, so this step prints the actual runner state instead
-      # of guessing again: the real locale, which bash is running, and the
-      # encoder's own output for one of the failing names, captured on the
-      # exact runner/shell where the failure happens.
-      - name: Diagnose macOS test-name encoding (no-op)
-        if: needs.changes.outputs.docs_only != 'true'
-        continue-on-error: true
-        run: |
-          set +e
-          echo "----- uname -----"
-          uname -a
-          echo "----- which bash / bash --version -----"
-          which -a bash
-          bash --version | head -1
-          echo "----- candidate newer bash binaries -----"
-          for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
-            [ -x "$b" ] && { echo "$b:"; "$b" --version | head -1; }
-          done
-          echo "----- LANG/LC_ALL as seen by this step -----"
-          echo "LANG=$LANG LC_ALL=$LC_ALL LC_CTYPE=$LC_CTYPE"
-          echo "----- locale -----"
-          locale
-          echo "----- locale -a (UTF-8 entries) -----"
-          locale -a 2>/dev/null | grep -i utf || echo "(locale -a produced no UTF-8 entries or failed)"
-          echo "----- bats_encode_test_name() under the runner's default bash -----"
-          bash -c '
-            bats_encode_test_name() {
-              local name="$1"; local result="test_"; local hex_code
-              if [[ ! "$name" =~ [^[:alnum:]\ _-] ]]; then
-                name="${name//_/-5f}"; name="${name//-/-2d}"; name="${name// /_}"
-                result+="$name"
-              else
-                local length="${#name}"; local char i
-                for ((i = 0; i < length; i++)); do
-                  char="${name:$i:1}"
-                  if [[ "$char" == " " ]]; then result+="_"
-                  elif [[ "$char" =~ [[:alnum:]] ]]; then result+="$char"
-                  else printf -v hex_code -- "-%02x" \'"$char"; result+="$hex_code"
-                  fi
-                done
-              fi
-              printf -v "$2" "%s" "$result"
-            }
-            bats_encode_test_name "resume: paused な TUI が一件なら既存 resume へ identity を渡す" out
-            echo "default bash result: $out"
-          '
-          for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
-            [ -x "$b" ] || continue
-            echo "----- same function under $b -----"
-            "$b" -c '
-              bats_encode_test_name() {
-                local name="$1"; local result="test_"; local hex_code
-                if [[ ! "$name" =~ [^[:alnum:]\ _-] ]]; then
-                  name="${name//_/-5f}"; name="${name//-/-2d}"; name="${name// /_}"
-                  result+="$name"
-                else
-                  local length="${#name}"; local char i
-                  for ((i = 0; i < length; i++)); do
-                    char="${name:$i:1}"
-                    if [[ "$char" == " " ]]; then result+="_"
-                    elif [[ "$char" =~ [[:alnum:]] ]]; then result+="$char"
-                    else printf -v hex_code -- "-%02x" \'"$char"; result+="$hex_code"
-                    fi
-                  done
-                fi
-                printf -v "$2" "%s" "$result"
-              }
-              bats_encode_test_name "resume: paused な TUI が一件なら既存 resume へ identity を渡す" out
-              echo "result: $out"
-            '
-          done
 
       - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
