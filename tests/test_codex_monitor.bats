@@ -167,7 +167,7 @@ teardown() {
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   [ "$(cat "$pidf")" != "$first_pid" ]
-  ! kill -0 "$first_pid" 2>/dev/null
+  refute kill -0 "$first_pid" 2>/dev/null
   [ "$(cat "${pidf%.pid}.home")" = "$isolated" ]
 }
 
@@ -175,7 +175,7 @@ teardown() {
   run env AGMSG_CODEX_HOME="relative/codex-home" AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -ne 0 ]
-  [[ "$output" == *"must be an absolute path"* ]]
+  grep -qF 'must be an absolute path' <<<"$output"
   [ ! -e "$TEST_PROJECT/relative" ]
 }
 
