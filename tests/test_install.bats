@@ -258,6 +258,20 @@ teardown() {
   [[ "$output" =~ "#133" ]]
 }
 
+@test "install: fresh and update next steps cover Codex and Antigravity monitors" {
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"delivery.sh status codex <project>"* ]]
+  [[ "$output" == *"agy-tui --team <team> --name <role>"* ]]
+  [[ "$output" == *"agy-tui status"*"not a direct inbox read"* ]]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"delivery.sh status codex <project>"* ]]
+  [[ "$output" == *"agy-tui --team <team> --name <role>"* ]]
+  [[ "$output" == *"agy-tui status --project <project> --team <team> --name <role>"* ]]
+}
+
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-override-projA

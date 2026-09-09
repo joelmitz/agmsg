@@ -110,6 +110,8 @@ git clone https://github.com/fujibee/agmsg.git
 cd agmsg
 ./install.sh              # Interactive (asks command name, default: agmsg)
 ./install.sh --cmd m      # Non-interactive with custom command name
+./install.sh --agent-type codex       # Codex-oriented shared SKILL.md
+./install.sh --agent-type antigravity # Antigravity-oriented shared SKILL.md + agy-tui
 ./install.sh --agent-type gemini    # Install a Gemini-oriented SKILL.md
 ./install.sh --agent-type opencode  # OpenCode-only: sets shared skill to OpenCode template
 ```
@@ -122,6 +124,20 @@ The **command name** determines:
 `--cmd` and `--agent-type` are only available via the direct-script path; the `npm` and plugin paths always install as `agmsg` and auto-detect the host agent type.
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode) so it picks up the new skill.
+
+For real-time delivery, finish setup with the launcher for the runtime you actually use:
+
+```bash
+# Codex: enable monitor, add the printed shell function or PATH shim, restart
+# Codex, send one first turn, then verify the bridge.
+~/.agents/skills/<cmd>/scripts/delivery.sh status codex <project>
+
+# Antigravity TUI: start and inspect the same role through the TUI supervisor.
+agy-tui --team <team> --name <role>
+agy-tui status --project <project> --team <team> --name <role>
+```
+
+While the Antigravity TUI supervisor owns a role, use `agy-tui status`; do not run a bare `$<cmd>`, `inbox.sh`, or `check-inbox.sh` for that role.
 
 ### Windows: Git Bash & Codex
 
