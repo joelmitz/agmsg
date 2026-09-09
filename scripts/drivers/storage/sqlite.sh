@@ -57,7 +57,20 @@ _sqlite_data() {
 # reading a non-tty is still willing to treat a malformed line as an
 # interactive prompt, and the point of this path is that nobody is watching.
 _sqlite_data_stdin() {
+  # Outside the subshell on purpose: a probe run inside it would be discarded.
+  agmsg_sqlite_warm
   ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" | tr -d '\r' )
+}
+
+# The same, for a statement whose output nobody reads. Takes a database PATH
+# rather than a team, because its callers are inside the driver and hold one.
+# -bail as at the two driver sites this replaced: the stdin form must stop at
+# the first error so a busy call has written nothing of a transaction that
+# never began, which is what lets the engine retry it. The warm call sits on
+# the line above the pipe, where the #462 scan looks for it.
+_sqlite_exec_stdin() {
+  agmsg_sqlite_warm
+  printf '%s\n' "$2" | agmsg_sqlite -bail -batch "$1"
 }
 
 # IN (...) list of "team:agent" pairs.
@@ -95,9 +108,31 @@ storage_describe() {
 # "no messages yet" without lazily initializing a store in a storeless project.)
 storage_store_exists() { [ -f "$(_sqlite_db "$1")" ]; }
 
+# Bumped whenever the init batch below changes shape: it is what lets a store
+# that already carries revision N skip the batch entirely (#1001). The number
+# is stamped INSIDE the same transaction as the schema statements, so a store
+# can never hold the new number over an old schema.
+_AGMSG_STORAGE_SCHEMA_REV=1
+
 storage_init() {
   local db; db="$(_sqlite_db "$1")"
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
+  # Fast path (#1001): a store already at the current schema revision needs
+  # nothing from this function -- and the check is a READ, which WAL serves
+  # even while another process holds the write lock. Without this, every
+  # storage call re-ran the write batch below, and under a busy sync engine
+  # each of those waited the full busy timeout and then failed with
+  # SQLITE_BUSY, silently: 21 sqlite3 calls per inbox.sh, measured 106 s of
+  # nothing but this. A failed read falls through to the full init -- an
+  # observation failure must not skip the schema.
+  if [ -f "$db" ]; then
+    local schema_rev
+    schema_rev="$(agmsg_sqlite "$db" "PRAGMA user_version;" 2>/dev/null | tr -d '[:space:]')" || schema_rev=""
+    if [ "$schema_rev" = "$_AGMSG_STORAGE_SCHEMA_REV" ]; then
+      echo ok
+      return 0
+    fi
+  fi
   # CREATE TABLE IF NOT EXISTS does nothing to a store that already has the
   # table, so an existing events table never gains legacy_id from the schema
   # below. SQLite has no ADD COLUMN IF NOT EXISTS, and a failing statement
@@ -107,8 +142,28 @@ storage_init() {
     agmsg_sqlite "$db" "ALTER TABLE events ADD COLUMN legacy_id INTEGER;" \
       >/dev/null 2>&1 || true
   fi
-  agmsg_sqlite "$db" "
-    PRAGMA journal_mode=WAL;
+  # journal_mode cannot run inside a transaction, so it stays outside the one
+  # below -- and its RESULT is checked, not assumed. The pragma answers with
+  # the mode now in effect; anything but "wal" (a transient writer making it
+  # BUSY, a filesystem refusing the side files) must stop here, because the
+  # stamp below would otherwise record a non-WAL store as current and the
+  # fast path would never retry the switch -- reads would queue behind
+  # writers for the full busy timeout again, with a stamp saying all is well
+  # (review finding). Only a store that is actually in WAL proceeds to the
+  # schema transaction and can be stamped.
+  local journal_mode
+  journal_mode="$(agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" 2>/dev/null | tr -d '[:space:]')" || journal_mode=""
+  if [ "$journal_mode" != wal ]; then
+    echo runtime_error
+    return 13
+  fi
+  # One transaction, stopped at the first error (-bail), with the revision
+  # stamp as its LAST statement: either every schema statement landed and the
+  # store says so, or none of it is visible and the store still says the old
+  # revision. A crash or failure in the middle cannot leave a new stamp over
+  # an old schema, which is the one way the fast path above could lie.
+  agmsg_sqlite -bail "$db" "
+    BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS events (
       seq        INTEGER PRIMARY KEY AUTOINCREMENT,
       type       TEXT NOT NULL,
@@ -205,6 +260,8 @@ storage_init() {
         read_cursors.local_position,excluded.local_position);
     INSERT OR IGNORE INTO storage_metadata(key,value)
       VALUES('read_cursor_v1','1');
+    PRAGMA user_version=${_AGMSG_STORAGE_SCHEMA_REV};
+    COMMIT;
   " >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
 }
@@ -283,8 +340,10 @@ storage_send() {
   # inserted the message a second time, leaving one row in the legacy table that
   # no event points at -- exactly the unlinked copy the correspondence exists to
   # prevent.
+  agmsg_sqlite_warm
   if ! printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1; then
     storage_init "$team" >/dev/null
+    agmsg_sqlite_warm
     printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || return 1
   fi
   printf '%s\n' "$id"
@@ -528,6 +587,7 @@ storage_import() {
       frm=$(j from); to=$(j to); body=$(j body)
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
+      agmsg_sqlite_warm
       printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at")" \
         | agmsg_sqlite -bail "$db" >/dev/null 2>&1
     elif [ "$t" = message_read ]; then

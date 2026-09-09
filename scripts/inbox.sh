@@ -16,6 +16,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
+# A seat that reads its inbox names its own pane if it is not named
+# (self-name.sh); see send.sh. Best-effort, never fails the read.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-name.sh"
+agmsg_self_name_on_action "$TEAM" "$AGENT"
+
 # An inbox check must not create the store, so a team that has never been
 # written to has no file yet. Since the stores split per team that is the
 # ORDINARY state of a freshly joined team, not a broken install — before the
@@ -48,13 +54,25 @@ fi
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
 _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
-ROWS=$(agmsg_sqlite ':memory:' "
-  SELECT json_extract(value,'\$.from') || char(31) ||
-         replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
-         json_extract(value,'\$.at') || char(31) ||
-         json_extract(value,'\$.id')
-  FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
-")
+# #777/#1045: build the statement into a temp file and pass it on STDIN, the way
+# history.sh (#899) already does. Interpolating a large unread backlog into the SQL
+# and handing the whole string to sqlite3 as one argv element exceeds the per-argument
+# length ceiling; the call then fails — and an unread backlog past the limit can never
+# clear itself. A single long body can carry it past the ceiling on its own.
+_agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
+trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
+{
+  printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
+  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.id')"
+  printf "FROM json_each('"
+  printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
+  printf "');\n"
+} > "$_agmsg_rows_sql"
+ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
+rm -f "$_agmsg_rows_sql"
+trap - EXIT HUP INT TERM
 
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
 echo "$COUNT new message(s):"
@@ -84,7 +102,14 @@ fi
 # without mutating the legacy row (§2.4). Only the ids collected from the
 # rows actually displayed above — never a blanket match — so a message that
 # arrives after the SELECT above can never be marked read unseen. Non-fatal —
-# may fail in sandboxed environments.
+# may fail in sandboxed environments or lose to a concurrent writer — but a
+# failure is reported on stderr, because the messages above were displayed
+# and their read state is now unknown (#1011). "Some or all", not "they":
+# only the sqlite driver marks in one transaction; the jsonl driver can have
+# recorded part of the batch before the failing step. The exit status stays
+# 0: the inbox did deliver.
 if [ "${#IDS[@]}" -gt 0 ]; then
-  storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1 || true
+  if ! storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1; then
+    echo "agmsg: failed to record read state for ${#IDS[@]} displayed message(s); some or all may be shown again (#1011)" >&2
+  fi
 fi

@@ -1734,11 +1734,18 @@ JSON
   local cw
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
   [ -n "$cw" ]
-  [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
-  [[ "$cw" == *"GIT_BASH"* ]]
-  [[ "$cw" == *"-lc"* ]]
-  [[ "$cw" != *".agents/bin"* ]]
-  [[ "$cw" == *"check-inbox.sh"* ]]
+  # Was five non-final `[[ ]]`, four of which could not fail this test on bash
+  # 3.2 (#670) -- including the one pinning the login flag, so on macOS the flag
+  # this whole entry turns on was asserted by nothing. `grep -Fq` fails everywhere.
+  printf '%s' "$cw" > "$TEST_PROJECT/cw"
+  grep -Fq 'Program Files\Git\bin\bash.exe' "$TEST_PROJECT/cw"
+  grep -Fq 'GIT_BASH' "$TEST_PROJECT/cw"
+  # Still a LOGIN shell, anchored on the invocation rather than on a bare `-l`
+  # that any word could contain. `-lc` became `-l <script>` when the payload
+  # moved off the shell's stdout (#1015); what has to stay true is the `-l`.
+  grep -Fq '& $b -l ' "$TEST_PROJECT/cw"
+  refute grep -Fq '.agents/bin' "$TEST_PROJECT/cw"
+  grep -Fq 'check-inbox.sh' "$TEST_PROJECT/cw"
 }
 
 @test "delivery set turn (claude-code): Stop entry has NO commandWindows (regression guard)" {
@@ -1749,6 +1756,334 @@ JSON
   local cw
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
   [ -z "$cw" ]
+}
+
+# --- #1015: the login shell's stdout is not the payload's channel -------------
+#
+# The wrapper runs the hook through a LOGIN shell, and everything the profile
+# prints lands on that shell's stdout ahead of the JSON. Codex parses the whole
+# stream as one document, so one line of profile chatter loses the message --
+# after the rows have been consumed.
+#
+# This runs on every platform on purpose. The mechanism is bash's, not
+# Windows's: `-l` reads the profile chain everywhere, so a Linux or macOS runner
+# reproduces it exactly. Confining the control to the Windows legs would leave
+# the property unwatched on eleven of the twelve.
+#
+# What it models and what it does not: the bash half is executed for real, and
+# `cygpath` is stubbed with the identity function because here the two path
+# spaces are the same. The PowerShell half is NOT executed -- it is asserted on
+# as a string in the test below this one, which is the honest split: this test
+# can prove the payload survives a talking profile, and it cannot prove
+# PowerShell quotes it correctly.
+@test "codex Windows hook: what the login profile prints does not reach the payload (#1015)" {
+  skip_on_windows "commandWindows is not written on native Windows (#182)"
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "profile-must-not-eat-this" --force >/dev/null
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+
+  local hook_file="$TEST_PROJECT/.codex/hooks.json" cw cmd
+  cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+
+  # The bash command is the single-quoted argument PowerShell writes to a temp
+  # script, with its own single quotes doubled by windows_wrap. READ out rather
+  # than restated here, so this test follows the wrapper.
+  cmd=$(printf '%s' "$cw" | sed "s/.*WriteAllText(\\\$s,'//; s/',(New-Object.*//")
+  cmd=$(printf '%s' "$cmd" | sed "s/''/'/g")
+  [ -n "$cmd" ]
+
+  # The profile prints, and it also puts something on PATH -- both halves of why
+  # `-l` is there in the first place. Supplied rather than waited for: a Git Bash
+  # install whose profile happens to be silent never shows the defect and would
+  # make this pass for the wrong reason. HOME is the harness's sandbox (#41).
+  local bin="$TEST_PROJECT/bin"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nshift\nprintf "%%s" "$1"\n' > "$bin/cygpath"
+  chmod +x "$bin/cygpath"
+  printf 'echo "PROFILE-CHATTER"\nexport PATH="%s:$PATH"\n' "$bin" > "$HOME/.bash_profile"
+
+  # The login shell's own stdout goes nowhere, exactly as PowerShell's Out-Null
+  # sends it; the payload is whatever the wrapper arranged to be printed instead.
+  local payload="$TEST_PROJECT/hook-payload" shell_stdout="$TEST_PROJECT/shell-stdout"
+  # `-lc` rather than a script file: the wrapper has PowerShell write the same
+  # text to a temp script and run it under `bash -l`, and what is under test here
+  # is what a LOGIN shell does to that text -- identical either way, and this
+  # keeps the PowerShell half out of a test that cannot run PowerShell.
+  echo '{}' | AGMSG_HOOK_OUT="$payload" bash -lc "$cmd" > "$shell_stdout" 2>/dev/null
+
+  # Positive control, FIRST: the hook ran and the message really was delivered.
+  # Without it, a wrapper that emitted nothing at all satisfies everything below.
+  # The existence check is separate so a wrapper that stopped writing the file
+  # says so, instead of failing as a grep error on a missing path.
+  [ -s "$payload" ]
+  grep -Fq "profile-must-not-eat-this" "$payload"
+
+  # The defect.
+  refute grep -Fq "PROFILE-CHATTER" "$payload"
+
+  # And the consequence codex sees: it parses the whole stream as one document.
+  [ "$(sqlite_mem "SELECT json_valid(CAST(readfile('$(rf "$payload")') AS TEXT));")" = "1" ]
+
+  # The profile did talk. Without this the test also passes on a machine where
+  # nothing was ever printed -- which is the state it is meant to survive, not
+  # the state it is meant to run in.
+  grep -Fq "PROFILE-CHATTER" "$shell_stdout"
+}
+
+# The half the test above cannot execute. PowerShell is not run here, so this
+# asserts the SHAPE of the string that will be: the payload leaves through a
+# temp file, the shell's own stdout is discarded, and the thing that finally
+# prints it is PowerShell -- which read no profile. It cannot prove the wrapper
+# works; it catches the wrapper being quietly returned to the shape that does
+# not (#1015).
+#
+# THIS IS NOT A SUBSTITUTE FOR THE EXECUTION LEG BELOW, and the record of why is
+# worth more than the assertion: the first version of this file asserted the
+# shape, went green, and shipped a wrapper that PowerShell could not run. A shape
+# assertion only ever covers the ways we imagined it breaking -- that version
+# banned `\"` while the plain `"` went out. The leg that RUNS it is what caught
+# that, and it is the one that reaches past what we imagined. Keep both: this one
+# is fast and notices someone removing a piece; that one notices reality.
+@test "codex Windows hook: the wrapper does not print through the login shell (#1015)" {
+  skip_on_windows "commandWindows is not written on native Windows (#182)"
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  local cwf="$TEST_PROJECT/commandWindows"
+  sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.Stop[0].hooks[0].commandWindows');" > "$cwf"
+  [ -s "$cwf" ]
+
+  # A place for the payload that is not the shell's stdout.
+  grep -Fq 'AGMSG_HOOK_OUT' "$cwf"
+  grep -Fq 'GetTempFileName' "$cwf"
+  grep -Fq 'WriteAllText' "$cwf"
+
+  # THE one that was missing, and it cost a red Windows leg. PowerShell does not
+  # escape a double quote when it hands a native process an argument: the
+  # argument splits there, and bash receives a truncated `-c` string
+  # (`unexpected EOF while looking for matching )`). So the arguments to `& $b`
+  # must contain NO double quote at all -- not merely no `\"`, which is what the
+  # first version of this test checked while the plain form shipped. The command
+  # itself is full of them; it reaches bash through a file instead.
+  printf '%s' "$(sed 's/.*& [$]b //; s/ | Out-Null.*//' "$cwf")" > "$TEST_PROJECT/native-args"
+  [ -s "$TEST_PROJECT/native-args" ]
+  # Both spellings are covered, and both were checked rather than reasoned about:
+  # a mutation putting `"` in the arguments and a mutation putting `\"` there
+  # each turn this red, each after grepping the mutated output to confirm the
+  # bytes actually went in.
+  refute grep -Fq '"' "$TEST_PROJECT/native-args"
+
+  # The login shell's stdout is thrown away, and PowerShell prints the file.
+  grep -Fq 'Out-Null' "$cwf"
+  grep -Fq 'Get-Content' "$cwf"
+
+  # The status the hook reports is the command's, not the cleanup's.
+  grep -Fq 'exit $rc' "$cwf"
+
+  # PowerShell reads a backslash-escaped quote as a literal backslash and ends
+  # the string there, which is why the codex template warns about it.
+  refute grep -Fq '\"' "$cwf"
+}
+
+# The half the two tests above cannot reach: PowerShell actually running the
+# string. This is the only place the wrapper is EXECUTED as written, so it is
+# the only evidence that the fix works on the platform it exists for -- the rest
+# is a shape assertion and a bash-half simulation.
+#
+# It drives a stub command rather than check-inbox: what has never been executed
+# anywhere is the PowerShell plumbing, and a stub isolates it from the store, the
+# registration and the hook's own logic, which other tests already cover.
+#
+# The string goes through a .ps1 file rather than `-Command "$cw"`: it contains
+# `$b`, `$o` and single quotes, and handing it to PowerShell through a shell
+# argument is a second quoting layer this test is not about.
+#
+# The name carries `windows-wrapper` because the Windows matrix leg selects by
+# `-f`; renaming it without the workflow stops it running anywhere at all, which
+# is indistinguishable from it passing.
+@test "windows-wrapper: PowerShell prints the payload and not the profile (#1015)" {
+  skip_unless_windows "the wrapper is PowerShell; only Windows can run it"
+  . "$SCRIPTS/lib/hooks-json.sh"
+
+  local emit="$TEST_PROJECT/emit.sh"
+  printf '#!/bin/sh\nprintf %%s "{\\"decision\\":\\"block\\",\\"reason\\":\\"windows-payload\\"}"\n' > "$emit"
+  chmod +x "$emit"
+
+  # The condition under test: a login profile that talks.
+  printf 'echo PROFILE-CHATTER\n' > "$HOME/.bash_profile"
+
+  local ps1="$TEST_PROJECT/wrap.ps1"
+  # Single-quoted the way delivery.sh quotes it, so the `''` doubling inside
+  # windows_wrap is exercised rather than bypassed.
+  windows_wrap "sh '$emit'" > "$ps1"
+  [ -s "$ps1" ]
+
+  run powershell -NoProfile -ExecutionPolicy Bypass -File "$ps1"
+
+  # Positive control first: the payload really came through. Without it a
+  # PowerShell that failed to launch bash at all passes the two lines below.
+  printf '%s' "$output" > "$TEST_PROJECT/ps-stdout"
+  grep -Fq 'windows-payload' "$TEST_PROJECT/ps-stdout"
+  refute grep -Fq 'PROFILE-CHATTER' "$TEST_PROJECT/ps-stdout"
+  [ "$(sqlite_mem "SELECT json_valid(CAST(readfile('$(rf "$TEST_PROJECT/ps-stdout")') AS TEXT));")" = "1" ]
+
+  # The status is the command's, carried across the cleanup.
+  [ "$status" -eq 0 ]
+
+  # The empty poll: no messages, so the command writes nothing and PowerShell has
+  # an empty file to print. What codex must not receive is junk, so the assertion
+  # is on that and not on a guess about what `Get-Content -Raw` does with an empty
+  # file -- whitespace passes, anything else is a finding. Left uncovered until
+  # this leg existed, because nothing on a POSIX host can answer it.
+  local quiet="$TEST_PROJECT/quiet.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$quiet"
+  chmod +x "$quiet"
+  local ps1q="$TEST_PROJECT/wrap-quiet.ps1"
+  windows_wrap "sh '$quiet'" > "$ps1q"
+  run powershell -NoProfile -ExecutionPolicy Bypass -File "$ps1q"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" > "$TEST_PROJECT/ps-quiet"
+  # The profile still talked; what it printed still must not arrive.
+  refute grep -Fq 'PROFILE-CHATTER' "$TEST_PROJECT/ps-quiet"
+  [ "$(tr -d ' \t\r\n' < "$TEST_PROJECT/ps-quiet" | wc -c | tr -d ' ')" = "0" ]
+}
+
+
+# --- #1003: codex mid-turn PostToolUse hook install/strip/status wiring ---
+#
+# The install is version-gated (#1003 review): the entry goes in only when the
+# codex CLI is confirmed at or above posttooluse_min_cli, fail-closed otherwise.
+# The version is READ from the CLI, never asserted, so these place a fake `codex`
+# on PATH (both the pass and the fail cases) rather than depending on whether a
+# real codex is installed (CI has none). The gate narrows WHO gets the entry
+# written; it does not establish that an older CLI ignores a persisted entry.
+
+# A fake `codex` whose `--version` prints $1 (empty $1 => it exits non-zero).
+# Echoes a dir to PREPEND to PATH.
+_fake_codex_path() {
+  local dir="$TEST_SKILL_DIR/fakebin"
+  mkdir -p "$dir"
+  if [ -z "${1:-}" ]; then
+    printf '#!/bin/sh\nexit 1\n' > "$dir/codex"
+  else
+    printf '#!/bin/sh\necho "%s"\n' "$1" > "$dir/codex"
+  fi
+  chmod +x "$dir/codex"
+  printf '%s' "$dir"
+}
+
+@test "delivery set turn (codex): installs a PostToolUse entry alongside Stop, carrying the event arg (#1003)" {
+  run env PATH="$(_fake_codex_path 'codex-cli 0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hf="$TEST_PROJECT/.codex/hooks.json"
+  [ -f "$hf" ]
+  local n
+  n=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse'));")
+  [ "$n" = "1" ]
+  # The command runs check-inbox with the PostToolUse event as a 3rd arg, so the
+  # script emits that event's shape — not a copy that would silently use Stop's.
+  local cmd
+  cmd=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].hooks[0].command');")
+  grep -q 'check-inbox.sh' <<<"$cmd"
+  grep -q 'PostToolUse' <<<"$cmd"
+  local m
+  m=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].matcher');")
+  [ -z "$m" ]
+  local s
+  s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$hf")'), '\$.hooks.Stop'));")
+  [ "$s" = "1" ]
+}
+
+@test "delivery set turn (codex): the PostToolUse entry carries commandWindows too (#1003)" {
+  skip_on_windows "commandWindows not written on native Windows (#182)"
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local cw
+  cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+  grep -q 'check-inbox.sh' <<<"$cw"
+  grep -q 'PostToolUse' <<<"$cw"
+}
+
+@test "delivery set off (codex): strips the PostToolUse entry with Stop (#1003)" {
+  env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+# --- version gate: install only at/above the EXACT measured floor, fail-closed ---
+# Boundary controls on both sides: exact floor, floor-minus-one, and a MAX.
+
+@test "delivery set turn (codex): the exact measured floor 0.149.1 installs (#1003)" {
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "1" ]
+}
+
+@test "delivery set turn (codex): floor-minus-one 0.149.0 does NOT install — patch is significant (#1003)" {
+  run env PATH="$(_fake_codex_path '0.149.0'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+  local s
+  s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.Stop'));")
+  [ "$s" = "1" ]
+}
+
+@test "delivery set turn (codex): a far-newer version installs (MAX side) (#1003)" {
+  run env PATH="$(_fake_codex_path '9.9.9'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "1" ]
+}
+
+@test "delivery set turn (codex): an unparseable CLI version does NOT install, fail-closed (#1003)" {
+  run env PATH="$(_fake_codex_path 'banana'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+}
+
+@test "delivery set turn (codex): a CLI whose --version fails does NOT install, fail-closed (#1003)" {
+  run env PATH="$(_fake_codex_path ''):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+}
+
+@test "delivery set monitor (codex): installs NO PostToolUse entry (#1003)" {
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+@test "delivery set turn (claude-code): installs NO PostToolUse entry — no manifest datum (#1003)" {
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.claude/settings.local.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+@test "delivery status (codex turn): reports the PostToolUse entry count next to Stop (#1003)" {
+  env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'Stop entries:' <<<"$output"
+  grep -q 'PostToolUse entries:  1' <<<"$output"
 }
 
 # --- Hook JSON escaping: build entries via json_object, not by hand (#134) ---
@@ -2118,14 +2453,16 @@ JSON
   [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
 }
 
-# #399: type.conf previously advertised delivery_modes=monitor turn both off,
-# but antigravity has no Monitor tool or bridge equivalent — the manifest must
-# match what the template actually offers (turn/off only, like cursor/gemini).
-@test "antigravity rejects monitor mode" {
+# #399 said antigravity had no Monitor tool or bridge equivalent, so
+# delivery_modes had to drop monitor to match (turn/off only, like
+# cursor/gemini). That has since changed: the Antigravity monitor driver (PTY
+# TUI supervisor + headless bridge) now exists, and type.conf advertises
+# delivery_modes=monitor turn off again — this asserts the current contract,
+# not #399's.
+@test "antigravity supports monitor mode: writes the monitor rule marker" {
   run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
 }
 
 @test "antigravity rejects both mode" {
@@ -3182,4 +3519,184 @@ JSON
   [ "$status" -eq 0 ] || return 1
   run bash -c "printf '%s\n' \"\$1\" | grep -q 'taken by the watcher'" _ "$output"
   [ "$status" -ne 0 ] || { echo "the hook re-offered a consumed message" >&2; return 1; }
+}
+
+# --- #677: the rows are consumed only after the payload is written ------------
+#
+# The hook formatted its messages into a variable, marked them read, and only
+# then wrote them out. Anything that went wrong in between consumed the rows and
+# showed the user nothing — the message still in `history.sh`, gone from
+# `inbox.sh`, looking exactly like a delivery failure.
+#
+# The pair below is the whole claim: identical setup, the only difference being
+# whether the write can succeed.
+@test "check-inbox: a message whose payload was written is consumed (#677)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "written and consumed"
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  # `grep -Fq`, not `[[ =~ ]]`: a non-final [[ ]] cannot fail a test on bash 3.2
+  # (#670), and this is the assertion that watches the whole change -- a payload
+  # that lost its message body while the mark still succeeded would otherwise sit
+  # green next to the "No new messages" below.
+  printf '%s' "$output" | grep -Fq "written and consumed"
+
+  # Consumed: a second look offers nothing.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "No new messages"
+}
+
+@test "check-inbox: a message whose payload could not be written stays unread (#677)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "must survive an unwritable stdout"
+
+  # stdout CLOSED, so the write of the payload fails. Everything else is the same
+  # as the test above — which is what makes this a comparison and not a smoke
+  # test.
+  #
+  # The barrier variable names a prefix, not a wait: `.release` is created first
+  # so the run never blocks on it. What it buys is two markers the run leaves
+  # behind — `.reached` when the rows are formatted and `.emitted` when the emit
+  # has been attempted — because a run whose stdout is closed cannot tell the
+  # test anything through the payload, and "the message is unread" is equally
+  # true of a run that did nothing at all.
+  local barrier="$BATS_TEST_TMPDIR/mark-barrier"
+  : > "$barrier.release"
+  AGMSG_TEST_MARK_BARRIER="$barrier" \
+    run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT' >&-"
+
+  # THE control, and it is taken inside the run that failed: `.emitted` is
+  # written immediately after the emit, so its existence says THIS run reached
+  # the write, and the status it carries says the write is what failed.
+  #
+  # Two weaker forms were tried and both are recorded here because each looks
+  # sufficient. A barrier before the mark proves only that the rows were
+  # FORMATTED. Re-running the hook with a writable stdout proves that a
+  # DIFFERENT process reached the write — a separate run succeeding is not
+  # evidence about this one. Neither excludes the case this test exists to
+  # exclude: an early exit that leaves the message unread for a reason that has
+  # nothing to do with the write.
+  [ -e "$barrier.emitted" ]
+  # Not just "it got there" — it got there and FAILED. Without this the happy
+  # path satisfies the line above.
+  [ "$(cat "$barrier.emitted")" != "0" ]
+
+  # Implied by `.emitted` (the emit sits inside `if [ -n "$OUTPUT" ]`), kept
+  # because it fails nearer the cause when the run stops before formatting.
+  [ -e "$barrier.reached" ]
+
+  # And the row itself survived intact — still deliverable, with its body. This
+  # is a claim about the ROW, not about the failed run. Asserted BEFORE any
+  # `inbox.sh`: inbox displays AND consumes, so reading it first would take the
+  # row away and leave this measuring its own side effect. (Measured — that is
+  # exactly what the first draft of this test did.)
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq "must survive an unwritable stdout"
+
+  # ...and now it is consumed, by the run that could write it.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "No new messages"
+}
+
+# The fact the emit guards lean on: mid-turn delivery shows a message but does
+# not consume it, so the PostToolUse branch reaches the consume loop with nothing
+# pending. Unpinned, that stops being true the moment someone makes PostToolUse
+# mark read — and the guard comments would then be describing a tree that no
+# longer exists (#1003/#677).
+@test "check-inbox (PostToolUse): shows a message without consuming it (#1003)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "mid-turn, still unread"
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT' PostToolUse"
+  [ "$status" -eq 0 ]
+  # Positive control: it really did deliver. Without this, the assertion below
+  # also passes when the hook did nothing at all.
+  printf '%s' "$output" | grep -Fq "mid-turn, still unread"
+  printf '%s' "$output" | grep -Fq "hookSpecificOutput"
+
+  # ...and the row is still there for Stop to deliver and consume.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "mid-turn, still unread"
+}
+
+# A `herdr` that logs its argv and answers `agent list` with a roster holding one
+# session, so a lookup BY that session id succeeds. Deliberately not the registry
+# suite's fixture: that one pins the measured JSON shape, which is a different
+# job from the one here.
+_fake_herdr_with_session() {
+  local sid="$1"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"x","name":"k"}]}}\n' "$sid"
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+# --- the per-turn hook re-asserts the pane's name (#1044) ---------------------
+#
+# For several agent types this is the ONLY entry point that ever knows the
+# session id: grok-build has no SessionStart hook, and `monitor=yes` holds on two
+# of the nine, so a hand-started pane on the rest is first named from here.
+# Naming is an invariant re-asserted at every entry point, not an assignment made
+# once somewhere — measured across the nine types, no single place covers them.
+@test "check-inbox: names this pane on the way through (#1044)" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+
+  bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  : > "$ARGV_LOG"   # drop whatever join itself did; this test is about the hook
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+
+  grep -Fq '[@agmsg_agent] [nameteam:alice]' "$ARGV_LOG"
+}
+
+# The other half of the same rule, and the half that is easy to lose: no session
+# id is "there was nothing to resolve with", not "resolution failed". It stays
+# quiet, and it must not go naming panes it cannot identify.
+#
+# A differential pair, because the two halves differ in exactly one input. The
+# first attempt asserted `herdr agent list` as a positive control for the no-sid
+# run and it failed — measured: with no session id the resolver does not ask
+# herdr anything at all, because there is nothing to ask BY. So the control is
+# the same invocation carrying a session id, which does reach herdr and does
+# rename; the silence of the other half means something only next to it.
+@test "check-inbox: no session id names nothing; the same call with one does (#1044)" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
+  _fake_herdr_with_session "sess-x"
+  export HERDR_ENV=1
+  unset TMUX TMUX_PANE
+
+  bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+
+  # No session id on stdin.
+  : > "$ARGV_LOG"
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+
+  # The same call, one input different.
+  : > "$ARGV_LOG"
+  run bash -c "printf '%s' '{\"session_id\":\"sess-x\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [nameteam:alice]' "$ARGV_LOG"
 }

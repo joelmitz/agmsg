@@ -36,6 +36,94 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -x "$shim" ]
+  grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 0 ]
+  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 1 ]
+  grep -qF '復旧対象のstateがありません' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" ack \
+    --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"復旧対象の予約/stateがありません"* ]]
+}
+
+@test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
+  local before; before="$(cat "$shim")"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$(cat "$shim")" = "$before" ]
+
+  rm "$shim"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  # Not `sed -i`: BSD sed (macOS) reads the word after -i as a BACKUP SUFFIX, so
+  # the expression is taken as the filename and the whole call fails with
+  # "invalid command code". `\n` in a replacement is a GNU extension too. awk
+  # does both portably. (#1073)
+  awk '{ if ($0 ~ /exec bash /) print "# stale"; print }' "$shim" > "$shim.portable"
+  cat "$shim.portable" > "$shim"
+  rm -f "$shim.portable"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  refute grep -q '^# stale$' "$shim"
+
+  local owned_before; owned_before="$(cat "$shim")"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  [ "$(cat "$shim")" = "$owned_before" ]
+}
+
+@test "install: Antigravity TUI shim replaces its symlink without writing through it" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local linked="$FAKE_HOME/linked-agy-tui"
+  cp "$shim" "$linked"
+  rm "$shim"
+  ln -s "$linked" "$shim"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -L "$shim" ]
+  [ -x "$shim" ]
+  cmp "$shim" "$linked"
+}
+
+@test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local project="$FAKE_HOME/project"
+  local fake_agy="$FAKE_HOME/bin/agy"
+  mkdir -p "$project" "$(dirname "$fake_agy")"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_agy"
+  chmod +x "$fake_agy"
+  bash "$SK/scripts/join.sh" demo agy antigravity "$project"
+
+  run env HOME="$FAKE_HOME" PATH="$FAKE_HOME/bin:$PATH" \
+    "$FAKE_HOME/.agents/bin/agy-tui" status --project "$project"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+}
+
+@test "uninstall: removes only the owned Antigravity TUI shim" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$shim" ]
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 
@@ -90,7 +178,7 @@ teardown() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   # Distinct per-install sentinels, not just each install's VERSION (which is
   # the same source-derived string for both and would not distinguish "one of
-  # them got silently updated" from "neither did" -- co2 review, #659).
+  # them got silently updated" from "neither did" -- review of #659).
   echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
   echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 
@@ -111,7 +199,7 @@ teardown() {
   # exclude nothing on a real machine, while remaining broad enough to
   # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
   # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
-  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # narrowing hit that same collision from the #659 review; the fix is to
   # not special-case names at all. A directory that still carries the .agmsg
   # marker is just another candidate, and more than one candidate is exactly
   # the ambiguity this fix already refuses to guess through.
@@ -1278,4 +1366,48 @@ CYG
     return 0
   fi
   [ "$before" = "664" ]
+}
+
+# The repo's own SKILL.md is NOT what an install puts on disk: install.sh renders
+# `$SKILL_DIR/SKILL.md` from `scripts/drivers/types/<type>/template.md` (one sed
+# over __SKILL_NAME__). So an edit to the root SKILL.md alone ships nothing —
+# #1022 added a policy paragraph there, and all nine templates, and therefore
+# every installed skill, went out without it. The tests were green; the change
+# was inert.
+#
+# This asserts the slot rather than a list of remembered sentences: everything
+# between the "NEVER directly read" line and "**Shell requirement:**" must be
+# byte-identical in the root and in every template. A checked-in list of markers
+# would need someone to remember to extend it, which is the same failure one
+# level up; a slot comparison covers the next paragraph nobody has written yet.
+@test "policy paragraphs in SKILL.md reach every installed skill, not just the repo's own" {
+  local root="$BATS_TEST_DIRNAME/.."
+  local t out_root out_t n=0
+
+  extract() {
+    awk '
+      /There is NO register\.sh/        { grab = 1; next }
+      /\*\*Shell requirement:\*\*/      { grab = 0 }
+      grab                              { print }
+    ' "$1" | sed -e '/^[[:space:]]*$/d'
+  }
+
+  out_root="$(extract "$root/SKILL.md")"
+  # The slot is not empty — otherwise this test passes on two files that both
+  # lost the paragraph, which is exactly the state it exists to reject.
+  [ -n "$out_root" ]
+
+  for t in "$root"/scripts/drivers/types/*/template.md; do
+    [ -e "$t" ] || continue
+    n=$((n + 1))
+    out_t="$(extract "$t")"
+    if [ "$out_t" != "$out_root" ]; then
+      echo "template diverges from SKILL.md: $t" >&2
+      diff <(printf '%s\n' "$out_root") <(printf '%s\n' "$out_t") >&2 || true
+      return 1
+    fi
+  done
+
+  # And the loop actually ran over the templates rather than over nothing.
+  [ "$n" -ge 9 ]
 }

@@ -2,6 +2,15 @@
 # Each test gets an isolated skill directory with its own DB and teams.
 
 setup_test_env() {
+  # A test never inherits the developer's terminal. The terminal drivers
+  # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
+  # HERDR_PANE_ID, measured 2026-09-08), and join/send/inbox/history name the
+  # caller's pane through it -- so a suite run from inside a real tmux or herdr
+  # pane would otherwise write the fixture's team:agent onto the developer's
+  # own pane. Tests that want a terminal set these AFTER this call, against a
+  # fake on PATH. CI runners carry none of these, so nothing changes there.
+  unset TMUX TMUX_PANE
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
@@ -38,6 +47,27 @@ teardown_test_env() {
   rm -rf "$TEST_SKILL_DIR"
 }
 
+# A fake `tmux` that logs its argv and produces the ids/text real tmux would.
+#
+# Shared because three suites drive the terminal layer now — the registry's own
+# tests, the watcher, and per-turn delivery (#1044 gave the last two a naming
+# call). Callers set FAKEBIN and ARGV_LOG first; nothing here reads them at
+# source time, so a suite that does not want a fake terminal is unaffected.
+agmsg_install_fake_tmux() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$1" in
+  new-window)   echo '@7' ;;
+  split-window) echo '%9' ;;
+  capture-pane) printf 'line one\nline two\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
 # behaviour that depends on POSIX process semantics agmsg does not yet support
 # there — watcher discovery/kill via ps/pgrep, and session liveness via kill -0
@@ -59,6 +89,15 @@ skip_unless_windows() {
     MINGW*|MSYS*|CYGWIN*) ;;
     *) skip "${1:-only meaningful under Git Bash}" ;;
   esac
+}
+
+# The Antigravity monitor is Linux-only: antigravity-tui-supervisor.py reads
+# /proc/<pid>/stat for every liveness check, and the control actions all go
+# through antigravity-mode.mjs, which does the same. Use for any test that
+# actually invokes the installed agy-tui shim; tests that only check install.sh's
+# own file handling (ownership, symlink replacement) do not need this.
+skip_unless_linux() {
+  [ "$(uname -s)" = Linux ] || skip "${1:-Antigravity TUI monitor is Linux-only}"
 }
 
 # In-memory sqlite for test ASSERTIONS, stripping CR. sqlite3.exe writes stdout
