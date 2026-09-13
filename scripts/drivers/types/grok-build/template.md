@@ -23,7 +23,7 @@ joined.
 
 ## Identity
 
-If you already know your AGENT and TEAMS from a previous `/__SKILL_NAME__` call in this session, skip to **Execute** below.
+If you already know your AGENT, TEAMS, and TYPE from a previous `/__SKILL_NAME__` call in this session, skip to **Execute** below.
 
 Otherwise, run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" grok-build`
 
@@ -31,7 +31,7 @@ Four possible outputs:
 
 **A) Single identity:**
 `agent=<name> teams=<t1,t2,...> type=grok-build project=<path>`
-→ Remember AGENT and TEAMS, then go to **Execute**.
+→ Remember AGENT, TEAMS, and TYPE, then go to **Execute**.
 
 **B) Multiple identities:**
 `multiple=true agents=<n1,n2,...> teams=<t1,t2,...> type=grok-build project=<path>`
@@ -115,7 +115,7 @@ Launch it with the **`monitor` tool only** — **never** `run_terminal_command` 
 Each output line is one message: `<ts> | <team> | <from> -> <to> | <body>`. React to messages as they arrive; reply with `send.sh`. Launch it only once — if a watcher is already streaming, do not start a second one. In `turn`/`off` mode there is no watcher; skip this.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
-1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT --type grok-build`
+1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT --type $TYPE`
 2. Do NOT ask the user what to do — just run the inbox check.
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`

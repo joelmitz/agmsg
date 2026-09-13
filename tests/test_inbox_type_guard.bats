@@ -109,3 +109,32 @@ JSON
   [ "$status" -ne 0 ]
   [[ "$output" == *"type mismatch"* ]]
 }
+
+@test "templates DEFAULT inbox uses --type \$TYPE, never a baked type literal" {
+  # Shared SKILL.md is rendered from one type template. A baked
+  # `--type claude-code` / `codex` / `grok-build` on the DEFAULT inbox
+  # line is wrong for every other caller that then follows that SKILL.md.
+  # Identity must keep TYPE as a session variable the same way it keeps
+  # AGENT and TEAMS, or Execute runs inbox without knowing the caller type.
+  local template count=0 line
+  for template in "$BATS_TEST_DIRNAME"/../scripts/drivers/types/*/template.md; do
+    [ -f "$template" ] || continue
+    count=$((count + 1))
+    line="$(awk '
+      /If no arguments provided \(DEFAULT action/ { grab = 1 }
+      grab && /inbox\.sh/ { print; exit }
+    ' "$template")"
+    [ -n "$line" ] || { echo "no DEFAULT inbox line: $template" >&2; return 1; }
+    printf '%s\n' "$line" | grep -Fq 'inbox.sh $TEAM $AGENT --type $TYPE' \
+      || { echo "DEFAULT inbox is not --type \$TYPE: $template"$'\n'"$line" >&2; return 1; }
+    if printf '%s\n' "$line" | grep -Eq -- '--type (claude-code|codex|gemini|antigravity|copilot|cursor|opencode|hermes|grok-build)([[:space:]`]|$)'; then
+      echo "DEFAULT inbox bakes a type literal: $template"$'\n'"$line" >&2
+      return 1
+    fi
+    grep -Fq 'Remember AGENT, TEAMS, and TYPE' "$template" \
+      || { echo "Identity does not remember TYPE: $template" >&2; return 1; }
+    grep -q 'already know your AGENT, TEAMS, and TYPE' "$template" \
+      || { echo "skip-to-Execute does not require TYPE: $template" >&2; return 1; }
+  done
+  [ "$count" -eq 9 ]
+}
