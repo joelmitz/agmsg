@@ -78,7 +78,7 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 
 ```bash
 # Check inbox (marks messages as read) — DEFAULT action
-~/.agents/skills/agmsg/scripts/inbox.sh <team> <agent_id>
+~/.agents/skills/agmsg/scripts/inbox.sh <team> <agent_id> --type <type>
 
 # Send a message (from/to must already be registered in <team>; add --force to bypass)
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>" [--force]

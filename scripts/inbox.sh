@@ -1,20 +1,127 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: inbox.sh <team> <agent_id> [--quiet]
+# Usage: inbox.sh <team> <agent_id> [--quiet] [--type <caller_type>]
 # Shows unread messages and marks them as read.
 # --quiet: only output if there are unread messages (for hooks)
+# --type: required caller agent type; must be one of the destination agent's
+#         registered types. Omitted or mismatched --type is fail-closed: no
+#         unread listing and no mark-read. Identity matching is intentionally
+#         not required (same type, different name may read).
 
-TEAM="${1:?Usage: inbox.sh <team> <agent_id> [--quiet]}"
+_USAGE="Usage: inbox.sh <team> <agent_id> [--quiet] [--type <caller_type>]"
+
+TEAM="${1:?$_USAGE}"
 AGENT="${2:?Missing agent_id}"
+shift 2
+
 QUIET=false
-if [ "${3:-}" = "--quiet" ]; then
-  QUIET=true
+CALLER_TYPE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet)
+      QUIET=true
+      shift
+      ;;
+    --type)
+      if [ $# -lt 2 ] || [ -z "${2}" ]; then
+        echo "$_USAGE" >&2
+        exit 1
+      fi
+      CALLER_TYPE="$2"
+      shift 2
+      ;;
+    *)
+      echo "inbox.sh: unexpected argument: $1" >&2
+      echo "$_USAGE" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Fail closed before self-name / unread / mark-read, including an empty store:
+# a confused agent that omits --type must not get a successful empty-inbox exit.
+if [ -z "$CALLER_TYPE" ]; then
+  echo "$_USAGE" >&2
+  exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
+
+# Destination type set from teams/<team>/config.json. Same JSON shape as
+# identities.sh: registrations[].type, with a legacy agents.<name>.type fallback.
+_inbox_dest_types() {
+  local team="$1" agent="$2"
+  local team_config="$SCRIPT_DIR/../teams/$team/config.json"
+  [ -f "$team_config" ] || return 0
+  local cfg_sql agent_sql
+  cfg_sql=$(agmsg_sql_readfile_path "$team_config")
+  agent_sql=$(agmsg_sqlesc "$agent")
+  agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agents AS (
+      SELECT
+        key AS name,
+        CASE
+          WHEN json_type(json_extract(value, '\$.registrations')) = 'array'
+            THEN json_extract(value, '\$.registrations')
+          ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
+        END AS registrations
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT DISTINCT json_extract(r.value, '\$.type')
+    FROM agents, json_each(agents.registrations) AS r
+    WHERE json_extract(r.value, '\$.type') IS NOT NULL
+      AND CAST(json_extract(r.value, '\$.type') AS TEXT) != '';
+  "
+}
+
+_inbox_dest_present() {
+  local team="$1" agent="$2"
+  local team_config="$SCRIPT_DIR/../teams/$team/config.json"
+  [ -f "$team_config" ] || return 1
+  local cfg_sql agent_sql present
+  cfg_sql=$(agmsg_sql_readfile_path "$team_config")
+  agent_sql=$(agmsg_sqlesc "$agent")
+  present=$(agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
+    SELECT 1
+    FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+    WHERE key = '$agent_sql'
+    LIMIT 1;
+  ")
+  [ "$present" = "1" ]
+}
+
+_inbox_require_caller_type() {
+  local team="$1" agent="$2" caller_type="$3"
+  local types t dest_list
+  if ! _inbox_dest_present "$team" "$agent"; then
+    echo "inbox.sh: destination '$agent' in team '$team' is not on the roster" >&2
+    exit 1
+  fi
+  types=$(_inbox_dest_types "$team" "$agent")
+  if [ -z "$types" ]; then
+    echo "inbox.sh: destination '$agent' in team '$team' has no types" >&2
+    exit 1
+  fi
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    if [ "$t" = "$caller_type" ]; then
+      return 0
+    fi
+  done <<< "$types"
+  dest_list=$(printf '%s\n' "$types" | paste -sd, -)
+  echo "inbox.sh: type mismatch: caller type '$caller_type' is not in dest types: $dest_list" >&2
+  exit 1
+}
+
+_inbox_require_caller_type "$TEAM" "$AGENT" "$CALLER_TYPE"
 
 # A seat that reads its inbox names its own pane if it is not named
 # (self-name.sh); see send.sh. Best-effort, never fails the read.

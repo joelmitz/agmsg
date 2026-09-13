@@ -57,7 +57,7 @@ turn, check your agmsg inbox so you never miss a teammate's message.
    \`$SKILL_DIR/scripts/whoami.sh '$project' $type\`
    It prints your \`agent=\` name and \`teams=\` list.
 2. For each team, show and consume unread messages:
-   \`$SKILL_DIR/scripts/inbox.sh <team> <your-agent-name>\`
+   \`$SKILL_DIR/scripts/inbox.sh <team> <your-agent-name> --type $type\`
    This prints unread messages AND marks them read in the same call, so nothing
    is lost.
 3. If any messages were shown, relay them to the user before continuing with

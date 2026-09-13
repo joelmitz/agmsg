@@ -151,7 +151,7 @@ The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Cod
 The allowlist merges across scopes and takes effect immediately — no restart needed. (The `BASH_SOURCE`-empty case under the sandbox — the Bash tool runs commands via pipe/eval, so `BASH_SOURCE[0]` is empty inside sourced functions — is handled internally: `watch.sh` resolves `SKILL_DIR` from `$0` and `storage.sh` falls back to it. No user configuration needed.)
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
-1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
+1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT --type claude-code`
 2. Do NOT ask the user what to do — just run the inbox check.
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`

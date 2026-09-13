@@ -100,14 +100,14 @@ _assert_startup_was_delayed() {
   [[ "$output" =~ "status=pending" ]]
   [[ "$output" =~ "count=1" ]]
 
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run bash "$SCRIPTS/inbox.sh" team alice --type codex --quiet
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello pending" ]]
 }
 
 @test "watch-once: ignores messages already read by inbox.sh" {
   bash "$SCRIPTS/send.sh" team bob alice "read already" >/dev/null
-  bash "$SCRIPTS/inbox.sh" team alice >/dev/null
+  bash "$SCRIPTS/inbox.sh" team alice --type codex >/dev/null
 
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 1 --interval 1
   [ "$status" -eq 2 ]

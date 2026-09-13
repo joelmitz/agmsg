@@ -200,7 +200,7 @@ resolve_identity() {
 case "$COMMAND" in
   ""|inbox)
     resolve_identity 1 1
-    run_script inbox.sh "$(first_team "$RESOLVED_TEAM")" "$RESOLVED_AGENT"
+    run_script inbox.sh "$(first_team "$RESOLVED_TEAM")" "$RESOLVED_AGENT" --type "$AGENT_TYPE"
     ;;
 
   send)

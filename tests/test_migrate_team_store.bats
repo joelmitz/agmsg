@@ -112,7 +112,7 @@ stored_types() {
   bash "$SCRIPTS/send.sh" alpha ann bob "before" >/dev/null
   migrate alpha
   bash "$SCRIPTS/send.sh" alpha ann bob "after" >/dev/null
-  run bash "$SCRIPTS/inbox.sh" alpha bob
+  run bash "$SCRIPTS/inbox.sh" alpha bob --type claude-code
   [[ "$output" =~ "before" ]]
   [[ "$output" =~ "after" ]]
   # ...and they land in the team's own store, not back in the shared one.

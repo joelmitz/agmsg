@@ -97,7 +97,7 @@ Four possible outputs:
 まず `bash ~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh status --project <project> --team <team> --name <role>` を実行してください。出力が `runtime: tui-pty 未起動` なら通常の既定動作へ進んでください。それ以外に `tui-pty` を含む行があればAntigravityのTUI monitorが有効なので、以下の通常の既定動作を適用せず、bare `$__SKILL_NAME__`、`inbox.sh`、`check-inbox.sh` を実行しないでください。必要な状態確認はこのstatus（`tui-monitor status`）で行い、本文の再表示や既読化は行いません。TUI monitorへの受領確認は、envelope headerのbatch IDを使った `AGMSG_RECEIVED:<batch-id>` の一行です。
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
-1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
+1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT --type antigravity`
 2. Do NOT ask the user what to do — just run the inbox check.
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`

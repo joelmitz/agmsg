@@ -111,14 +111,14 @@ teardown() {
 # --- inbox.sh ---
 
 @test "inbox: shows no messages when empty" {
-  run bash "$SCRIPTS/inbox.sh" testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: shows received message" {
   bash "$SCRIPTS/send.sh" testteam alice bob "hello bob"
-  run bash "$SCRIPTS/inbox.sh" testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello bob" ]]
   [[ "$output" =~ "alice" ]]
@@ -126,21 +126,21 @@ teardown() {
 
 @test "inbox: marks messages as read" {
   bash "$SCRIPTS/send.sh" testteam alice bob "read me"
-  bash "$SCRIPTS/inbox.sh" testteam bob >/dev/null
-  run bash "$SCRIPTS/inbox.sh" testteam bob
+  bash "$SCRIPTS/inbox.sh" testteam bob --type claude-code >/dev/null
+  run bash "$SCRIPTS/inbox.sh" testteam bob --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: --quiet suppresses output when no messages" {
-  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code --quiet
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
 @test "inbox: --quiet shows output when messages exist" {
   bash "$SCRIPTS/send.sh" testteam bob alice "ping"
-  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code --quiet
   [ "$status" -eq 0 ]
   [[ "$output" =~ "ping" ]]
 }
@@ -149,7 +149,7 @@ teardown() {
   bash "$SCRIPTS/send.sh" testteam alice bob "line1
 line2
 line3"
-  run bash "$SCRIPTS/inbox.sh" testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "1 new message" ]]
   [[ "$output" =~ "alice" ]]
@@ -157,16 +157,16 @@ line3"
 
 @test "inbox: a crafted agent arg cannot inject SQL to delete other messages (#87)" {
   bash "$SCRIPTS/send.sh" testteam alice bob "keepme"
-  run bash "$SCRIPTS/inbox.sh" testteam "bob' AND read_at IS NULL; DELETE FROM messages; --"
-  [ "$status" -eq 0 ]
-  run bash "$SCRIPTS/inbox.sh" testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam "bob' AND read_at IS NULL; DELETE FROM messages; --" --type claude-code
+  [ "$status" -ne 0 ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob --type claude-code
   [[ "$output" =~ "keepme" ]]
 }
 
 @test "inbox: an agent name containing a quote still receives its own messages (#87)" {
   bash "$SCRIPTS/join.sh" testteam "o'brien" claude-code /tmp/project-c
   bash "$SCRIPTS/send.sh" testteam alice "o'brien" "for quote"
-  run bash "$SCRIPTS/inbox.sh" testteam "o'brien"
+  run bash "$SCRIPTS/inbox.sh" testteam "o'brien" --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "for quote" ]]
 }

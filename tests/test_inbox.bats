@@ -47,7 +47,7 @@ await_barrier_reached() {
 @test "inbox: displays unread messages and marks exactly those as read" {
   bash "$SCRIPTS/send.sh" testteam bob alice "first"
   bash "$SCRIPTS/send.sh" testteam bob alice "second"
-  run bash "$SCRIPTS/inbox.sh" testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" == *"2 new message(s):"* ]]
   [[ "$output" == *"first"* ]]
@@ -56,7 +56,7 @@ await_barrier_reached() {
 }
 
 @test "inbox: --quiet is silent when there is nothing unread" {
-  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code --quiet
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
@@ -66,7 +66,7 @@ await_barrier_reached() {
   # Pause the run between display and mark, land a message inside the window,
   # then release. With the old blanket "WHERE read_at IS NULL" mark, the late
   # message was silently marked read without ever having been displayed.
-  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/inbox.sh" testteam alice \
+  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code \
     </dev/null > "$TEST_SKILL_DIR/first-run.out" 3>&- &
   bg_pid=$!
   await_barrier_reached
@@ -79,7 +79,7 @@ await_barrier_reached() {
   # The late message must still be unread…
   [ "$(unread_count alice)" -eq 1 ]
   # …and surface on the next check
-  run bash "$SCRIPTS/inbox.sh" testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code
   [ "$status" -eq 0 ]
   [[ "$output" == *"late"* ]]
   [ "$(unread_count alice)" -eq 0 ]
@@ -117,7 +117,7 @@ await_barrier_reached() {
   fi
 
   local st=0
-  AGMSG_BUSY_TIMEOUT=200 bash "$SCRIPTS/inbox.sh" testteam alice \
+  AGMSG_BUSY_TIMEOUT=200 bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code \
     > "$TEST_SKILL_DIR/held.out" 2> "$TEST_SKILL_DIR/held.err" || st=$?
   # The run under contention is over; let the holder go BEFORE any assertion.
   : > "$TEST_SKILL_DIR/hold.release"
@@ -135,7 +135,7 @@ await_barrier_reached() {
 
   # The same inbox once the writer is gone: shown again, marked, and silent.
   st=0
-  bash "$SCRIPTS/inbox.sh" testteam alice \
+  bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code \
     > "$TEST_SKILL_DIR/free.out" 2> "$TEST_SKILL_DIR/free.err" || st=$?
   [ "$st" -eq 0 ]
   grep -q 'trapped' "$TEST_SKILL_DIR/free.out"
@@ -435,7 +435,7 @@ _codex_proj() {
     bash "$SCRIPTS/send.sh" testteam bob alice "MSG${i}-${filler}-END${i}" >/dev/null
   done
   last="$count"
-  run bash "$SCRIPTS/inbox.sh" testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code
   [ "$status" -eq 0 ]
   grep -q "${count} new message(s):" <<<"$output"
   # the first and last actually came through -- not a truncated or empty head
