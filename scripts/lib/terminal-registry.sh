@@ -27,6 +27,11 @@
 #   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
 #                                       parsed). unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
+#   terminal_approval <id> <yes|no>     OPTIONAL control op: answer a currently
+#                                       visible approval selector with terminal-native
+#                                       keys. Unsupported drivers omit the capability
+#                                       and function; callers must refuse, never fall
+#                                       back to another channel.
 #   terminal_pane_state <id>            READ ONLY: is that pane still there?
 #                                       Prints gone / present / unknown and
 #                                       returns 0 for a settled answer, 13 when
@@ -135,7 +140,7 @@ agmsg_terminal_has() {
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
+_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_approval"
 
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because

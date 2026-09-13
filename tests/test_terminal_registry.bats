@@ -268,8 +268,9 @@ _fake_herdr_list_scalar_session() {
 # --- conf reader ------------------------------------------------------------
 
 @test "conf: get reads a key, has tests membership, absent key returns default" {
-  [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke where arrange name" ]
+  [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke approval where arrange name" ]
   agmsg_terminal_has tmux capabilities peek
+  agmsg_terminal_has tmux capabilities approval
   refute agmsg_terminal_has tmux capabilities nonesuch
   [ "$(agmsg_terminal_get plain capabilities)" = "spawn despawn" ]
   [ "$(agmsg_terminal_get plain nonesuch DEFLT)" = "DEFLT" ]
@@ -1916,6 +1917,7 @@ _tmux_op_args() {
   case "$1" in
     terminal_arrange) printf '%s place_below %s' "$2" "$2" ;;
     terminal_poke)    printf '%s hello' "$2" ;;
+    terminal_approval) printf '%s yes' "$2" ;;
     terminal_name)    printf '%s k label' "$2" ;;
     terminal_team_input_ready) printf '%s claude' "$2" ;;
     *)                printf '%s' "$2" ;;

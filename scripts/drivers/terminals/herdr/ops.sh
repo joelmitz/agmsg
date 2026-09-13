@@ -44,7 +44,7 @@ terminal_check() {
 terminal_describe() {
   printf 'name=herdr\n'
   printf 'backend=herdr pane\n'
-  printf 'capabilities=spawn despawn peek poke where arrange name\n'
+  printf 'capabilities=spawn despawn peek poke approval where arrange name\n'
   printf 'syntax_help=herdr --help\n'
   printf 'skill_help=herdr --skill\n'
   printf 'intent.place_below=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split down --target-pane TARGET\n'
@@ -836,6 +836,22 @@ terminal_poke() {
     || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
   herdr agent prompt "$id" "$text" >/dev/null 2>&1 \
     || { echo runtime_error; echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2; return 12; }
+  echo ok
+  return 0
+}
+
+# control op: answer the measured two-choice approval selector. `no` is the
+# measured herdr sequence from #1195; `yes` accepts the selected default.
+terminal_approval() {
+  local id="$1" choice="$2"
+  command -v herdr >/dev/null 2>&1 \
+    || { echo "herdr: not on PATH — cannot reach the terminal to answer approval in pane '$id'" >&2; return 10; }
+  case "$choice" in
+    yes) herdr pane send-keys "$id" Enter ;;
+    no)  herdr pane send-keys "$id" Down Enter ;;
+    *)   echo "herdr: invalid approval choice '$choice'" >&2; return 13 ;;
+  esac >/dev/null 2>&1 \
+    || { echo "herdr: could not answer approval in pane '$id' (it may no longer exist)" >&2; return 12; }
   echo ok
   return 0
 }

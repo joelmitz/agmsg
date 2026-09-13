@@ -16,7 +16,7 @@ terminal_check() {
 terminal_describe() {
   printf 'name=tmux\n'
   printf 'backend=tmux pane/window\n'
-  printf 'capabilities=spawn despawn peek poke where arrange name\n'
+  printf 'capabilities=spawn despawn peek poke approval where arrange name\n'
   printf 'syntax_help=tmux list-commands\n'
   printf 'intent.place_below=tmux move-pane -s SOURCE -t TARGET -v\n'
   printf 'intent.place_right=tmux move-pane -s SOURCE -t TARGET -h\n'
@@ -433,6 +433,24 @@ terminal_poke() {
   sleep 0.3 2>/dev/null || true
   _tmux_do "$id" send-keys -t "$(_tmux_bare_of "$id")" Right Enter \
     || { echo runtime_error; echo "tmux: could not send Enter to pane '$id' (it may no longer exist)" >&2; return 12; }
+  echo ok
+  return 0
+}
+
+# control op: answer the two-choice approval selector with native keys. The
+# entry script has just reread and validated the complete screen; the driver is
+# deliberately limited to routing the already-explicit choice. No text or
+# fallback channel is synthesized here.
+terminal_approval() {
+  local id="$1" choice="$2"
+  command -v tmux >/dev/null 2>&1 \
+    || { echo "tmux: not on PATH — cannot reach the terminal to answer approval in pane '$id'" >&2; return 10; }
+  case "$choice" in
+    yes) _tmux_do "$id" send-keys -t "$(_tmux_bare_of "$id")" Enter ;;
+    no)  _tmux_do "$id" send-keys -t "$(_tmux_bare_of "$id")" Down Enter ;;
+    *)   echo "tmux: invalid approval choice '$choice'" >&2; return 13 ;;
+  esac >/dev/null 2>&1 \
+    || { echo "tmux: could not answer approval in pane '$id' (it may no longer exist)" >&2; return 12; }
   echo ok
   return 0
 }

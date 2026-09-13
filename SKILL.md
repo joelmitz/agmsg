@@ -207,6 +207,12 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 # project. The team form classifies the full screen before shortening its last
 # line. `idle` is only the residual class, not proof of inactivity.
 ~/.agents/skills/agmsg/scripts/peek.sh <team> [<name> [--lines N]]
+
+# After inspecting a named member with peek, explicitly answer a still-visible
+# two-choice approval prompt. The choice is required and has no default. The
+# action rereads the full screen immediately before using terminal-native keys;
+# stale, unreadable, unresolved, and unsupported states write nothing.
+~/.agents/skills/agmsg/scripts/approval.sh <team> <member> <yes|no>
 ```
 
 ### Rename
