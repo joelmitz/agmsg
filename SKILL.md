@@ -202,6 +202,11 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 #   --force              tear down from the recorded placement, no message
 #   --timeout N          seconds to wait for graceful teardown (default 30)
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
+
+# Read one member's screen verbatim, or summarize every local member in this
+# project. The team form classifies the full screen before shortening its last
+# line. `idle` is only the residual class, not proof of inactivity.
+~/.agents/skills/agmsg/scripts/peek.sh <team> [<name> [--lines N]]
 ```
 
 ### Rename
