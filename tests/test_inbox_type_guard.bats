@@ -4,6 +4,9 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Host CLI session env must not infer a caller type; these tests assert the
+  # --type-only path unless they export a detect= var themselves.
+  agmsg_clear_session_detect_env
   bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
   bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
 }
@@ -108,6 +111,28 @@ JSON
   run bash "$SCRIPTS/inbox.sh" oldteam bob --type claude-code
   [ "$status" -ne 0 ]
   [[ "$output" == *"type mismatch"* ]]
+}
+
+@test "inbox type guard: session env type rejects dest of another type even with matching --type" {
+  # The accident: claude-code ran `inbox.sh <team> <codex dest> --type codex`.
+  # Dest type matched the self-reported --type, so the read went through.
+  bash "$SCRIPTS/join.sh" testteam codex codex /tmp/project-c
+  bash "$SCRIPTS/send.sh" testteam alice codex "accident ping"
+  run env CLAUDE_CODE_SESSION_ID=sess-accident bash "$SCRIPTS/inbox.sh" testteam codex --type codex
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"type mismatch"* ]]
+  [[ "$output" == *"claude-code"* ]]
+  [[ "$output" == *"codex"* ]]
+  [[ "$output" != *"accident ping"* ]]
+  [ "$(unread_count codex)" -eq 1 ]
+}
+
+@test "inbox type guard: session env type matching dest and --type shows unread and marks it read" {
+  bash "$SCRIPTS/send.sh" testteam bob alice "env-match ping"
+  run env CLAUDE_CODE_SESSION_ID=sess-self bash "$SCRIPTS/inbox.sh" testteam alice --type claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"env-match ping"* ]]
+  [ "$(unread_count alice)" -eq 0 ]
 }
 
 @test "templates DEFAULT inbox uses --type \$TYPE, never a baked type literal" {

@@ -4,10 +4,14 @@ set -euo pipefail
 # Usage: inbox.sh <team> <agent_id> [--quiet] [--type <caller_type>]
 # Shows unread messages and marks them as read.
 # --quiet: only output if there are unread messages (for hooks)
-# --type: required caller agent type; must be one of the destination agent's
-#         registered types. Omitted or mismatched --type is fail-closed: no
-#         unread listing and no mark-read. Identity matching is intentionally
-#         not required (same type, different name may read).
+# --type: caller agent type. When a per-type detect= env var identifies the
+#         session, that inferred type is the caller type: dest must include
+#         it (a dest type written as --type does not override), and a present
+#         --type must match it. When env does not identify a type, --type is
+#         required and must be one of the dest agent's registered types.
+#         Omitted/mismatched type is fail-closed: no unread listing and no
+#         mark-read. Identity matching is intentionally not required (same
+#         type, different name may read).
 
 _USAGE="Usage: inbox.sh <team> <agent_id> [--quiet] [--type <caller_type>]"
 
@@ -39,14 +43,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/detect-cli-type.sh"
+
+# Env-only inference. Process-tree (detect_proc=) is not consulted: bats run
+# as a child of grok/claude would inherit the parent. Undetected stays empty
+# (agmsg_detect_cli_type's claude-code fallback is not used).
+INFERRED_TYPE="$(agmsg_detect_cli_type_from_env)"
+
 # Fail closed before self-name / unread / mark-read, including an empty store:
-# a confused agent that omits --type must not get a successful empty-inbox exit.
-if [ -z "$CALLER_TYPE" ]; then
+# a confused agent that omits --type, with no session env to infer from, must
+# not get a successful empty-inbox exit.
+if [ -z "$INFERRED_TYPE" ] && [ -z "$CALLER_TYPE" ]; then
   echo "$_USAGE" >&2
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
@@ -121,7 +136,16 @@ _inbox_require_caller_type() {
   exit 1
 }
 
-_inbox_require_caller_type "$TEAM" "$AGENT" "$CALLER_TYPE"
+if [ -n "$INFERRED_TYPE" ]; then
+  # Dest must include the inferred type; --type cannot override this.
+  _inbox_require_caller_type "$TEAM" "$AGENT" "$INFERRED_TYPE"
+  if [ -n "$CALLER_TYPE" ] && [ "$CALLER_TYPE" != "$INFERRED_TYPE" ]; then
+    echo "inbox.sh: type mismatch: --type '$CALLER_TYPE' does not match session type '$INFERRED_TYPE'" >&2
+    exit 1
+  fi
+else
+  _inbox_require_caller_type "$TEAM" "$AGENT" "$CALLER_TYPE"
+fi
 
 # A seat that reads its inbox names its own pane if it is not named
 # (self-name.sh); see send.sh. Best-effort, never fails the read.

@@ -1,6 +1,18 @@
 # Shared setup/teardown for agmsg BATS tests.
 # Each test gets an isolated skill directory with its own DB and teams.
 
+# Strip host CLI session-identity env. inbox.sh infers caller type from
+# per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
+# would fail-closed against the --type a fixture declared. Called at load so
+# suites that skip setup_test_env (test_install.bats) are still covered.
+# Tests that want a session type set these AFTER this call.
+agmsg_clear_session_detect_env() {
+  unset CLAUDE_CODE_SESSION_ID GROK_SESSION_ID
+  unset CODEX_THREAD_ID CODEX_SANDBOX
+  unset GEMINI_CLI GEMINI_API_KEY
+}
+agmsg_clear_session_detect_env
+
 setup_test_env() {
   # A test never inherits the developer's terminal. The terminal drivers
   # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
@@ -11,6 +23,7 @@ setup_test_env() {
   # fake on PATH. CI runners carry none of these, so nothing changes there.
   unset TMUX TMUX_PANE
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
+  agmsg_clear_session_detect_env
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
