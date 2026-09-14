@@ -54,13 +54,11 @@ fi
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
 _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
-# #777/#1045: build the statement into a temp file and pass it on STDIN, the way
-# history.sh (#899) already does. Interpolating a large unread backlog into the SQL
-# and handing the whole string to sqlite3 as one argv element exceeds the per-argument
-# length ceiling; the call then fails — and an unread backlog past the limit can never
-# clear itself. A single long body can carry it past the ceiling on its own.
-_agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
-trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
+# #777/#1045: pass the statement on stdin instead of interpolating the unread
+# backlog into one sqlite argv element. A backlog or single long body can exceed
+# the OS argument ceiling, leaving the same unread batch permanently stuck.
+_agmsg_inbox_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
+trap 'rm -f "$_agmsg_inbox_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
   printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
@@ -69,9 +67,9 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
   printf "FROM json_each('"
   printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
   printf "');\n"
-} > "$_agmsg_rows_sql"
-ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
-rm -f "$_agmsg_rows_sql"
+} > "$_agmsg_inbox_sql"
+ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_inbox_sql")
+rm -f "$_agmsg_inbox_sql"
 trap - EXIT HUP INT TERM
 
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
