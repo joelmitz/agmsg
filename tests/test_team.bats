@@ -482,7 +482,7 @@ EOF
   bash "$SCRIPTS/join.sh" oldteam bob   claude-code /tmp/proj-b
   bash "$SCRIPTS/send.sh" oldteam alice bob "hello"
   bash "$SCRIPTS/rename-team.sh" oldteam newteam
-  run bash "$SCRIPTS/inbox.sh" newteam bob
+  run agmsg_inbox newteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello" ]]
 }
@@ -583,7 +583,7 @@ EOF
   bash "$SCRIPTS/join.sh" myteam bob    claude-code /tmp/proj-b
   bash "$SCRIPTS/send.sh" myteam claude bob "hello"
   bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
-  run bash "$SCRIPTS/inbox.sh" myteam bob
+  run agmsg_inbox myteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello" ]]
   [[ "$output" =~ "claude-orchestrator" ]]
@@ -762,12 +762,12 @@ EOF
   [ "$output" = "n'team" ]
 
   # the message moved to the new quoted team name (messages + events UPDATE escaped)
-  run bash "$SCRIPTS/inbox.sh" "n'team" bob
+  run agmsg_inbox "n'team" bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "moved" ]]
 
   # the other quoted team is untouched — the WHERE predicate was not widened
-  run bash "$SCRIPTS/inbox.sh" "keep'team" dave
+  run agmsg_inbox "keep'team" dave
   [ "$status" -eq 0 ]
   [[ "$output" =~ "stay" ]]
 }

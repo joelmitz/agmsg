@@ -52,7 +52,7 @@ legacy_read_at() {
   bash "$SCRIPTS/send.sh" mteam bob alice "read state travels"
   [ -z "$(legacy_read_at 'read state travels')" ]
 
-  run bash "$SCRIPTS/inbox.sh" mteam alice
+  run agmsg_inbox mteam alice
   [ "$status" -eq 0 ]
   [[ "$output" == *"read state travels"* ]]
 
@@ -67,7 +67,7 @@ legacy_read_at() {
   # twice and inbox announced "2 new message(s)".
   bash "$SCRIPTS/send.sh" mteam bob alice "exactly once"
 
-  run bash "$SCRIPTS/inbox.sh" mteam alice
+  run agmsg_inbox mteam alice
   [ "$status" -eq 0 ]
   [[ "$output" == *"1 new message(s)"* ]]
   [ "$(printf '%s\n' "$output" | grep -c 'exactly once')" -eq 1 ]

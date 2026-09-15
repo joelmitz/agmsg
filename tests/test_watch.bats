@@ -346,7 +346,7 @@ _wait_for_file_contains() {
 
 @test "session-end: leaves the store-owned read cursor intact" {
   bash "$SCRIPTS/send.sh" team bob alice "read-before-end" >/dev/null
-  run bash "$SCRIPTS/inbox.sh" team alice
+  run agmsg_inbox team alice
   local before="$(_read_cursor team alice)"
   printf '{"session_id":"sess-end"}' | bash "$SCRIPTS/session-end.sh" claude-code "$PROJ" >/dev/null 2>&1 || true
   [ "$(_read_cursor team alice)" = "$before" ]
@@ -1423,7 +1423,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   # Not shown on the screen of the session that lost the role...
   refute grep -q 'HELLO-983' "$out"
   # ...and not consumed: the session that claimed it still has it unread.
-  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  local ib; ib="$(agmsg_inbox team alice 2>/dev/null || true)"
   grep -q 'HELLO-983' <<<"$ib"
 }
 
@@ -1458,7 +1458,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   : > "$bar.release"
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
-  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  local ib; ib="$(agmsg_inbox team alice 2>/dev/null || true)"
   refute grep -q 'HELLO-OK' <<<"$ib"
 }
 
@@ -1490,7 +1490,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 
   # Delivered to the old screen (already done, unavoidable) but NOT consumed:
   # the session that now owns the role still has it.
-  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  local ib; ib="$(agmsg_inbox team alice 2>/dev/null || true)"
   grep -q 'MID-983' <<<"$ib"
   grep -q 'marking them read' "$out"
 }
@@ -1570,7 +1570,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
   # Not consumed: the row is still there for whoever does own the role.
-  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  local ib; ib="$(agmsg_inbox team alice 2>/dev/null || true)"
   grep -q 'UNREADABLE-983' <<<"$ib"
 }
 
@@ -1648,7 +1648,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 
   grep -q 'could not verify who holds this role' "$out"
   # Not consumed: the row is still there for whoever does own the role.
-  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  local ib; ib="$(agmsg_inbox team alice 2>/dev/null || true)"
   grep -q 'BROAD-UNREADABLE-983' <<<"$ib"
 }
 

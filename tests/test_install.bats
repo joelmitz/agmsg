@@ -31,7 +31,7 @@ teardown() {
   bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-projB
   run bash "$SK/scripts/send.sh" demo alice bob "hello from install"
   [ "$status" -eq 0 ]
-  run bash "$SK/scripts/inbox.sh" demo bob
+  run env CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash "$SK/scripts/inbox.sh" demo bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello from install" ]]
 }
@@ -309,7 +309,7 @@ teardown() {
   local store="$FAKE_HOME/override-store"
   AGMSG_STORAGE_PATH="$store" bash "$SK/scripts/send.sh" demo alice bob "via override"
   [ -f "$store/messages.db" ]
-  run bash -c "AGMSG_STORAGE_PATH='$store' bash '$SK/scripts/inbox.sh' demo bob"
+  run bash -c "AGMSG_STORAGE_PATH='$store' CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash '$SK/scripts/inbox.sh' demo bob"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "via override" ]]
 }

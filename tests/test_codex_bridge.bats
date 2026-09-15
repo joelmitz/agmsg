@@ -1072,9 +1072,56 @@ EOF
   grep -qF -- "--confirm '$nonce'" "$captured"
   grep -qF "agmsg self-delivery marker reached this Codex turn" "$captured"
   ! grep -qF "agmsg delivered the following unread messages" "$captured"
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "codex-bridge: readInboxForPrompts injects this.threadId as CODEX_THREAD_ID" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node child_process.spawn is not available in this sandbox"
+
+  bash "$SCRIPTS/send.sh" team bob alice "inline for env capture" >/dev/null
+  local orig="$TYPES/codex/codex-self-test-inbox.sh"
+  mv "$orig" "$orig.real"
+  cat >"$orig" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = peek ]; then
+  python3 -c 'import json,os; open(os.environ["CAPTURED_INBOX_ENV"],"w").write(json.dumps(dict(os.environ)))'
+fi
+exec bash "$orig.real" "\$@"
+EOF
+  chmod +x "$orig"
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-inbox-env.js"
+  local captured="$TEST_SKILL_DIR/captured-inbox-env.json"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
+rl.on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") send({ jsonrpc:"2.0", id:m.id, result:{} });
+  else if (m.method === "thread/start") send({ jsonrpc:"2.0", id:m.id, result:{thread:{id:"thread-expected",status:{type:"idle"}}} });
+  else if (m.method === "thread/resume") send({ jsonrpc:"2.0", id:m.id, result:{thread:{id:m.params.threadId,status:{type:"idle"}}} });
+  else if (m.method === "process/spawn") {
+    send({ jsonrpc:"2.0", id:m.id, result:{} });
+    setTimeout(() => send({ jsonrpc:"2.0", method:"process/exited", params:{processHandle:m.params.processHandle,exitCode:0,stdout:"status=pending count=1 max_id=env-1\n",stderr:""} }), 10);
+  } else if (m.method === "turn/start") {
+    send({ jsonrpc:"2.0", id:m.id, result:{turn:{id:"turn-env"}} });
+    setTimeout(() => send({jsonrpc:"2.0",method:"turn/completed",params:{threadId:m.params.threadId,turn:{id:"turn-env"}}}),10);
+  } else if (m.method === "process/kill") send({jsonrpc:"2.0",id:m.id,result:{}});
+});
+EOF
+
+  run env CAPTURED_INBOX_ENV="$captured" CODEX_THREAD_ID=parent-wrong AGMSG_CODEX_APP_SERVER_CMD="node $fake" \
+    node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
+      --request-timeout-ms 1000 --max-wakes 1 --inline-inbox
+  [ "$status" -eq 0 ]
+  [ -f "$captured" ]
+  got="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("CODEX_THREAD_ID") or "")' "$captured")"
+  [ "$got" = "thread-expected" ]
 }
 
 @test "codex-bridge: stops instead of looping on the same unread max_id" {

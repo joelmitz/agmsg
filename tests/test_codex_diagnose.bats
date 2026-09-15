@@ -93,7 +93,7 @@ teardown() {
 @test "send: legacy trailing force preserves the positional body" {
   run bash "$SCRIPTS/send.sh" team alice alice "forced positional body" --force
   [ "$status" -eq 0 ]
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
   [[ "$output" == *"forced positional body"* ]]
 }
@@ -103,7 +103,7 @@ teardown() {
   printf '%s\n' "forced file body" >"$body_file"
   run bash "$SCRIPTS/send.sh" team alice alice --body-file "$body_file" --force
   [ "$status" -eq 0 ]
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
   [[ "$output" == *"forced file body"* ]]
 }
@@ -115,7 +115,7 @@ teardown() {
   run bash "$SCRIPTS/send.sh" team alice alice "flags id then force" --print-id --force
   [ "$status" -eq 0 ]
   [[ "$output" == *"message_id="* ]]
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
   [[ "$output" == *"flags force then id"* ]]
   [[ "$output" == *"flags id then force"* ]]
@@ -147,7 +147,7 @@ NODE
   run bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
   [[ "$output" == *"second"* ]]
 }

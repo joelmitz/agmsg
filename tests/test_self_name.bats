@@ -487,7 +487,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   _join_unnamed team alice
   : > "$ARGV_LOG"
-  bash "$SKILL_DIR/scripts/inbox.sh" team alice >/dev/null 2>&1 || true
+  agmsg_inbox team alice >/dev/null 2>&1 || true
   [ "$(_name_calls)" -eq 1 ]
   grep -q '\[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
   : > "$ARGV_LOG"

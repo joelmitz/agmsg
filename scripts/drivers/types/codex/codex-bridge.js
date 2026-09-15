@@ -1717,7 +1717,11 @@ class CodexBridge {
       // --quiet: an empty inbox must read back as EMPTY. The human-facing
       // "No new messages." line is non-blank, passed tryStartTurn's emptiness
       // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "peek", pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "peek", pair.team, pair.name], {
+        cwd: this.opts.project,
+        encoding: "utf8",
+        env: { ...process.env, CODEX_THREAD_ID: this.threadId },
+      });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox transport failed for ${pair.team}/${pair.name}`); continue; }
       const lines = (result.stdout || "").split(/\r?\n/).filter(Boolean);
       const records = [];

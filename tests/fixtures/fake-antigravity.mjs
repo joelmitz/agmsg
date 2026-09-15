@@ -5,6 +5,10 @@ import fs from 'node:fs';
 import { createInterface } from 'node:readline';
 const mode = process.env.FAKE_AGY_MODE || 'success';
 const args = process.argv.slice(2);
+if (process.env.FAKE_AGY_DUMP_ENV) {
+  const dump = process.env.FAKE_AGY_DUMP_ENV;
+  fs.appendFileSync(dump, JSON.stringify({pid: process.pid, env: process.env}) + '\n');
+}
 const conversation = args.includes('--conversation') ? args[args.indexOf('--conversation') + 1] : 'fixture-conversation';
 let turn = 0;
 const emit = async (event) => {
@@ -30,6 +34,11 @@ for await (const line of createInterface({input: process.stdin})) {
     spawnSync('bash',[install+'/scripts/inbox.sh','fixture','worker'],{env:process.env});
     spawnSync('bash',[install+'/scripts/check-inbox.sh','antigravity',process.cwd()],{env:process.env});
     await emit({event:'step_update',step_update:{conversation_id:conversation,step_type:'tool',tool_name:'run_command',tool_info:{parameters:{CommandLine:'bash '+install+'/scripts/inbox.sh fixture worker'}}}});
+  }
+  if (mode === 'exit-after-first' && turn === 1) {
+    await emit({event:'step_update', step_update:{conversation_id:conversation, step_type:'agent_response', text_delta:'turn 1'}});
+    await emit({event:'result', result:{conversation_id:conversation, status:'SUCCESS', response:'turn 1'}});
+    process.exit(0);
   }
   if (mode === 'crash' && turn > 1) process.exit(7);
   if (mode === 'broken' && turn > 1) { process.stdout.write('{broken\n'); continue; }

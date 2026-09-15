@@ -8,6 +8,25 @@ import {read,atomic,proc,violations} from '../../../lib/bridge-read-guard.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const root=path.resolve(here,'../../../..');
 const transport=path.join(here,'inbox-transport.sh');
+const strongDetectHelper=path.join(root,'scripts','lib','print-strong-detect-env-keys.sh');
+const ENV_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
+export function strongDetectEnvKeys() {
+  const r=spawnSync(strongDetectHelper,[],{encoding:'utf8'});
+  if(r.error) throw Error(`agy起動拒否: strong detect helper を実行できません (${r.error.code||r.error.message})`);
+  if(r.status!==0) throw Error(`agy起動拒否: strong detect helper が非0終了 (${r.status})`);
+  const keys=[];
+  for(const line of (r.stdout||'').split(/\r?\n/)) {
+    if(!line) continue;
+    if(!ENV_NAME.test(line)) throw Error('agy起動拒否: strong detect helper が不正な env 名を返しました');
+    keys.push(line);
+  }
+  return keys;
+}
+export function childEnvWithoutStrongDetect() {
+  const env={...process.env};
+  for(const k of strongDetectEnvKeys()) delete env[k];
+  return env;
+}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const shutdownDelay=ms=>new Promise(r=>setTimeout(r,ms).unref());
 export function forbiddenTool(event) {
@@ -99,7 +118,7 @@ export class Bridge {
     if(this.o.model) args.push('--model',this.o.model);
     const executable=this.o.agy||'agy';
     // fd3能力値はこの子へ継承しない。stdin/stdout/stderrだけを接続する。
-    this.child=spawn(executable,args,{cwd:this.project,stdio:['pipe','pipe','pipe']});
+    this.child=spawn(executable,args,{cwd:this.project,stdio:['pipe','pipe','pipe'],env:childEnvWithoutStrongDetect()});
     this.childStart=null;try{this.childStart=proc(this.child.pid).start;}catch{}
     const child=this.child;
     child.stderr.on('data',d=>process.stderr.write(d));child.stdin.on('error',e=>this.fail(e));

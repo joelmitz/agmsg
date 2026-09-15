@@ -1016,7 +1016,7 @@ process.stdin.on('data', chunk => {
     const stateFile = fs.readdirSync(path.join(install, 'run')).find(name => name.endsWith('.state.json'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     assert.match(output, /AGMSG_RECEIVED:/);
-    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
     child.stdin.write('D');
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).humanInputActive === true);
     assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty paused/);
@@ -1025,7 +1025,7 @@ process.stdin.on('data', chunk => {
     run('send.sh', ['fixture', 'sender', 'worker', 'RENDER_THEN_RECEIPT']);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.messages?.some(message => message.body === 'RENDER_THEN_RECEIPT'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
-    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
     run('send.sh', ['fixture', 'sender', 'worker', 'PERMISSION_THEN_RECEIPT']);
     await waitFor(() => output.includes('Requesting permission for:'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
@@ -1095,7 +1095,7 @@ process.stdin.on('data', chunk => {
       spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
       await waitFor(() => replay.exitCode !== null);
     }
-    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
     const afterReplay = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
     assert.equal(afterReplay.humanInputActive, false, '明示replayは旧セッションの通常入力pauseを解除する');
     assert.equal(afterReplay.humanInputSawNonIdle, false);
@@ -1105,3 +1105,122 @@ process.stdin.on('data', chunk => {
     if (child.exitCode === null) child.kill('SIGKILL');
   }
 });
+
+test('strong_detect_env_keys は親 environ を変更しない', () => {
+  runPython(`
+import os, importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+os.environ['CLAUDE_CODE_SESSION_ID'] = 'parent-keep'
+os.environ['GEMINI_API_KEY'] = 'keep-fallback'
+keys = module.strong_detect_env_keys()
+assert 'CLAUDE_CODE_SESSION_ID' in os.environ
+assert os.environ['CLAUDE_CODE_SESSION_ID'] == 'parent-keep'
+child = dict(os.environ)
+for k in keys:
+    child.pop(k, None)
+assert 'CLAUDE_CODE_SESSION_ID' not in child
+assert child.get('GEMINI_API_KEY') == 'keep-fallback'
+assert 'CLAUDE_CODE_SESSION_ID' in keys
+`);
+});
+
+function supervisorInstall() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agmsg-tui-env-'));
+  const install = path.join(dir, 'install');
+  const project = path.join(dir, 'project');
+  fs.mkdirSync(install);
+  fs.mkdirSync(project);
+  fs.cpSync(path.join(repo, 'scripts'), path.join(install, 'scripts'), { recursive: true });
+  fs.copyFileSync(path.join(repo, 'tests/fixtures/fake-antigravity.mjs'), path.join(dir, 'fake.mjs'));
+  const dump = path.join(dir, 'child.env');
+  const fake = path.join(dir, 'agy');
+  fs.writeFileSync(fake, `#!/bin/sh\nexec '${process.execPath}' '${path.join(dir, 'fake.mjs')}' "$@"\n`, { mode: 0o700 });
+  const env = {
+    ...process.env,
+    AGMSG_STORAGE_DRIVER: 'sqlite',
+    AGMSG_STORAGE_PATH: path.join(install, 'db'),
+    AGMSG_CONFIG: path.join(dir, 'config.json'),
+    FAKE_AGY_DUMP_ENV: dump,
+    CLAUDE_CODE_SESSION_ID: 'parent-claude',
+    CODEX_THREAD_ID: 'parent-codex',
+    CODEX_SANDBOX: 'parent-sandbox',
+    GROK_SESSION_ID: 'parent-grok',
+    GEMINI_API_KEY: 'keep-fallback',
+  };
+  const run = (script, args) => {
+    const result = spawnSync('bash', [path.join(install, 'scripts', script), ...args], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    return result.stdout;
+  };
+  run('join.sh', ['fixture', 'worker', 'antigravity', project]);
+  run('join.sh', ['fixture', 'sender', 'codex', project]);
+  run('delivery.sh', ['set', 'monitor', 'antigravity', project]);
+  return {
+    dir, install, project, env, fake, dump,
+    helper: path.join(install, 'scripts/lib/print-strong-detect-env-keys.sh'),
+    supervisor: path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py'),
+  };
+}
+
+test('supervisor pty.fork の子から strong キーが欠け GEMINI_API_KEY は残る', async () => {
+  if (process.platform !== 'linux') return;
+  const prep = supervisorInstall();
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = 'stty rows 24 cols 80; exec ' + [
+    'python3', quote(prep.supervisor),
+    '--project', quote(prep.project), '--team', 'fixture', '--name', 'worker',
+    '--agy', quote(prep.fake), '--poll', '10',
+  ].join(' ');
+  const child = spawn('script', ['-qefc', command, '/dev/null'], { env: prep.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    for (let i = 0; i < 200; i += 1) {
+      if (fs.existsSync(prep.dump) && fs.readFileSync(prep.dump, 'utf8').trim()) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(fs.existsSync(prep.dump), true, 'agy child did not start');
+    const rec = JSON.parse(fs.readFileSync(prep.dump, 'utf8').trim().split('\n')[0]);
+    assert.equal(rec.env.CLAUDE_CODE_SESSION_ID, undefined);
+    assert.equal(rec.env.CODEX_THREAD_ID, undefined);
+    assert.equal(rec.env.CODEX_SANDBOX, undefined);
+    assert.equal(rec.env.GROK_SESSION_ID, undefined);
+    assert.equal(rec.env.GEMINI_API_KEY, 'keep-fallback');
+    assert.equal(prep.env.CLAUDE_CODE_SESSION_ID, 'parent-claude');
+  } finally {
+    spawnSync('python3', [prep.supervisor, '--action', 'stop', '--project', prep.project, '--team', 'fixture', '--name', 'worker'], { env: prep.env, encoding: 'utf8' });
+    child.kill('SIGTERM');
+    await Promise.race([once(child, 'close'), new Promise(resolve => setTimeout(resolve, 3000))]);
+    fs.rmSync(prep.dir, { recursive: true, force: true });
+  }
+});
+
+function assertSupervisorNoAgy(prep, mutateHelper) {
+  mutateHelper(prep.helper);
+  const result = spawnSync('python3', [prep.supervisor, '--project', prep.project, '--team', 'fixture', '--name', 'worker', '--agy', prep.fake], { env: prep.env, encoding: 'utf8' });
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.existsSync(prep.dump), false);
+  assert.match(result.stderr + result.stdout, /agy起動拒否/);
+}
+
+test('helper 非0 なら supervisor は agy を起動しない', () => {
+  const prep = supervisorInstall();
+  try {
+    return assertSupervisorNoAgy(prep, h => fs.writeFileSync(h, '#!/bin/sh\nexit 7\n', { mode: 0o700 }));
+  } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
+});
+
+test('helper 実行不能なら supervisor は agy を起動しない', () => {
+  const prep = supervisorInstall();
+  try {
+    return assertSupervisorNoAgy(prep, h => fs.chmodSync(h, 0o644));
+  } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
+});
+
+test('helper 不正な env 名なら supervisor は agy を起動しない', () => {
+  const prep = supervisorInstall();
+  try {
+    return assertSupervisorNoAgy(prep, h => fs.writeFileSync(h, '#!/bin/sh\necho BAD-NAME\n', { mode: 0o700 }));
+  } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
+});
+
