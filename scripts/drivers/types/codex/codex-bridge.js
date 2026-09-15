@@ -955,6 +955,7 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.lastArmAt = 0;
     this.inlineInboxText = "";
+    this.inlinePromptQueue = [];
     this.stopping = false;
     const key = identities.length === 1
       ? `${identities[0].team}.${identities[0].name}`
@@ -1520,25 +1521,30 @@ class CodexBridge {
 
   async tryStartTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    let prompt;
+    let inlineDelivery = null;
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
-      if (!this.inlineInboxText.trim()) {
+      if (this.inlinePromptQueue.length === 0) this.inlinePromptQueue = this.readInboxForPrompts();
+      if (this.inlinePromptQueue.length === 0) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
         await this.armWatch();
         return;
       }
+      inlineDelivery = this.inlinePromptQueue.shift();
+      prompt = inlineDelivery.text;
+    } else {
+      prompt = this.buildPrompt();
     }
-    const prompt = this.buildPrompt();
     this.turnActive = true;
     this.threadIdle = false;
     // Claim the wake BEFORE the request goes out, not after it succeeds. With
     // the claim left set across the await, a turn-end signal arriving mid-
     // request re-entered this method with the same wake and started a second
     // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
-    this.pendingWake = false;
+    // inline rows are acknowledged only after turn/start succeeds, so a failed
+    // request leaves them unread and the retry can deliver the payload again.
+    this.pendingWake = this.inlinePromptQueue.length > 0;
     this.startInFlight = true;
     this.inFlightTurnId = null;
     this.inFlightTurnEnded = false;
@@ -1549,12 +1555,21 @@ class CodexBridge {
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      if (inlineDelivery) {
+        const ack = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "ack", inlineDelivery.pair.team, inlineDelivery.pair.name, ...inlineDelivery.ids], { cwd: this.opts.project, encoding: "utf8" });
+        if (ack.error || ack.status !== 0) {
+          console.error(`codex-bridge: failed to acknowledge ${inlineDelivery.ids.length} delivered message(s) for ${inlineDelivery.pair.team}/${inlineDelivery.pair.name}; they may be shown again`);
+          this.inlinePromptQueue = [];
+          this.pendingWake = true;
+        }
+      }
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
+      if (inlineDelivery) this.inlinePromptQueue.unshift(inlineDelivery);
       this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
@@ -1662,7 +1677,27 @@ class CodexBridge {
     ].join("\n");
   }
 
-  readInboxForPrompt() {
+  buildSelfTestPrompt(record, pair, marker) {
+    const diagnose = path.join(SCRIPT_DIR, "codex-diagnose.sh");
+    return [
+      `agmsg self-delivery marker reached this Codex turn for ${pair.team}/${pair.name}.`,
+      "",
+      "Run the following confirmation command now. Do not use inbox.sh, history.sh, or direct DB access:",
+      `${shellQuote(diagnose)} ${shellQuote(this.opts.project)} ${shellQuote(pair.team)} ${shellQuote(pair.name)} --confirm ${shellQuote(marker.nonce)} ${shellQuote(String(record.id))}`,
+      "",
+      "Report the command result to the user. A send success, stored message, cursor movement, or turn completion is not confirmation by itself.",
+    ].join("\n");
+  }
+
+  formatNormalRecords(records) {
+    return [
+      `${records.length} new message(s):`,
+      "",
+      ...records.map((record) => `  [${record.at}] ${record.from}: ${String(record.body || "").replace(/\n/g, "\\n").replace(/\t/g, "\\t")}`),
+    ].join("\n");
+  }
+
+  readInboxForPrompts() {
     // Re-resolve locks immediately before reading. watch-once only tells us
     // that *some* eligible identity woke; ownership can change before this
     // turn starts, so never let a stale bridge membership mark another
@@ -1676,17 +1711,43 @@ class CodexBridge {
       return "";
     }
     const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
-    const sections = [];
+    const prompts = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
       // --quiet: an empty inbox must read back as EMPTY. The human-facing
       // "No new messages." line is non-blank, passed tryStartTurn's emptiness
       // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
-      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
-      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "peek", pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox transport failed for ${pair.team}/${pair.name}`); continue; }
+      const lines = (result.stdout || "").split(/\r?\n/).filter(Boolean);
+      const records = [];
+      let invalid = false;
+      for (const line of lines) {
+        try { records.push(JSON.parse(line)); } catch (_) { invalid = true; break; }
+      }
+      if (invalid) {
+        console.error(`codex-bridge: inbox transport returned invalid JSON for ${pair.team}/${pair.name}; leaving rows unread`);
+        continue;
+      }
+      let normal = [];
+      const flushNormal = () => {
+        if (normal.length === 0) return;
+        this.inlineInboxText = this.formatNormalRecords(normal);
+        prompts.push({ text: this.buildPrompt(), pair, ids: normal.map((record) => String(record.id)) });
+        normal = [];
+      };
+      for (const record of records) {
+        const marker = parseSelfTestMarker(record, pair);
+        if (marker) {
+          flushNormal();
+          prompts.push({ text: this.buildSelfTestPrompt(record, pair, marker), pair, ids: [String(record.id)] });
+        } else {
+          normal.push(record);
+        }
+      }
+      flushNormal();
     }
-    return sections.join("\n\n");
+    return prompts;
   }
 
   async shutdown() {
@@ -1847,6 +1908,17 @@ function parseMaxId(stdout) {
   return match ? match[1] : "";
 }
 
+function parseSelfTestMarker(record, pair) {
+  if (!record || record.type !== "message_sent" || record.from !== pair.name || record.to !== pair.name) return null;
+  const match = String(record.body || "").match(/^agmsg-codex-self-test:v1:([A-Za-z0-9_-]+):([A-Fa-f0-9]{48})$/);
+  if (!match) return null;
+  return { diagnosisId: match[1], nonce: match[2] };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -1897,4 +1969,4 @@ if (require.main === module) {
 // the property that matters — a diagnostic never continues someone else's
 // half-line — is a property of these two together, and driving them directly
 // is the only way to state it without standing up an app-server.
-module.exports = { toPosixPath, writeErr, logLine };
+module.exports = { toPosixPath, writeErr, logLine, parseSelfTestMarker, shellQuote };
