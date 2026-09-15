@@ -2,9 +2,13 @@
 # 予約はインストール単位。環境変数を落とした通常inboxも同じ入口を通す。
 _AGMSG_BRIDGE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 agmsg_bridge_guard_path() {
-  local SKILL_DIR; SKILL_DIR="$(cd "$_AGMSG_BRIDGE_LIB/../.." && pwd)"
+  local SKILL_DIR actas base; SKILL_DIR="$(cd "$_AGMSG_BRIDGE_LIB/../.." && pwd)"
   source "$_AGMSG_BRIDGE_LIB/actas-lock.sh"
-  printf '%s/run/antigravity-reservation.%s__%s.json' "$SKILL_DIR" "$(_actas_lock_encode "$1")" "$(_actas_lock_encode "$2")"
+  actas="$(actas_lock_path "$1" "$2")" || return 13
+  base="$(basename "$actas")"
+  base="${base#actas.}"
+  base="${base%.session}"
+  printf '%s/run/antigravity-reservation.%s.json' "$SKILL_DIR" "$base"
 }
 agmsg_bridge_guard_check() {
   local reservation; reservation="$(agmsg_bridge_guard_path "$1" "$2")" || return 13

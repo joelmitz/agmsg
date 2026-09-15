@@ -323,6 +323,11 @@ for team in "${TEAM_LIST[@]}"; do
     # that cannot be undone (rows get marked read). (#983)
     case "$state" in (other:*|unknown:*) exit 97 ;; esac
 
+    # Antigravity monitor reservations are consumed only through their
+    # capability-bearing transport. A normal hook must fail before formatting
+    # or marking rows, even when it runs below the monitor process tree.
+    agmsg_bridge_guard_check "$team" "$AGENT" || exit $?
+
     # Unread via the storage facade (§2.1 storage_list_unread = events ∪ legacy),
     # JSONL parsed in one pass with sqlite's JSON funcs (no jq; cf. lib/hooks-json.sh).
     # id is kept so the mark step below targets exactly the rows shown.

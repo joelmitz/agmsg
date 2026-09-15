@@ -16,6 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
+# A monitor-owned Antigravity seat has a dedicated peek/ack transport. Refuse
+# the ordinary reader before it displays or consumes anything; detecting the
+# agent's forbidden tool event happens only after the command has already run.
+agmsg_bridge_guard_check "$TEAM" "$AGENT" || exit $?
+
 # A seat that reads its inbox names its own pane if it is not named
 # (self-name.sh); see send.sh. Best-effort, never fails the read.
 # shellcheck disable=SC1091
