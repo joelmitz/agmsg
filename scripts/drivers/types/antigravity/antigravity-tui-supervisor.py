@@ -8,7 +8,7 @@ flock. Porting this file alone would give macOS a TUI that starts and cannot be
 stopped, which is worse than not offering it. (#1090 review; the mjs port is its
 own issue.)
 """
-import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
+import argparse, codecs, copy, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -296,7 +296,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.permission_screen_snapshot=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -333,12 +333,8 @@ class Supervisor:
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
             required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
             positions=[modal.find(token) for token in required]
-            if any(position<0 for position in positions):
-                if self.permission_screen_allows_transcript_fallback() and self.permission_transcript_ready(): return None
-                return 'permission-body-incomplete'
-            if positions!=sorted(positions):
-                if self.permission_screen_allows_transcript_fallback() and self.permission_transcript_ready(): return None
-                return 'permission-body-order'
+            if any(position<0 for position in positions):return 'permission-body-incomplete'
+            if positions!=sorted(positions):return 'permission-body-order'
             return None
         if screen.tail_with_prefix('↑/↓ Navigate · enter Confirm'):
             tail=visible[-8:]
@@ -346,31 +342,6 @@ class Supervisor:
                     and '> Yes, I trust this folder' in tail):return None
             return 'trust-body-incomplete'
         return 'permission-footer-missing'
-    def permission_transcript_ready(self):
-        """画面再描画中でも、直前に完全な許可UIを受け取った場合は入力を許可する。
-
-        permission UI は選択入力の直前に画面が部分再描画されることがある。
-        その瞬間の screen だけを判定すると、正当な Yes 入力を通常入力と誤認して
-        turn を停止するため、inject 後に蓄積した生出力の末尾も同じ構造で確認する。
-        """
-        raw=unicodedata.normalize('NFKC', getattr(self,'permission_raw_window',''))
-        required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
-        positions=[raw.rfind(token) for token in required]
-        footer=raw.rfind('esc to cancel')
-        return (all(position>=0 for position in positions)
-                and positions==sorted(positions)
-                and footer>positions[-1])
-    def permission_screen_allows_transcript_fallback(self):
-        """許可UIの再描画途中に限って transcript fallback を許可する。"""
-        screen=getattr(self,'screen',None)
-        if not screen:return False
-        if any('Generating...' in line for line in screen.lines()):return False
-        if not screen.tail_with_prefix('esc to cancel'):return False
-        visible=''.join(line.strip() for line in screen.lines())
-        required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
-        positions=[visible.find(token) for token in required]
-        present=[position for position in positions if position>=0]
-        return not present or present==sorted(present)
     def permission_screen_diagnostic(self):
         """許可UIの構造だけを返す。command本文など画面内容は記録しない。"""
         screen=getattr(self,'screen',None)
@@ -572,6 +543,7 @@ class Supervisor:
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
+        self.permission_screen_snapshot=None
         self.permission_raw_window=''
         if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
@@ -681,6 +653,10 @@ class Supervisor:
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
                     self.permission_raw_window=(getattr(self,'permission_raw_window','')+text)[-65536:]
+                    if (self.permission_input_ready()
+                            and hasattr(self.screen,'tail_with_prefix')
+                            and self.screen.tail_with_prefix('esc to cancel')):
+                        self.permission_screen_snapshot=copy.deepcopy(self.screen)
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
                         if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')
@@ -690,8 +666,15 @@ class Supervisor:
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
+                permission_ready=(permission_before_read or self.permission_input_ready())
+                if (not permission_ready and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
+                        and self.permission_screen_snapshot is not None):
+                    current_screen=self.screen
+                    self.screen=self.permission_screen_snapshot
+                    try: permission_ready=self.permission_input_ready()
+                    finally: self.screen=current_screen
                 if (self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
-                        and (permission_before_read or self.permission_input_ready())): self.allow_permission_input()
+                        and permission_ready): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     reason=self.permission_input_rejection_reason()
                     diagnostic=self.permission_screen_diagnostic()
