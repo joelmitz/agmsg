@@ -633,6 +633,63 @@ assert s.state['durableAttention'] is True
 `);
 });
 
+test('child PTY生存中は人間向け通知をstderrへ出さない', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.master = 99
+s.pending_notices = []
+s.save = lambda: None
+s.state = {'manualResumeRequired': False, 'humanInputActive': False, 'humanInputSawNonIdle': False,
+           'supervisorPhase': 'WAITING_FOR_IDLE', 'batch': None, 'durableAttention': False}
+s.human_idle_since = None
+s.stopping = False
+notice = io.StringIO()
+with contextlib.redirect_stderr(notice):
+    s.pause_for_human_input()
+    s.allow_permission_input()
+    s.fail('通常inboxによる既読試行を検知')
+assert notice.getvalue() == ''
+joined = '\\n'.join(s.pending_notices)
+assert '自動配送を保留' in joined
+assert '許可UIへの人間入力をrelay' in joined
+assert 'メッセージを未読のまま停止します' in joined
+assert s.stopping is True
+`);
+});
+
+test('close後にpending通知をstderrへflushする', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.master = 99
+s.old = None
+s.child = None
+s.state = {'batch': {'id': 'keep'}}
+s.pending_notices = []
+notice = io.StringIO()
+with contextlib.redirect_stderr(notice):
+    s.notice('\\r\\n[agmsg] 空の入力待ちを確認したため自動配送を再開しました')
+    s.notice('\\r\\n停止理由; メッセージを未読のまま停止します')
+    assert notice.getvalue() == ''
+    s.close()
+text = notice.getvalue()
+assert '自動配送を再開しました' in text
+assert 'メッセージを未読のまま停止します' in text
+assert s.pending_notices == []
+`);
+});
+
 test('reset-guardは停止中かつbatchなしの場合だけviolationを解除する', () => {
   runPython(`
 import importlib.util

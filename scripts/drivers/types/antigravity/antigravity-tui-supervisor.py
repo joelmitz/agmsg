@@ -296,7 +296,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.permission_screen_snapshot=None; self.permission_snapshot_fallback_used=False; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.pending_notices=[]; self.screen=None; self.permission_screen_snapshot=None; self.permission_snapshot_fallback_used=False; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -307,11 +307,22 @@ class Supervisor:
         self.resume_requested=True
     def request_resize(self, _signum, _frame):
         self.resize_requested=True
+    def notice(self, message):
+        # child PTY生存中は同じTTYへ書かない。close() 後にflushする。
+        if getattr(self,'master',None) is not None:
+            if getattr(self,'pending_notices',None) is None: self.pending_notices=[]
+            self.pending_notices.append(message)
+            return
+        print(message,file=sys.stderr)
+    def flush_notices(self):
+        pending=getattr(self,'pending_notices',None) or []
+        self.pending_notices=[]
+        for message in pending: print(message,file=sys.stderr)
     def pause_for_human_input(self):
         already_paused=self.state.get('humanInputActive',False)
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=False; self.human_idle_since=None; self.save()
         if not already_paused:
-            print('\r\n[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します',file=sys.stderr)
+            self.notice('\r\n[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します')
     def permission_input_rejection_reason(self):
         """許可UIならNone、そうでなければfail-closedな診断理由を返す。"""
         screen=getattr(self,'screen',None)
@@ -382,7 +393,7 @@ class Supervisor:
     def allow_permission_input(self):
         # 現在のbatchはreceiptを待つ。既存の耐久pauseは触らず、通常入力の一時保留だけを立てる。
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
-        print('\r\n[agmsg] 許可UIへの人間入力をrelayしました。受領確認後、空の入力待ちに戻れば自動再開します',file=sys.stderr)
+        self.notice('\r\n[agmsg] 許可UIへの人間入力をrelayしました。受領確認後、空の入力待ちに戻れば自動再開します')
     def permission_input_ready_with_snapshot(self, live_ready):
         """部分再描画直後の入力1回だけ、直前の構造化画面を再検証する。"""
         if live_ready or self.permission_screen_snapshot is None or self.permission_snapshot_fallback_used:
@@ -439,7 +450,7 @@ class Supervisor:
         message=f'\r\n{why}; メッセージを未読のまま停止します'
         if why=='通常inboxによる既読試行を検知':
             message+='\n復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください'
-        print(message,file=sys.stderr); self.stopping=True
+        self.notice(message); self.stopping=True
     def check_guard(self):
         reservation=json.loads(self.reservation.read_text())
         if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('予約所有権不一致')
@@ -579,7 +590,7 @@ class Supervisor:
         self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'
         if pause_after_ack:
             self.human_input_seen=True; self.state['manualResumeRequired']=True
-            print('\r\n[agmsg] 本文にidle画面の署名を検知したため、後続の自動配送を停止しました。再開: $agmsg resume',file=sys.stderr)
+            self.notice('\r\n[agmsg] 本文にidle画面の署名を検知したため、後続の自動配送を停止しました。再開: $agmsg resume')
         self.save()
     def maybe_poll(self):
         if time.monotonic()-self.last_poll<self.a.poll: return
@@ -642,7 +653,7 @@ class Supervisor:
         if now-self.human_idle_since<self.HUMAN_IDLE_STABLE_SECONDS:return
         self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False
         self.human_input_restart_recovery=False; self.human_idle_since=None; self.save()
-        print('\r\n[agmsg] 空の入力待ちを確認したため自動配送を再開しました',file=sys.stderr)
+        self.notice('\r\n[agmsg] 空の入力待ちを確認したため自動配送を再開しました')
     def loop(self):
         while not self.stopping:
             if self.resize_requested:
@@ -651,7 +662,7 @@ class Supervisor:
                 self.resume_requested=False
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中のresume要求を拒否'); continue
                 self.state['manualResumeRequired']=False; self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False; self.human_input_restart_recovery=False; self.human_idle_since=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
-                print('\r\nmonitor再開要求を受け付けました。空の入力待ち画面を確認してから配送します',file=sys.stderr)
+                self.notice('\r\nmonitor再開要求を受け付けました。空の入力待ち画面を確認してから配送します')
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
@@ -703,24 +714,27 @@ class Supervisor:
         if (self.state.get('batch') or {}).get('phase')=='completed': self.ack()
         self.launch(); self.loop()
     def close(self):
-        if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
-        if self.child:
-            try: os.write(self.master,b'\x04')
-            except (OSError,TypeError): pass
-            deadline=time.monotonic()+5
-            while time.monotonic()<deadline:
+        try:
+            if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
+            if self.child:
+                try: os.write(self.master,b'\x04')
+                except (OSError,TypeError): pass
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
+                    try:
+                        if proc_start(self.child)!=self.state.get('childStart'): break
+                    except (FileNotFoundError,ProcessLookupError): break
+                    time.sleep(0.05)
                 try:
-                    if proc_start(self.child)!=self.state.get('childStart'): break
-                except (FileNotFoundError,ProcessLookupError): break
-                time.sleep(0.05)
-            try:
-                if proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGHUP)
-            except (FileNotFoundError,ProcessLookupError): pass
-        if not self.state.get('batch'):
-            try:
-                r=json.loads(self.reservation.read_text())
-                if r['owner']==self.owner and r['start']==self.start and self.actas.read_text().strip()==self.owner: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
-            except Exception: pass
+                    if proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGHUP)
+                except (FileNotFoundError,ProcessLookupError): pass
+            if not self.state.get('batch'):
+                try:
+                    r=json.loads(self.reservation.read_text())
+                    if r['owner']==self.owner and r['start']==self.start and self.actas.read_text().strip()==self.owner: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
+                except Exception: pass
+        finally:
+            self.flush_notices()
 
 def recover(a):
     s=Supervisor(a)

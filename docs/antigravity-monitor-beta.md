@@ -80,13 +80,12 @@ it is safe to paste into a bug report.
 ## Pause and resume
 
 When you type outside an injected receive turn, the supervisor immediately
-pauses delivery and prints this once to its own stderr:
+pauses delivery. While the child TUI is still drawing, it does not print onto
+the same terminal; `agy-tui status` is the live view (`paused` vs `running`).
+If the supervisor later stops, queued fail reasons are printed to stderr after
+the terminal attributes are restored.
 
-```
-[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します
-```
-
-This is deliberate, not a failure. Live delivery resumes only after the
+Live delivery resumes only after the
 supervisor first observes a non-idle screen, then observes the supported empty
 idle prompt continuously with no pending terminal input or output. An unresolved
 batch, a durable attention condition, or the legacy manual-resume latch prevents
@@ -131,7 +130,8 @@ reservation for an identity, running any of these:
 - `check-inbox.sh`
 
 trips agmsg's read guard. The guard records a `read-denied` violation, the
-supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**:
+supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**.
+After the TUI exits, stderr shows:
 
 ```
 通常inboxによる既読試行を検知; メッセージを未読のまま停止します
