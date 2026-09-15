@@ -333,8 +333,12 @@ class Supervisor:
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
             required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
             positions=[modal.find(token) for token in required]
-            if any(position<0 for position in positions):return 'permission-body-incomplete'
-            if positions!=sorted(positions):return 'permission-body-order'
+            if any(position<0 for position in positions):
+                if self.permission_screen_allows_transcript_fallback() and self.permission_transcript_ready(): return None
+                return 'permission-body-incomplete'
+            if positions!=sorted(positions):
+                if self.permission_screen_allows_transcript_fallback() and self.permission_transcript_ready(): return None
+                return 'permission-body-order'
             return None
         if screen.tail_with_prefix('↑/↓ Navigate · enter Confirm'):
             tail=visible[-8:]
@@ -342,6 +346,31 @@ class Supervisor:
                     and '> Yes, I trust this folder' in tail):return None
             return 'trust-body-incomplete'
         return 'permission-footer-missing'
+    def permission_transcript_ready(self):
+        """画面再描画中でも、直前に完全な許可UIを受け取った場合は入力を許可する。
+
+        permission UI は選択入力の直前に画面が部分再描画されることがある。
+        その瞬間の screen だけを判定すると、正当な Yes 入力を通常入力と誤認して
+        turn を停止するため、inject 後に蓄積した生出力の末尾も同じ構造で確認する。
+        """
+        raw=unicodedata.normalize('NFKC', getattr(self,'permission_raw_window',''))
+        required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
+        positions=[raw.rfind(token) for token in required]
+        footer=raw.rfind('esc to cancel')
+        return (all(position>=0 for position in positions)
+                and positions==sorted(positions)
+                and footer>positions[-1])
+    def permission_screen_allows_transcript_fallback(self):
+        """許可UIの再描画途中に限って transcript fallback を許可する。"""
+        screen=getattr(self,'screen',None)
+        if not screen:return False
+        if any('Generating...' in line for line in screen.lines()):return False
+        if not screen.tail_with_prefix('esc to cancel'):return False
+        visible=''.join(line.strip() for line in screen.lines())
+        required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
+        positions=[visible.find(token) for token in required]
+        present=[position for position in positions if position>=0]
+        return not present or present==sorted(present)
     def permission_screen_diagnostic(self):
         """許可UIの構造だけを返す。command本文など画面内容は記録しない。"""
         screen=getattr(self,'screen',None)
