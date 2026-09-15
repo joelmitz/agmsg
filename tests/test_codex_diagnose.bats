@@ -90,6 +90,37 @@ teardown() {
   [[ "$id" =~ ^[A-Za-z0-9-]+$ ]]
 }
 
+@test "send: legacy trailing force preserves the positional body" {
+  run bash "$SCRIPTS/send.sh" team alice alice "forced positional body" --force
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"forced positional body"* ]]
+}
+
+@test "send: body-file with trailing force preserves the file body" {
+  local body_file="$TEST_SKILL_DIR/send-body.txt"
+  printf '%s\n' "forced file body" >"$body_file"
+  run bash "$SCRIPTS/send.sh" team alice alice --body-file "$body_file" --force
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"forced file body"* ]]
+}
+
+@test "send: force and print-id work in either trailing order without changing body" {
+  run bash "$SCRIPTS/send.sh" team alice alice "flags force then id" --force --print-id
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"message_id="* ]]
+  run bash "$SCRIPTS/send.sh" team alice alice "flags id then force" --print-id --force
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"message_id="* ]]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"flags force then id"* ]]
+  [[ "$output" == *"flags id then force"* ]]
+}
+
 @test "bridge marker parser requires exact self sender and full structured body" {
   run node - "$TYPES/codex/codex-bridge.js" <<'NODE'
 const { parseSelfTestMarker } = require(process.argv[2]);
