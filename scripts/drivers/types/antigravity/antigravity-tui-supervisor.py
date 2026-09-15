@@ -668,6 +668,7 @@ class Supervisor:
                             and hasattr(self.screen,'tail_with_prefix')
                             and self.screen.tail_with_prefix('esc to cancel')):
                         self.permission_screen_snapshot=copy.deepcopy(self.screen)
+                        self.permission_snapshot_fallback_used=False
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
                         if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')
