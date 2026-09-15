@@ -85,19 +85,19 @@ the same terminal; `agy-tui status` is the live view (`paused` vs `running`).
 If the supervisor later stops, queued fail reasons are printed to stderr after
 the terminal attributes are restored.
 
-Live delivery resumes only after the
-supervisor first observes a non-idle screen, then observes the supported empty
-idle prompt continuously with no pending terminal input or output. An unresolved
+Live delivery resumes after the supported empty idle prompt stays continuously
+ready, with no pending terminal input or output, for a short stability window.
+A non-idle redraw after typing still resets that window, but it is not required:
+if the screen is already idle, or returns to idle before a non-idle frame is
+observed, delivery resumes once the empty prompt stays stable. An unresolved
 batch, a durable attention condition, or the legacy manual-resume latch prevents
-automatic resume. An Esc that leaves the old idle screen visible therefore stays
-paused because no non-idle redraw was observed.
+automatic resume.
 
 An ordinary-input pause is written to the state file. After a supervisor restart
-it can clear only after the newly launched TUI renders the supported empty idle
-prompt; the live-session requirement to first observe non-idle does not apply to
-this restart path. An ordinary-input pause needs no command: finish the human
-turn and return to the empty input prompt, and the supervisor resumes delivery
-after the safety checks above pass. Durable attention and legacy
+it can clear once the newly launched TUI renders the supported empty idle
+prompt for the same stability window. An ordinary-input pause needs no command:
+finish the human turn and return to the empty input prompt, and the supervisor
+resumes delivery after the safety checks above pass. Durable attention and legacy
 `manualResumeRequired` states are never cleared automatically. Clear the input
 box before explicitly clearing a durable manual pause. The same `resume` command
 can clear an ordinary-input pause, but that is normally unnecessary because the
@@ -155,7 +155,7 @@ input pause from a durable pause or an unresolved batch.
 |---|---|---|
 | `通常inboxによる既読試行を検知` | a `read-denied` violation is latched | `agy-tui reset-guard …` |
 | A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | after checking the agy screen, mark the saved messages as read with `agy-tui ack …`, or resend them with `agy-tui replay …` |
-| `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the non-idle and stable-idle checks pass. |
+| `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the empty prompt stays stable. A live supervisor that is already stuck can also be cleared with `$agmsg resume` / `agy-tui resume …`. |
 | `paused` with a durable manual-resume latch | `manualResumeRequired`; automatic resume is deliberately disabled | Clear the input box, then run `$agmsg resume` or `agy-tui resume …`. |
 
 `reset-guard` only clears the violation latch, and only when there is nothing to

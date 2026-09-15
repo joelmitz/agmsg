@@ -356,6 +356,40 @@ assert s.state['humanInputActive'] is True, '未解決batchでは解除しない
 `);
 });
 
+test('人間入力後は非idleを観測しなくても安定idleで自動配送を再開する', () => {
+  runPython(`
+import importlib.util
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.HUMAN_IDLE_STABLE_SECONDS = 0.6
+s.state = {'batch': None, 'manualResumeRequired': False, 'humanInputActive': False,
+           'humanInputSawNonIdle': False, 'durableAttention': False,
+           'supervisorPhase': 'WAITING_FOR_IDLE'}
+s.human_input_restart_recovery = False
+s.human_idle_since = None
+s.save = lambda: None
+s.violations = type('Violations', (), {'exists': lambda self: False})()
+s.injection_ready = lambda: True
+now = {'value': 30.0}
+module.time.monotonic = lambda: now['value']
+s.pause_for_human_input()
+assert s.state['humanInputActive'] is True
+assert s.state['humanInputSawNonIdle'] is False
+s.update_human_input_state()
+assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
+now['value'] += 0.59
+s.update_human_input_state()
+assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
+now['value'] += 0.02
+s.update_human_input_state()
+assert s.state['humanInputActive'] is False
+assert s.state['humanInputSawNonIdle'] is False
+assert s.human_input_restart_recovery is False
+`);
+});
+
 test('再起動復帰は新screenの安定idleだけを要求し、耐久状態は解除しない', () => {
   runPython(`
 import importlib.util

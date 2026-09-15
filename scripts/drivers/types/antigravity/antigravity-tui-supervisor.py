@@ -645,8 +645,7 @@ class Supervisor:
             if not self.human_input_restart_recovery and not self.state.get('humanInputSawNonIdle'):
                 self.state['humanInputSawNonIdle']=True; self.save()
             return
-        if not self.human_input_restart_recovery and not self.state.get('humanInputSawNonIdle'):
-            self.human_idle_since=None; return
+        # 非idleフレームを取りこぼしても、空の入力待ちが安定していれば人間入力の処理は終わっている。
         now=time.monotonic()
         if self.human_idle_since is None:
             self.human_idle_since=now; return
