@@ -462,6 +462,30 @@ s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), 'Yes選択肢を欠く現行permission画面は許可しない'
 s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), '2番目の選択肢へカーソル移動してもpermission画面を認識する'
+diagnostic = s.permission_screen_diagnostic()
+assert "'yes': []" not in diagnostic, 'カーソルが2番目でもyes位置を報告する'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), '3番目の選択肢へカーソル移動してもpermission画面を認識する'
+diagnostic = s.permission_screen_diagnostic()
+assert "'yes': []" not in diagnostic, 'カーソルが3番目でもyes位置を報告する'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), '現行文言でも2番目カーソルのpermission画面を認識する'
+diagnostic = s.permission_screen_diagnostic()
+assert "'yes': []" not in diagnostic, '現行文言でカーソルが2番目でもyes位置を報告する'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), '現行文言でも3番目カーソルのpermission画面を認識する'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('受信本文: Requesting permission for: Do you want to proceed? 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
+assert not s.permission_input_ready(), 'カーソル無しのYes語句を含む受信本文をpermission画面と誤認しない'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert not s.permission_input_ready(), '選択肢1を欠き2/3だけがある画面は許可しない'
+s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('> 1. Yes\\r\\nRequesting permission for:\\r\\nDo you want to proceed?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), '必須要素の並びが許可modalと異なる合成表示は許可しない'
 s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': True,

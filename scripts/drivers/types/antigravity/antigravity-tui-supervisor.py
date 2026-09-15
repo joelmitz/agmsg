@@ -332,7 +332,8 @@ class Supervisor:
             start=max(0,nav[0]-physical_budget)
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
             request_position=modal.find('Requesting permission for:')
-            yes_position=modal.find('> 1. Yes')
+            # 選択肢1のテキスト。カーソル `>` の有無には依存しない。
+            yes_position=modal.find('1. Yes')
             if request_position<0 or yes_position<0:return 'permission-body-incomplete'
             questions=('Do you want to proceed?','Run this command?')
             question_positions=[modal.find(token,request_position+1) for token in questions]
@@ -356,7 +357,7 @@ class Supervisor:
             'request':'Requesting permission for:',
             'proceed':'Do you want to proceed?',
             'run_command':'Run this command?',
-            'yes':'> 1. Yes',
+            'yes':'1. Yes',
             'navigate':'Navigate',
             'amend':'Amend',
             'footer':'esc to cancel',
