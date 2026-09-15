@@ -55,6 +55,11 @@ explicitly when the project has more than one.
 Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]
 ```
 
+The command name `ack` is retained for compatibility. In user-facing terms it
+means "mark the saved messages as read" and must be used only after confirming
+the same batch's `AGMSG_RECEIVED:` line and reply on the agy screen. `replay`
+resends the saved batch without marking it read.
+
 `status`, `stop`, `resume` and `reset-guard` work from a non-interactive shell
 and do not need `agy` on `PATH`. Only the default `run` action requires a TTY.
 
@@ -129,7 +134,7 @@ trips agmsg's read guard. The guard records a `read-denied` violation, the
 supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**:
 
 ```
-通常inboxによる既読試行を検知; ackせず停止します
+通常inboxによる既読試行を検知; メッセージを未読のまま停止します
 復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください
 ```
 
@@ -149,7 +154,7 @@ input pause from a durable pause or an unresolved batch.
 | Symptom | Cause | Recovery |
 |---|---|---|
 | `通常inboxによる既読試行を検知` | a `read-denied` violation is latched | `agy-tui reset-guard …` |
-| A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | `agy-tui ack …` or `agy-tui replay …` |
+| A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | after checking the agy screen, mark the saved messages as read with `agy-tui ack …`, or resend them with `agy-tui replay …` |
 | `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the non-idle and stable-idle checks pass. |
 | `paused` with a durable manual-resume latch | `manualResumeRequired`; automatic resume is deliberately disabled | Clear the input box, then run `$agmsg resume` or `agy-tui resume …`. |
 
@@ -161,7 +166,8 @@ cannot take the identity's exclusivity lock. It never marks messages read.
 For a stuck batch, choose by **whether the model actually read the messages**:
 
 - The model produced the `AGMSG_RECEIVED:` line and answered → the work is done,
-  only the bookkeeping failed. Use `agy-tui ack`.
+  only marking the saved messages as read failed. Use `agy-tui ack` to mark
+  them read.
 - The model never saw them → use `agy-tui replay`, which re-injects the same
   batch.
 
@@ -173,7 +179,8 @@ id set before doing anything.
 > string. If an old `AGMSG_RECEIVED:<that batch id>` line is still visible — for
 > example because `agy` redrew earlier conversation history — the supervisor can
 > match it and acknowledge without the model reading anything. Clear the screen,
-> or use `ack` if the model demonstrably already answered.
+> or use `agy-tui ack` to mark the saved messages read if the model demonstrably
+> already answered.
 >
 > The permanent fix for this is listed under
 > [Known limitations](#known-limitations).

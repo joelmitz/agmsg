@@ -453,6 +453,15 @@ s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert s.permission_input_ready(), '構造化されたpermission画面を許可する'
 s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert s.permission_input_ready(), 'agy 1.1.28以降のpermission画面を許可する'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('受信本文: Requesting permission for: Run this command? > 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
+assert not s.permission_input_ready(), '現行文言を含む受信本文をpermission画面と誤認しない'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert not s.permission_input_ready(), 'Yes選択肢を欠く現行permission画面は許可しない'
+s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('> 1. Yes\\r\\nRequesting permission for:\\r\\nDo you want to proceed?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), '必須要素の並びが許可modalと異なる合成表示は許可しない'
 s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': True,
@@ -595,7 +604,7 @@ out = io.StringIO()
 with contextlib.redirect_stderr(out):
     s.fail('通常inboxによる既読試行を検知')
 assert 'agy-tui reset-guard' in out.getvalue()
-assert 'ackせず停止します' in out.getvalue()
+assert 'メッセージを未読のまま停止します' in out.getvalue()
 assert s.state['durableAttention'] is True
 `);
 });
@@ -934,7 +943,7 @@ process.stdin.on('data', chunk => {
     const unresolvedBeforeRecovery = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
     const restartRejected = spawnSync('python3', [supervisorPath, '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake], { env, encoding: 'utf8' });
     assert.notEqual(restartRejected.status, 0);
-    assert.match(restartRejected.stderr, /前回の受信を安全に既読確定できなかった/);
+    assert.match(restartRejected.stderr, /前回の受信を安全に既読にできなかった/);
     assert.match(restartRejected.stderr, new RegExp('batch: ' + uncertain.batch.id + ' phase=uncertain messages=1'));
     assert.match(restartRejected.stderr, new RegExp('message IDs: ' + uncertain.batch.messages[0].id));
     assert.match(restartRejected.stderr, /これは未処理とは限りません/);
@@ -942,7 +951,7 @@ process.stdin.on('data', chunk => {
     assert.match(restartRejected.stderr, /agy-tui ack --project/);
     assert.match(restartRejected.stderr, /agy-tui replay --project/);
     assert.match(restartRejected.stderr, /AGMSG_RECEIVED行と返信を確認済みの場合だけ/);
-    assert.match(restartRejected.stderr, /判断できない場合はackせず/);
+    assert.match(restartRejected.stderr, /判断できない場合は既読にせず/);
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')),
       unresolvedBeforeRecovery,

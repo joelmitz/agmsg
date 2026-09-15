@@ -11,6 +11,10 @@ AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
   printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
+  printf '%s\n' \
+    '  ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' \
+    '  replay       未処理の同じbatchをagyへ再送する（メッセージは既読にしない）' \
+    '  reset-guard  通常inboxの誤操作による停止を解除する（メッセージは既読にしない）'
 }
 
 ACTION=""

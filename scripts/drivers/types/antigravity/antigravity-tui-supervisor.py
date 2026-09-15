@@ -331,10 +331,15 @@ class Supervisor:
             physical_budget=max(16,(1024+screen.cols-1)//screen.cols)
             start=max(0,nav[0]-physical_budget)
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
-            required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
-            positions=[modal.find(token) for token in required]
-            if any(position<0 for position in positions):return 'permission-body-incomplete'
-            if positions!=sorted(positions):return 'permission-body-order'
+            request_position=modal.find('Requesting permission for:')
+            yes_position=modal.find('> 1. Yes')
+            if request_position<0 or yes_position<0:return 'permission-body-incomplete'
+            questions=('Do you want to proceed?','Run this command?')
+            question_positions=[modal.find(token,request_position+1) for token in questions]
+            question_position=next((position for position in question_positions
+                                    if request_position<position<yes_position),-1)
+            if question_position<0:return 'permission-body-incomplete'
+            if not request_position<question_position<yes_position:return 'permission-body-order'
             return None
         if screen.tail_with_prefix('↑/↓ Navigate · enter Confirm'):
             tail=visible[-8:]
@@ -350,6 +355,7 @@ class Supervisor:
         tokens={
             'request':'Requesting permission for:',
             'proceed':'Do you want to proceed?',
+            'run_command':'Run this command?',
             'yes':'> 1. Yes',
             'navigate':'Navigate',
             'amend':'Amend',
@@ -429,7 +435,7 @@ class Supervisor:
     def fail(self, why):
         if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.state['batch']['phase']='uncertain'
         self.state['durableAttention']=True; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save()
-        message=f'\r\n{why}; ackせず停止します'
+        message=f'\r\n{why}; メッセージを未読のまま停止します'
         if why=='通常inboxによる既読試行を検知':
             message+='\n復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください'
         print(message,file=sys.stderr); self.stopping=True
@@ -448,17 +454,17 @@ class Supervisor:
         confirm=' '.join(f'--confirm-id {shlex.quote(message_id)}' for message_id in ids)
         recovery=f'--batch {shlex.quote(batch_id)} {confirm}'.rstrip()
         return '\n'.join([
-            '前回の受信を安全に既読確定できなかったため、新しいagy TUIを開始しません。',
+            '前回の受信を安全に既読にできなかったため、新しいagy TUIを開始しません。',
             f'batch: {batch_id} phase={batch.get("phase")} messages={len(messages)}',
             f'message IDs: {", ".join(ids) if ids else "なし"}',
             'これは未処理とは限りません。次の基準で復旧方法を選んでください。',
             '1. 状態を確認:',
             f'   agy-tui status {common}',
-            '2. agy画面で同じbatchのAGMSG_RECEIVED行と返信を確認済みの場合だけ既読確定:',
+            '2. agy画面で同じbatchのAGMSG_RECEIVED行と返信を確認済みの場合だけ、保存済みメッセージを既読にする:',
             f'   agy-tui ack {common} {recovery}',
             '3. agyがメッセージを受信していない場合は再配送（重複処理に注意）:',
             f'   agy-tui replay {common} {recovery}',
-            '判断できない場合はackせず、statusの出力とagy画面を確認してください。',
+            '判断できない場合は既読にせず、statusの出力とagy画面を確認してください。',
         ])
     def acquire(self):
         mode=Path(self.project)/'.agent/rules/agmsg.md'
@@ -517,7 +523,7 @@ class Supervisor:
                 state['durableAttention']=False
                 if state.get('supervisorPhase')=='NEEDS_ATTENTION': state['supervisorPhase']='WAITING_FOR_IDLE'
                 atomic(self.state_file,state)
-            print('read-denied guardを解除しました。未読メッセージとack状態は変更していません')
+            print('read-denied guardを解除しました。メッセージの既読状態は変更していません')
         finally:
             self.call('release')
     def launch(self):
@@ -730,7 +736,7 @@ def recover(a):
     try:
         if a.action=='ack':
             s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
-            print('復旧ackを完了しました')
+            print('保存済みメッセージを既読にしました')
         else:
             # replayは新しいagy子プロセスへ明示的に再投入する操作なので、終了した
             # 旧セッションの通常入力pauseだけは持ち越さない。耐久manual pauseは別軸。
