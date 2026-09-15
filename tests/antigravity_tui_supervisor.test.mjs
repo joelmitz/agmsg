@@ -302,7 +302,7 @@ assert notice.getvalue().count('空の入力待ちに戻れば自動再開') == 
 `);
 });
 
-test('通常入力はnon-idle後の安定idleでだけ自動復帰する', () => {
+test('通常入力は安定idleで自動復帰し、非idleは安定期間をリセットする', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -321,7 +321,7 @@ s.injection_ready = lambda: ready['value']
 now = {'value': 10.0}
 module.time.monotonic = lambda: now['value']
 s.update_human_input_state()
-assert s.state['humanInputActive'] is True, '古いidleだけでは解除しない'
+assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
 ready['value'] = False
 s.update_human_input_state()
 assert s.state['humanInputSawNonIdle'] is True
