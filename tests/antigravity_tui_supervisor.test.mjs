@@ -561,6 +561,24 @@ assert events == ['child-partial-redraw','allowed'], events
 `);
 });
 
+test('permission snapshot fallbackは次の入力1回だけで消費する', () => {
+  runPython(`
+import importlib.util
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s=module.Supervisor.__new__(module.Supervisor)
+s.screen=SimpleNamespace(ready=False)
+s.permission_screen_snapshot=SimpleNamespace(ready=True)
+s.permission_snapshot_fallback_used=False
+s.permission_input_ready=lambda: s.screen.ready
+assert s.permission_input_ready_with_snapshot(False)
+assert s.permission_snapshot_fallback_used
+assert not s.permission_input_ready_with_snapshot(False), 'snapshotは2回目の入力へ持ち越さない'
+`);
+});
+
 test('read-denied停止には安全な復旧案内を表示する', () => {
   runPython(`
 import contextlib

@@ -296,7 +296,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.permission_screen_snapshot=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.permission_screen_snapshot=None; self.permission_snapshot_fallback_used=False; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -376,6 +376,16 @@ class Supervisor:
         # 現在のbatchはreceiptを待つ。既存の耐久pauseは触らず、通常入力の一時保留だけを立てる。
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
         print('\r\n[agmsg] 許可UIへの人間入力をrelayしました。受領確認後、空の入力待ちに戻れば自動再開します',file=sys.stderr)
+    def permission_input_ready_with_snapshot(self, live_ready):
+        """部分再描画直後の入力1回だけ、直前の構造化画面を再検証する。"""
+        if live_ready or self.permission_screen_snapshot is None or self.permission_snapshot_fallback_used:
+            return live_ready
+        current_screen=self.screen
+        self.screen=self.permission_screen_snapshot
+        try: ready=self.permission_input_ready()
+        finally: self.screen=current_screen
+        if ready: self.permission_snapshot_fallback_used=True
+        return ready
     @staticmethod
     def read_winsize(fd):
         return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -544,6 +554,7 @@ class Supervisor:
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
         self.permission_screen_snapshot=None
+        self.permission_snapshot_fallback_used=False
         self.permission_raw_window=''
         if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
@@ -667,12 +678,8 @@ class Supervisor:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
                 permission_ready=(permission_before_read or self.permission_input_ready())
-                if (not permission_ready and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
-                        and self.permission_screen_snapshot is not None):
-                    current_screen=self.screen
-                    self.screen=self.permission_screen_snapshot
-                    try: permission_ready=self.permission_input_ready()
-                    finally: self.screen=current_screen
+                if (not permission_ready and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'):
+                    permission_ready=self.permission_input_ready_with_snapshot(permission_ready)
                 if (self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
                         and permission_ready): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
