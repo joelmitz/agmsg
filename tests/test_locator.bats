@@ -39,6 +39,34 @@ teardown() { teardown_test_env; }
   [ -z "$(agmsg_locator_compose herdr "$(printf '/run/x\t')" w1:p7 2>/dev/null)" ]
 }
 
+@test "compose: a Windows herdr socket path with backslashes round-trips instead of pane_malformed" {
+  # Regression for the percent-decode loop's 2-hex-digit extraction: the old
+  # `code="${rest%${rest#??}}"` idiom re-used ${rest#??}'s VALUE as a glob
+  # PATTERN, and a backslash in that value (as in a real Windows
+  # HERDR_SOCKET_PATH) is a glob escape character, so the pattern silently
+  # stopped matching and `code` held the whole remainder instead of two hex
+  # digits -- refusing every herdr instance whose socket path has a backslash,
+  # which on Windows is every herdr instance. Before the fix this failed with
+  # `agmsg: locator: pane_malformed` (status 2); confirmed on the pre-fix code.
+  run agmsg_locator_compose herdr 'C:\Users\joel\AppData\Roaming\herdr\herdr.sock' w1:pB
+  [ "$status" -eq 0 ]
+  [ "$output" = 'herdr:v2:C%3A\Users\joel\AppData\Roaming\herdr\herdr.sock:w1:pB' ]
+
+  # The percent-decode this compose runs internally (as its own round-trip
+  # check) must recover the exact original instance, backslashes included.
+  run _agmsg_locator_instance_decode herdr 'v2:C%3A\Users\joel\AppData\Roaming\herdr\herdr.sock'
+  [ "$status" -eq 0 ]
+  [ "$output" = 'C:\Users\joel\AppData\Roaming\herdr\herdr.sock' ]
+
+  # A backslash-free Unix socket path with a colon (the case the existing
+  # "encodes a colon-bearing herdr instance" test above already covers) must
+  # keep succeeding alongside it -- the fix must not special-case backslashes
+  # at the expense of the ordinary path.
+  run agmsg_locator_compose herdr "/run/a:b.sock" w1:p7
+  [ "$status" -eq 0 ]
+  [ "$output" = "herdr:v2:/run/a%3Ab.sock:w1:p7" ]
+}
+
 @test "compose: the reason lands on stderr, one word, and stdout stays empty" {
   local err; err="$(agmsg_locator_compose herdr "$(printf '/run/x\t')" w1:p7 2>&1 >/dev/null)" || true
   [ "$err" = "agmsg: locator: instance_malformed" ]
