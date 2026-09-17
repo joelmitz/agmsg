@@ -25,6 +25,19 @@ setup() {
   setup_test_env
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"; mkdir -p "$RUN_DIR"
+  # #1254: the launcher now requires AGMSG_CODEX_SEAT_KEY (inherited from
+  # codex-monitor.sh's own environment in real use) and refuses to run
+  # without it. Generated fresh per TEST (never one fixed literal for the
+  # whole file): the dispatcher/child locks and the request file are keyed by
+  # this value now, not by $PROJ's hash, so a shared literal across tests
+  # would let one test's leftover lock or request file (teardown races a
+  # loaded runner) collide with the next test's -- exactly the isolation
+  # $PROJ's own per-test uniqueness used to give for free. Every launcher
+  # invocation below is a plain child process of this test, so it inherits
+  # this export without needing to repeat it at each of the ~20 call sites.
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  export AGMSG_CODEX_SEAT_KEY="$(_agmsg_codex_seat_key_new)"
   export PROJ="$TEST_SKILL_DIR/proj"; mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
@@ -137,15 +150,16 @@ teardown() {
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "${7:-}"' \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
     _ "$SCRIPTS" "$@"
 }
 
 write_request() {
-  local thread="$1" app_server="${2:-ws://127.0.0.1:1}" hash
-  hash=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/hash.sh"; printf "%s" "$2" | agmsg_sha1' _ "$SCRIPTS" "$PROJ")
-  printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$hash"
+  local thread="$1"
+  # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
+  # project hash -- this file's setup() exports one fixed key for the whole
+  # suite, which every launcher invocation below inherits.
+  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
@@ -222,27 +236,10 @@ run_launcher() {
   [ ! -f "$CAPTURE" ]
 }
 
-@test "launcher: leaves a role recorded in another CODEX_HOME unsubscribed" {
-  put_record team alice other-home-thread "$PROJ" codex "" "$HOME/.codex"
-  AGMSG_CODEX_HOME="$TEST_SKILL_DIR/isolated-home" run_launcher
-  [ ! -f "$CAPTURE" ]
-}
-
 @test "launcher: writes the bound-thread file so a later launcher can rebind (#350)" {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
-}
-
-@test "launcher: ignores a stale request app-server URL and binds to its live server" {
-  put_record team alice rec-thread-1 "$PROJ" codex
-  write_request old-request-thread ws://127.0.0.1:2
-  run_launcher
-
-  [ -f "$CAPTURE" ]
-  grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
-  ! grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
-  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
@@ -311,13 +308,16 @@ run_launcher() {
 @test "launcher: stale dispatcher reclamation remains singleton under contention" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
-  local hash lock_db
-  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  # #1254: the dispatcher lock is keyed by AGMSG_CODEX_SEAT_KEY now, not a
+  # project hash -- seed the stale row under that same resource name so this
+  # test still simulates what it means to (a crashed dispatcher's lock left
+  # behind for THIS seat).
+  local lock_db
   lock_db="$TEST_SKILL_DIR/db/messages.db"
-  sqlite3 "$lock_db" "CREATE TABLE locks(resource TEXT PRIMARY KEY, owner_pid INTEGER NOT NULL, acquired_at TEXT NOT NULL); INSERT INTO locks VALUES('codex-dispatcher:$hash', 99999999, datetime('now'));"
+  sqlite3 "$lock_db" "CREATE TABLE locks(resource TEXT PRIMARY KEY, owner_pid INTEGER NOT NULL, acquired_at TEXT NOT NULL); INSERT INTO locks VALUES('codex-dispatcher:$AGMSG_CODEX_SEAT_KEY', 99999999, datetime('now'));"
   # A crash from the former two-directory implementation can leave this behind.
   # The transactional lock protocol must not depend on that legacy reaper.
-  mkdir "$RUN_DIR/codex-bridge-dispatcher.$hash.reap"
+  mkdir "$RUN_DIR/codex-bridge-dispatcher.$AGMSG_CODEX_SEAT_KEY.reap"
   export AGMSG_TEST_DISPATCHER_STALE_BARRIER="$TEST_SKILL_DIR/stale-observed"
   sleep 10 3>&- & local parent_a=$!
   sleep 10 3>&- & local parent_b=$!

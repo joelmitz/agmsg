@@ -38,6 +38,10 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
 source "$SCRIPT_DIR/../../../lib/node.sh"
+# #1254: the app-server is keyed by SEAT now, not by project. These two give
+# this script the same resolution path codex-bridge-launcher.sh uses.
+source "$SCRIPT_DIR/_seat-key.sh"
+source "$SCRIPT_DIR/_app-server.sh"
 
 PROJECT="$(cd "$PROJECT" && pwd)"
 HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
@@ -85,16 +89,26 @@ new_nonce() {
 jst_identifier() {
   "$NODE_BIN" -e 'const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).formatToParts(new Date());const g=t=>p.find(x=>x.type===t).value;process.stdout.write(`${g("month")}-${g("day")}-${g("hour")}-${g("minute")}-${g("second")}`);'
 }
-PORT_FILE="$RUN_DIR/codex-app-server.$HASH.port"
-SERVER_PID_FILE="$RUN_DIR/codex-app-server.$HASH.pid"
 BASE="$RUN_DIR/codex-bridge.$TEAM.$AGENT"
 BASELINE_FILE="$RUN_DIR/codex-app-server.$HASH.loaded-baseline"
 BRIDGE_PID="$(cat "$BASE.pid" 2>/dev/null || true)"
 BRIDGE_THREAD="$(cat "$BASE.thread" 2>/dev/null || true)"
 BRIDGE_APP="$(cat "$BASE.appserver" 2>/dev/null || true)"
 META="$BASE.meta"
-PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-SERVER_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
+# #1254 realignment: the retired codex-app-server.<project-hash>.{port,pid}
+# files are gone, so read THIS SEAT's record instead. No seat key reaching us
+# means "could not ask" -- PORT/SERVER_PID stay empty and every downstream
+# check below already reports that as unknown rather than guessing.
+APP_SERVER_URL="$(_agmsg_codex_app_server_url "$PROJECT" 2>/dev/null || true)"
+PORT="${APP_SERVER_URL##*:}"
+case "$PORT" in ''|*[!0-9]*) PORT="" ;; esac
+SERVER_PID=""
+if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "${AGMSG_CODEX_SEAT_KEY}" 2>/dev/null; then
+  _seat_rec="$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")"
+  if _agmsg_codex_seat_record_read "$_seat_rec" 2>/dev/null; then
+    SERVER_PID="$SEAT_REC_PID"
+  fi
+fi
 
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
 SEAT_THREAD="${AGMSG_ROLE_SESSION_UUID:-}"
