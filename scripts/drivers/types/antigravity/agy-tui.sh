@@ -10,8 +10,9 @@ ROLE="${AGMSG_ANTIGRAVITY_ROLE:-}"
 AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
-  printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
+  printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
   printf '%s\n' \
+    '  diagnose     seat/supervisor/child/phase/guard/delivery/engine を1度に読み取る（既定は読み取り専用）' \
     '  ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' \
     '  replay       未処理の同じbatchをagyへ再送する（メッセージは既読にしない）' \
     '  reset-guard  通常inboxの誤操作による停止を解除する（メッセージは既読にしない）'
@@ -19,7 +20,7 @@ usage() {
 
 ACTION=""
 case "${1:-}" in
-  status|stop|resume|reset-guard|ack|replay) ACTION="$1"; shift ;;
+  status|diagnose|stop|resume|reset-guard|ack|replay) ACTION="$1"; shift ;;
 esac
 
 while [ $# -gt 0 ]; do
@@ -52,6 +53,14 @@ fi
 if [ -z "$TEAM" ] || [ -z "$ROLE" ]; then
   printf 'agy-tui: --teamと--nameは両方指定してください。\n' >&2
   exit 1
+fi
+
+if [ "$ACTION" = diagnose ]; then
+  # Read-only, and it never launches agy -- so it must not refuse when the
+  # binary is absent. Dispatched before the monitor path for the same reason
+  # the shim lives outside the supervisor's argparse: state-changing actions
+  # and this one do not share a route.
+  exec bash "$HERE/antigravity-diagnose.sh" "$PROJECT" "$TEAM" "$ROLE" "$@"
 fi
 
 if [ -z "$ACTION" ]; then
