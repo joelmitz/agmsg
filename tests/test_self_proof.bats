@@ -545,7 +545,12 @@ w1:pX	$PANE_PID"
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
-  sleep 60 >/dev/null 2>&1 3>&- & local dead=$!
+  # macOS Bash 3.2 treats a foreground `local` attached to an asynchronous
+  # list differently when caller shell options are enabled. Keep fixture setup
+  # as three commands so PID capture is independent of that parser edge case.
+  local dead
+  sleep 60 >/dev/null 2>&1 3>&- &
+  dead=$!
   kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
   # The precondition is that the pid is GONE. On a loaded runner the number can
   # be handed to a new process between the wait and the read below (#1187,
