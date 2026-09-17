@@ -106,7 +106,7 @@ SERVER_PID=""
 if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "${AGMSG_CODEX_SEAT_KEY}" 2>/dev/null; then
   _seat_rec="$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")"
   if _agmsg_codex_seat_record_read "$_seat_rec" 2>/dev/null; then
-    SERVER_PID="$SEAT_REC_PID"
+    SERVER_PID="${SEAT_REC_PID:-}"
   fi
 fi
 
