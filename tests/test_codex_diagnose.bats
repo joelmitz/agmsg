@@ -17,7 +17,7 @@ teardown() {
 @test "codex diagnose: help separates thread confirmation from TUI visibility" {
   run bash "$DIAG" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"THREAD_CONFIRMED"* ]]
+  printf '%s\n' "$output" | grep -qF -- "THREAD_CONFIRMED"
   [[ "$output" == *"visibly"* ]]
 }
 
@@ -31,7 +31,7 @@ teardown() {
   unset CODEX_THREAD_ID
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 2 ]
-  [[ "$output" == *"self-delivery: UNKNOWN reason=missing-or-invalid-CODEX_THREAD_ID"* ]]
+  printf '%s\n' "$output" | grep -qF -- "self-delivery: UNKNOWN reason=missing-or-invalid-CODEX_THREAD_ID"
   [ ! -d "$TEST_SKILL_DIR/run" ] || [ -z "$(find "$TEST_SKILL_DIR/run" -name 'codex-self-test.*.json' -print)" ]
 }
 
@@ -39,12 +39,12 @@ teardown() {
   export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 3 ]
-  [[ "$output" == *"self-delivery: PENDING"* ]]
+  printf '%s\n' "$output" | grep -qF -- "self-delivery: PENDING"
   diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
   [ -n "$diagnosis_id" ]
   run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"self-delivery: PENDING diagnosis_id=$diagnosis_id"* ]]
+  printf '%s\n' "$output" | grep -qF -- "self-delivery: PENDING diagnosis_id=$diagnosis_id"
 
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 3 ]
@@ -63,12 +63,12 @@ teardown() {
   message_id="${values#* }"
   run bash "$DIAG" "$PROJ" team alice --confirm "$nonce" "$message_id"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id"* ]]
-  [[ "$output" == *"tui-visible: REQUIRES_CURRENT_SCREEN_OBSERVATION"* ]]
+  printf '%s\n' "$output" | grep -qF -- "self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id"
+  printf '%s\n' "$output" | grep -qF -- "tui-visible: REQUIRES_CURRENT_SCREEN_OBSERVATION"
 
   run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"self-delivery: THREAD_CONFIRMED"* ]]
+  printf '%s\n' "$output" | grep -qF -- "self-delivery: THREAD_CONFIRMED"
   [[ "$output" != *"self-delivery: CONFIRMED"* ]]
 }
 
@@ -81,11 +81,11 @@ teardown() {
 @test "send: print-id is opt-in and returns the stored opaque id" {
   run bash "$SCRIPTS/send.sh" team alice alice hello
   [ "$status" -eq 0 ]
-  [[ "$output" != *"message_id="* ]]
+  refute grep -qF -- "message_id=" <<<"$output"
 
   run bash "$SCRIPTS/send.sh" team alice alice hello-again --print-id
   [ "$status" -eq 0 ]
-  [[ "$output" == *"message_id="* ]]
+  printf '%s\n' "$output" | grep -qF -- "message_id="
   id="$(printf '%s\n' "$output" | sed -n 's/^message_id=//p')"
   [[ "$id" =~ ^[A-Za-z0-9-]+$ ]]
 }
@@ -111,13 +111,13 @@ teardown() {
 @test "send: force and print-id work in either trailing order without changing body" {
   run bash "$SCRIPTS/send.sh" team alice alice "flags force then id" --force --print-id
   [ "$status" -eq 0 ]
-  [[ "$output" == *"message_id="* ]]
+  printf '%s\n' "$output" | grep -qF -- "message_id="
   run bash "$SCRIPTS/send.sh" team alice alice "flags id then force" --print-id --force
   [ "$status" -eq 0 ]
-  [[ "$output" == *"message_id="* ]]
+  printf '%s\n' "$output" | grep -qF -- "message_id="
   run agmsg_inbox team alice --quiet
   [ "$status" -eq 0 ]
-  [[ "$output" == *"flags force then id"* ]]
+  printf '%s\n' "$output" | grep -qF -- "flags force then id"
   [[ "$output" == *"flags id then force"* ]]
 }
 
