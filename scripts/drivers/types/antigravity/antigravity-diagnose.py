@@ -252,6 +252,36 @@ def diagnose_child(entry, project, team, role):
     return Layer('child', 'MATCH', f'pid={child_pid} start={child_start}')
 
 
+def _paused_phase(state, headline):
+    """A pause is not one flag, and the flags do not clear the same way.
+
+    SIGUSR1 (`resume`) clears manual_resume and human_input in the supervisor
+    loop and never touches durable_attention; only reset_guard() clears that,
+    and it refuses while the supervisor holding the seat is alive. Advising
+    `resume` for a durable_attention pause sends the operator down a path that
+    reports success and changes nothing -- which is how this was found.
+    """
+    durable = bool(state.get('durableAttention'))
+    human = bool(state.get('manualResumeRequired') or state.get('humanInputActive'))
+    if not durable:
+        return ('Delivery is held by a pause flag, so nothing reaches the TUI even though '
+                'the phase looks idle. Clear it from the screen, or:',
+                'agy-tui resume --project <project> --team <team> --name <role>',
+                None)
+    lead = ('Delivery is held by durable_attention, which `resume` does not clear: SIGUSR1 '
+            'clears manual_resume and human_input only.')
+    if human:
+        lead += (' The other flags here would clear, so a resume reports success and leaves '
+                 'delivery stopped.')
+    return (lead + ' Only reset-guard clears durable_attention, and it refuses while this '
+                   'supervisor is alive, so stop that first and start the monitor again:',
+            'agy-tui stop --project <project> --team <team> --name <role>\n'
+            'agy-tui reset-guard --project <project> --team <team> --name <role>\n'
+            'agy-tui --project <project> --team <team> --name <role>',
+            'reset-guard keeps the reservation and leaves messages unread; it refuses while '
+            'a batch is unresolved.')
+
+
 def diagnose_phase(entry, matches=()):
     """L4: where in the state machine this seat sits, and whether a batch blocks it.
 
@@ -284,14 +314,20 @@ def diagnose_phase(entry, matches=()):
                   or state.get('humanInputActive'))
     if not batch:
         if phase == 'NEEDS_ATTENTION':
-            return Layer('phase', 'MISMATCH', f'supervisor_phase={phase} batch=none {flags}')
+            # Same root cause as the pause below: fail() sets durable_attention
+            # and this phase together. Reporting the mismatch without the way
+            # out leaves the operator exactly where the old resume advice did.
+            head = f'supervisor_phase={phase} batch=none {flags}'
+            if state.get('durableAttention'):
+                remedy, command, note = _paused_phase(state, head)
+                return Layer('phase', 'MISMATCH', head, remedy, command, note)
+            return Layer('phase', 'MISMATCH', head)
         if paused:
             # maybe_poll() returns early on any of these, so nothing is injected
             # while they hold. Healthy-looking phase, delivery stopped.
-            return Layer('phase', 'BLOCKED', f'supervisor_phase={phase} batch=none {flags}',
-                         'Delivery is held by a pause flag, so nothing reaches the TUI even '
-                         'though the phase looks idle. Clear it from the screen, or restart:',
-                         'agy-tui resume --project <project> --team <team> --name <role>')
+            head = f'supervisor_phase={phase} batch=none {flags}'
+            remedy, command, note = _paused_phase(state, head)
+            return Layer('phase', 'BLOCKED', head, remedy, command, note)
         return Layer('phase', 'MATCH', f'supervisor_phase={phase} batch=none {flags}')
     headline = (f'supervisor_phase={phase} batch={batch.get("id")} '
                 f'batch_phase={batch.get("phase")} messages={len(batch.get("messages", []))} {flags}')

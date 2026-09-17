@@ -12,7 +12,7 @@ AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 usage() {
   printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
   printf '%s\n' \
-    '  diagnose     seat/supervisor/child/phase/guard/delivery/engine を1度に読み取る（既定は読み取り専用）' \
+    '  diagnose     read seat/supervisor/child/phase/guard/delivery/engine in one pass (read-only by default)' \
     '  ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' \
     '  replay       未処理の同じbatchをagyへ再送する（メッセージは既読にしない）' \
     '  reset-guard  通常inboxの誤操作による停止を解除する（メッセージは既読にしない）'

@@ -329,3 +329,67 @@ test('a guard that could only be half read is UNKNOWN, not intact', () => {
     childProc.kill();
   }
 });
+
+// A pause is not one flag. SIGUSR1 (`resume`) clears manual_resume and
+// human_input in the supervisor loop and never touches durable_attention;
+// only reset_guard() clears that, and it refuses while the supervisor is
+// alive. Advising `resume` for a durable_attention pause was found in the
+// field: it reported success and delivery stayed stopped.
+function pausedSeat(flags) {
+  const { install, project } = makeInstall();
+  const holder = spawnHolder();
+  const childProc = spawnHolder();
+  writeSeat(install, project, {
+    team: 'demo', role: 'agy', pid: holder.pid, start: holder.start,
+    childPid: childProc.pid, childStart: childProc.start, flags,
+  });
+  return { install, project, holder, childProc };
+}
+
+test('a human-flag pause is told to resume', () => {
+  const { install, project, holder, childProc } = pausedSeat({ manualResumeRequired: true });
+  try {
+    const result = diagnose(install, project, 'demo', 'agy');
+    assert.match(result.stdout, /^phase: BLOCKED .*manual_resume=true/m);
+    assert.match(result.stdout, /agy-tui resume --project/);
+    assert.doesNotMatch(result.stdout, /reset-guard --project/);
+  } finally { holder.kill(); childProc.kill(); }
+});
+
+test('a durable_attention pause is not told to resume, because resume cannot clear it', () => {
+  const { install, project, holder, childProc } = pausedSeat({ durableAttention: true });
+  try {
+    const result = diagnose(install, project, 'demo', 'agy');
+    assert.match(result.stdout, /^phase: BLOCKED .*durable_attention=true/m);
+    assert.match(result.stdout, /`resume` does not clear/);
+    assert.match(result.stdout, /agy-tui stop --project/);
+    assert.match(result.stdout, /agy-tui reset-guard --project/);
+    // The resume line is what the field report followed to a dead end.
+    assert.doesNotMatch(result.stdout, /agy-tui resume --project/);
+  } finally { holder.kill(); childProc.kill(); }
+});
+
+test('both kinds of pause together still point at reset-guard', () => {
+  const { install, project, holder, childProc } = pausedSeat({
+    durableAttention: true, manualResumeRequired: true, humanInputActive: true,
+  });
+  try {
+    const result = diagnose(install, project, 'demo', 'agy');
+    assert.match(result.stdout, /^phase: BLOCKED .*durable_attention=true manual_resume=true human_input=true/m);
+    // Saying only "run resume" here is the trap: the other flags would clear
+    // and the operator would read that as success.
+    assert.match(result.stdout, /reports success and leaves delivery stopped/);
+    assert.match(result.stdout, /agy-tui reset-guard --project/);
+  } finally { holder.kill(); childProc.kill(); }
+});
+
+test('NEEDS_ATTENTION without a batch carries the same way out', () => {
+  const { install, project, holder, childProc } = pausedSeat({
+    durableAttention: true, supervisorPhase: 'NEEDS_ATTENTION',
+  });
+  try {
+    const result = diagnose(install, project, 'demo', 'agy');
+    assert.match(result.stdout, /^phase: MISMATCH supervisor_phase=NEEDS_ATTENTION/m);
+    assert.match(result.stdout, /agy-tui reset-guard --project/);
+  } finally { holder.kill(); childProc.kill(); }
+});
