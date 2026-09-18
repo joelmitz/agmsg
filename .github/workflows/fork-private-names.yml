@@ -69,6 +69,15 @@ jobs:
     name: internal names (with list)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # ★明示する。既定の `run:` は `bash -e {0}` で起動され、**`-e` は Actions が
+    # 付ける**。step 内の `set -uo pipefail` は -e を消さないので、「-e と書いて
+    # いないから -e は無い」と読むと必ず間違える（実際に間違えた: 下の self-test の
+    # 注記を参照）。ここで宣言すると `bash --noprofile --norc -eo pipefail {0}` になり、
+    # 何の旗が立っているかがファイルを読むだけで分かる。手元で再現するときは
+    # `bash -e` で走らせること——`bash` だけでは本番と違う条件になる。
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -125,15 +134,22 @@ jobs:
         env:
           AGMSG_PRIVATE_NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           probe=".private-names-selftest.tmp"
           first="$(printf '%s' "${AGMSG_PRIVATE_NAMES}" \
                    | tr ',\n' '\n\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
                    | grep -m1 . || true)"
           printf '%s\n' "${first}" > "${probe}"
           git add -N -- "${probe}"
-          node scripts/check-private-names.mjs >/dev/null 2>&1
-          status=$?
+          # ★`|| status=$?` であって `; status=$?` ではない。この step の成功条件は
+          # 検査器が**非0で終わること**であり、`-e` 下では非0を返した時点で shell が
+          # 打ち切られて次の行に到達しない。`||` の左辺は -e の対象外になるので、
+          # 期待した失敗を拾える唯一の形がこれになる。
+          # 初版は `; status=$?` と書いて run 35306500511 で落ちた: 検査器は植えた
+          # 名前を検出して期待どおり exit 1 を返し、その exit 1 を `-e` が
+          # 「step の失敗」と解釈した。成功条件が失敗条件として扱われていた。
+          status=0
+          node scripts/check-private-names.mjs >/dev/null 2>&1 || status=$?
           git rm -q -f --cached -- "${probe}" >/dev/null 2>&1 || true
           rm -f -- "${probe}"
           if [ "${status}" -ne 1 ]; then
@@ -158,7 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           title="Private name check failed on a scheduled run"
           body="The scheduled private-name scan failed. This usually means a name on the list is now present in the tree -- possibly arrived through the upstream sync rather than a local push. The run log names the file and line but deliberately not the name itself; reproduce locally with the list and \`--show\`. Run: ${run_url}"
