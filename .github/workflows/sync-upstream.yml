@@ -81,8 +81,8 @@ jobs:
 
       # ★メール通知に依存しない検知経路。
       # 初版はこれが無く、2026-08-18〜08-22 の5日連続失敗が誰にも届かなかった
-      # （joelmitz の primary は大学アドレスで、Actions の失敗通知が実質機能
-      # していなかった）。fork は Issue が既定で無効なため 2026-08-22 に有効化した。
+      # （Actions の失敗通知メールが実質機能していなかった）。
+      # fork は Issue が既定で無効なため 2026-08-22 に有効化した。
       # 同題の open issue があればコメント追記に留め、毎日 issue が増えないようにする。
       - name: Open an issue on failure
         if: failure()
