@@ -48,15 +48,15 @@ teardown() { teardown_test_env; }
   # digits -- refusing every herdr instance whose socket path has a backslash,
   # which on Windows is every herdr instance. Before the fix this failed with
   # `agmsg: locator: pane_malformed` (status 2); confirmed on the pre-fix code.
-  run agmsg_locator_compose herdr 'C:\Users\joel\AppData\Roaming\herdr\herdr.sock' w1:pB
+  run agmsg_locator_compose herdr 'C:\Users\user\AppData\Roaming\herdr\herdr.sock' w1:pB
   [ "$status" -eq 0 ]
-  [ "$output" = 'herdr:v2:C%3A\Users\joel\AppData\Roaming\herdr\herdr.sock:w1:pB' ]
+  [ "$output" = 'herdr:v2:C%3A\Users\user\AppData\Roaming\herdr\herdr.sock:w1:pB' ]
 
   # The percent-decode this compose runs internally (as its own round-trip
   # check) must recover the exact original instance, backslashes included.
-  run _agmsg_locator_instance_decode herdr 'v2:C%3A\Users\joel\AppData\Roaming\herdr\herdr.sock'
+  run _agmsg_locator_instance_decode herdr 'v2:C%3A\Users\user\AppData\Roaming\herdr\herdr.sock'
   [ "$status" -eq 0 ]
-  [ "$output" = 'C:\Users\joel\AppData\Roaming\herdr\herdr.sock' ]
+  [ "$output" = 'C:\Users\user\AppData\Roaming\herdr\herdr.sock' ]
 
   # A backslash-free Unix socket path with a colon (the case the existing
   # "encodes a colon-bearing herdr instance" test above already covers) must
