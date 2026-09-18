@@ -25,7 +25,7 @@ Antigravity は app-server の thread discovery APIが無いため、本案はre
 したがって、bridge が会話を発見する方式ではなく、TUI 起動側が明示的に登録する方式を採用する。
 未登録の TUI に対して bridge が `--continue` や会話 ID なしで推測起動することは禁止し、既存の新規会話作成方式との互換性は明示的な移行モードに限定する。
 
-本書の設計対象は agmsg 正規リポジトリ `/home/joel/projects/agmsg` の Antigravity driver である。
+本書の設計対象は agmsg 正規リポジトリ（ローカルクローン `~/projects/agmsg`）の Antigravity driver である。
 調査時点の実測は次のとおり。
 
 - HEAD: `b57258f9da02f2f3730cb19d6d2f0ad06253cf0c`
@@ -89,7 +89,7 @@ lock を取れない、再読込後の世代が想定と異なる、rename に�
   "sessions": [
     {
       "instanceId": "stable-tui-instance-id",
-      "team": "airsurf",
+      "team": "team-name",
       "role": "agy",
       "conversationId": "uuid",
       "ownerPid": 1234,
@@ -139,7 +139,7 @@ headless bridge とその `agy` 子では capability の file descriptor を起�
 初期実装の presence 検証は、実測済みの Linux 経路だけに限定する。
 対象パスは `${HOME}/.gemini/antigravity-cli/presence/<conversationId>.lock` で、`conversationId` は UUID と完全一致させる。
 helper は `lsof` の表示文字列を判定に使わず、`/proc/<ownerPid>/fd/*` の symlink を列挙し、canonical path が対象 lock と完全一致する fd が一つ以上あることを確認する。
-実測では TUI PID `23563` の `/proc/23563/fd/46` が `/home/joel/.gemini/antigravity-cli/presence/691ad6cf-2e20-4e01-a5a9-1c995ed5a9fb.lock` を指し、lock は owner `joel`、mode `0600` だった。
+実測では TUI PID `23563` の `/proc/23563/fd/46` が `${HOME}/.gemini/antigravity-cli/presence/691ad6cf-2e20-4e01-a5a9-1c995ed5a9fb.lock` を指し、lock の owner は実行ユーザー自身、mode は `0600` だった。
 wrapper は同じ fd 対応から conversation ID を取得し、最新mtime、ファイル名一覧、`last_conversations.json` から推測しない。
 
 `/proc` が無いOS、既定外の app data directory、fd symlink を読めない権限、複数の UUID presence lock を同じ PID が保持する状態では TUI registration を作らない。
