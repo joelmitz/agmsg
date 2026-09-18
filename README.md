@@ -350,6 +350,8 @@ Terminal identity has a different number of observable names on each backend. He
 
 `send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
+A positional body crosses the caller's shell before `send.sh` ever sees it, and a stored message is not yet a delivered one. [docs/send-verification.md](docs/send-verification.md) covers both: what double quotes do to a body (measured), the argument-length limit that truncates one silently, and how to confirm the server actually accepted a given message.
+
 ## FAQ / Design notes
 
 **Is this MCP? Do I need an MCP server?**
@@ -405,6 +407,8 @@ git pull
 ```
 
 DB and team configs are preserved. Only scripts and assets are updated.
+
+An update replaces files; it does not by itself switch over everything that is already running, and the version it stamps depends on the clone you ran it from. See [docs/upgrading.md](docs/upgrading.md) for the fork-tag pitfall and for the four long-lived processes to account for afterwards.
 
 ## Uninstall
 
