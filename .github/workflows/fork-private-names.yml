@@ -1,0 +1,171 @@
+name: Fork private names
+
+# joelmitz/agmsg（fork）専用。公開リポに私有名が入っていないかを**名前リスト付きで**検査する。
+#
+# ★なぜ tests.yml とは別ファイルなのか
+#
+# upstream（fujibee/agmsg）の tests.yml にも同じ検査器を呼ぶ step があるが、そちらは
+#   AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs
+# であり、名前リスト検査を**明示的に無効化**している。検査器自身が
+#   "A pass here means \"no seat-shaped name\", NOT \"clean\"."
+# と警告するとおり、あれは seat 形状（<base>-cc<n> / <base>-co<n>）しか見ない。
+# 形に特徴のない語 — 人のハンドル、社内プロジェクトの通称、ホスト名 — は素通りする。
+#
+# 実害が出た（2026-09-18）。実メールアドレス・非公開リポ名・実チーム名が
+# この fork の main に入ったまま CI は緑だった（除去: 701e82d5 / f69e96e8 / 42314a48）。
+# 「緑 = 私有名なし」と読まれる緑が、実際には何も保証していなかった。
+#
+# 名前リストはファイルに書けない。書いた時点で、公開しないための語を公開することになる
+# （検査器のコメントいわく "A checker that leaks its own subject is not a checker."）。
+# よって repository secret から注入する。ログに名前が出ない根拠は二重にある:
+#   1) 検査器は既定で名前を出力しない（scripts/internal/private-names.mjs の format()。
+#      名前を出すのは `--show` を付けたときだけで、ここでは付けない）。
+#   2) GitHub Actions は secret の値がログに現れれば自動マスクする。
+#
+# ★なぜ tests.yml を書き換えないのか
+#
+# tests.yml は upstream と完全同一で、fork 独自の変更が1行も無い。ここを書き換えると、
+# sync-upstream.yml が毎日 upstream を追従するたびに、最も更新頻度の高いファイルで
+# fork 独自変更と upstream 変更を merge することになる。sync-upstream.yml が実測で
+# 記録しているとおり、fork 同期は workflow ファイルの扱いが最も壊れやすい
+# （merge-upstream API が HTTP 422 で拒否した実例あり）。衝突すれば merge_type=none で
+# 同期そのものが止まる。
+# 加えて upstream 側の step は間違ってはいない——upstream には secret が無いのだから、
+# 形状半分だけを回すのは upstream にとって正しい。重複ではなく**別の主張**である。
+# よって upstream 側は一切触らず、この fork 専用ファイルを足す。
+#
+# ファイル名の `fork-` 接頭辞は、将来 upstream が同名ファイルを作って衝突することを
+# 避けるため。upstream は fork ではないので、この接頭辞のファイルを作る動機が無い。
+
+on:
+  # #1 自分の push。今回の混入経路はこれだった。branch を限定しない——
+  # main に入る前の branch で落ちるのが一番安い。
+  push:
+  # #2 定時。fork の main は自分の push 以外でも動く: sync-upstream.yml が毎日
+  # upstream を取り込むため、**upstream が publish した私有名がこちらの tree に
+  # 入ってくる**経路がある（実例は下の「既知の未処理」を参照）。その取り込みが
+  # push イベントを起こすかどうかに依存したくないので、定時で tree 自体を見る。
+  # sync-upstream.yml の 03:17 UTC より後に置き、同期直後の tree を検査する。
+  schedule:
+    - cron: '47 3 * * *'  # 03:47 UTC（12:47 JST）
+  workflow_dispatch: {}
+
+# pull_request では**発火させない**。fork からの PR には secret が渡らないという
+# GitHub の仕様があり、その leg を足すと「secret が無いので検査していない」状態を
+# 常時かかえることになる。自分の branch を push すれば #1 で検査されるので、
+# 同一リポ内の PR は push leg が既にカバーしている。外部コントリビュータの PR を
+# 名前リストで検査する方法は（secret が届かない以上）そもそも存在しない。
+
+permissions:
+  contents: read
+  issues: write  # 定時実行が落ちたときの通知経路（下記）
+
+concurrency:
+  group: fork-private-names-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  private-names:
+    name: internal names (with list)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # #3 secret 未設定時の挙動: **落とす**。黙って通さない。
+      #
+      # 検査器は未設定なら exit 2 を返すので、素通りはしない。それでも先に明示的に
+      # 見るのは、(a) `::error::` 注釈が run の要約画面に出て原因が一目で分かること、
+      # (b) 検査器の exit 2 では塞げない穴が2つあるため。
+      #
+      #   穴1: `none`。secret に `none` と入れると検査器は「形状のみ」バナーを出して
+      #        exit 0 する。この workflow の存在理由そのものを無効化する値なので、
+      #        ここで拒否する。形状のみを回したいなら tests.yml が既にやっている。
+      #   穴2: 区切り文字だけ。`,,,` は非空なので検査器は「リストが供給された」と判断し、
+      #        しかし有効な名前が 0 件なので名前パターンが null になり、
+      #        **バナーも警告も無しに exit 0 "clean"** と出る（実測 2026-09-18）。
+      #        供給されたが空、が一番危ない値なので、実際に名前が何件あるかを数える。
+      #
+      # 名前そのものは一切 echo しない。数えるだけ。
+      - name: Require a usable name list
+        env:
+          AGMSG_PRIVATE_NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AGMSG_PRIVATE_NAMES}" ]; then
+            echo "::error title=AGMSG_PRIVATE_NAMES is not set::This fork publishes a name list through a repository secret. Without it the only check that runs is the shape half in tests.yml, and a green from that does NOT mean the tree is clean. Set the AGMSG_PRIVATE_NAMES repository secret (comma or newline separated)."
+            exit 1
+          fi
+          if [ "${AGMSG_PRIVATE_NAMES}" = "none" ]; then
+            echo "::error title=AGMSG_PRIVATE_NAMES is set to 'none'::'none' disables the name half, which is the only thing this workflow adds. tests.yml already runs the shape half. Put the real list in the secret, or delete this workflow -- but do not make it report green while checking nothing."
+            exit 1
+          fi
+          count="$(printf '%s' "${AGMSG_PRIVATE_NAMES}" \
+                   | tr ',\n' '\n\n' | sed 's/[[:space:]]//g' | grep -c . || true)"
+          echo "name list entries: ${count}"
+          if [ "${count}" -lt 1 ]; then
+            echo "::error title=AGMSG_PRIVATE_NAMES holds no usable name::The secret is set but every entry is empty after trimming, so the name half matches nothing and the checker still exits 0 clean. That is the silent green this workflow exists to prevent."
+            exit 1
+          fi
+
+      # 「設定されている」と「効いている」は別のこと。env が検査器まで届いて
+      # 実際に検出まで至るかを、判定とは別の材料で確かめる: リスト先頭の名前を
+      # 書いた一時ファイルを tree に載せ、検査器が**落ちる**ことを確認する。
+      # 落ちなければ配線が切れている。
+      #
+      # 一時ファイルは git add -N で index にだけ載せる（検査器の走査範囲は
+      # `git ls-files` であるため）。commit はしないし、直後に必ず外す。
+      # 名前は出力されない——検査器の既定の書式は「ファイル:行: 内部名, N 文字」で、
+      # `--show` を付けたときだけ実際の文字列を出す。
+      - name: Prove the name half is wired up
+        env:
+          AGMSG_PRIVATE_NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
+        run: |
+          set -uo pipefail
+          probe=".private-names-selftest.tmp"
+          first="$(printf '%s' "${AGMSG_PRIVATE_NAMES}" \
+                   | tr ',\n' '\n\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                   | grep -m1 . || true)"
+          printf '%s\n' "${first}" > "${probe}"
+          git add -N -- "${probe}"
+          node scripts/check-private-names.mjs >/dev/null 2>&1
+          status=$?
+          git rm -q -f --cached -- "${probe}" >/dev/null 2>&1 || true
+          rm -f -- "${probe}"
+          if [ "${status}" -ne 1 ]; then
+            echo "::error title=The name half is not detecting anything::A file containing a name from the secret was planted in the tree and the checker returned ${status} instead of 1. The list is reaching the process but nothing is being matched, so a green from the real run below would mean nothing."
+            exit 1
+          fi
+          echo "self-test ok: a planted name was detected (exit 1 as expected)"
+
+      # 本番。名前は出力されない（--show を付けない）。
+      - name: Check every name we publish
+        env:
+          AGMSG_PRIVATE_NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
+        run: node scripts/check-private-names.mjs
+
+      # 定時実行の失敗は誰も見ていない。sync-upstream.yml が実測で記録しているとおり
+      # （2026-08-18〜08-22 の5日連続失敗が誰にも届かなかった）、Actions の失敗通知
+      # メールはこのリポジトリでは実質機能していない。push での失敗は押した本人が
+      # すぐ見るので、通知は定時実行のときだけにする。
+      # 同題の open issue があればコメント追記に留め、毎日 issue が増えないようにする。
+      - name: Open an issue on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          title="Private name check failed on a scheduled run"
+          body="The scheduled private-name scan failed. This usually means a name on the list is now present in the tree -- possibly arrived through the upstream sync rather than a local push. The run log names the file and line but deliberately not the name itself; reproduce locally with the list and \`--show\`. Run: ${run_url}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title ${title}" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
