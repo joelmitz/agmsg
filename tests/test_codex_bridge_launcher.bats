@@ -224,6 +224,19 @@ write_request() {
   printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
+# The launcher dispatcher owns the seat app-server and therefore attempts to
+# parse its exact seat record when the test lifetime exits. The bridge tests do
+# not start a real app-server, but they still need a schema-valid record so a
+# missing fixture is not mistaken for a production record failure. The pid is
+# deliberately absent; the fail-closed stop path must report it as not alive
+# and leave the record untouched.
+write_seat_record_fixture() {
+  source "$SCRIPTS/lib/hash.sh"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")" \
+    "$(printf '%s' "$PROJ" | agmsg_sha1)" "999999999" "1" "" "" "codex-test"
+}
+
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
 # runner, but stop it as soon as the asynchronous bridge launch is observable.
 # A short foreground lifetime followed by a capture wait is not equivalent:
@@ -636,6 +649,7 @@ wait_for_child_count() {
   # at :291 and :381 are asking tasklist about an MSYS pid -- false on the first
   # evaluation, which means neither loop turns over and no bridge is ever
   # started. Real tasklist, no stub.
+  write_seat_record_fixture
   put_record team alice thread-win "$PROJ" codex
 
   run_launcher_until_capture || true
@@ -1076,6 +1090,34 @@ EOF
   export PATH="$stubdir:$PATH"
 }
 
+# Bats' `run` waits without a test-local deadline. On Git Bash a native
+# PowerShell lookup can remain unresolved after the first probe, so exercise
+# the function in a child and bound that wait here. A timeout is recorded as a
+# failure status; it is never converted into a passing assertion.
+_run_safe_stop_bounded() {
+  local fn="$1" ticks="${2:-100}" output_file="$TEST_SKILL_DIR/safe-stop.output"
+  local worker i=0
+  : > "$output_file"
+  "$fn" >"$output_file" 2>&1 & worker=$!
+  while [ "$i" -lt "$ticks" ] && kill -0 "$worker" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$worker" 2>/dev/null; then
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    SAFE_STOP_STATUS=124
+  else
+    if wait "$worker" 2>/dev/null; then
+      SAFE_STOP_STATUS=0
+    else
+      SAFE_STOP_STATUS=$?
+    fi
+  fi
+  SAFE_STOP_OUTPUT="$(cat "$output_file" 2>/dev/null || true)"
+  return 0
+}
+
 @test "launcher safe-stop: PowerShell ABSENT and PID reuse are exit proof; UNKNOWN is not" {
   _load_safe_stop_functions
   _safe_stop_probe_stub
@@ -1117,8 +1159,8 @@ EOF
   _safe_stop_probe_stub
   local now=$(( $(date +%s) + 10 ))
   _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
-  POWERSHELL_RESULT=UNKNOWN run _windows_wait_exit_proof
-  [ "$status" -ne 0 ]
+  POWERSHELL_RESULT=UNKNOWN _run_safe_stop_bounded _windows_wait_exit_proof 100
+  [ "$SAFE_STOP_STATUS" -ne 0 ]
   [ -f "$retire_fence" ]
 }
 

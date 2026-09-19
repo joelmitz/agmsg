@@ -14,7 +14,6 @@ else
     MINGW*|MSYS*|CYGWIN*)
       for candidate in \
         "${HOME:-}/AppData/Roaming/npm/node_modules/bats/bin/bats" \
-        /c/Users/joel/AppData/Roaming/npm/node_modules/bats/bin/bats \
         /usr/local/lib/node_modules/bats/bin/bats; do
         if [ -f "$candidate" ]; then bats_bin="$candidate"; break; fi
       done
