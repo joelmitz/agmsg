@@ -42,6 +42,10 @@ setup() {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
   export CAPTURE="$TEST_SKILL_DIR/thread-capture.txt"
+  export LAUNCHER_STDOUT="$TEST_SKILL_DIR/launcher.stdout"
+  export LAUNCHER_STDERR="$TEST_SKILL_DIR/launcher.stderr"
+  : > "$LAUNCHER_STDOUT"
+  : > "$LAUNCHER_STDERR"
   # A leaked AGMSG_CODEX_BRIDGE_CMD from the ambient environment (not this
   # file, which no longer sets it) would silently put the launcher back on the
   # override code path this suite is no longer testing -- unset it explicitly
@@ -136,15 +140,73 @@ _launcher_bridge_pids() {
 # teardown_test_env's rm -rf from racing a process still touching this test's
 # $TEST_SKILL_DIR (#595/#615).
 teardown() {
-  local pid pids
+  local pid pids wait_failed=0
   pids="$(_launcher_child_pids; _launcher_bridge_pids)"
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
   done
   for pid in $pids; do
-    wait_for_pid_exit "$pid" || true
+    if ! _wait_launcher_pid_bounded "$pid" 100; then
+      wait_failed=1
+      _report_launcher_failure "teardown timeout waiting for pid $pid"
+    fi
   done
-  teardown_test_env
+  if [ "${LAUNCHER_FAILURE:-0}" = 1 ]; then
+    printf 'codex launcher test artifacts preserved at %s\n' "$TEST_SKILL_DIR" >&2
+    wait_failed=1
+  else
+    teardown_test_env || wait_failed=1
+  fi
+  [ "$wait_failed" -eq 0 ]
+}
+
+# Bats' dispatcher and detached role launcher are deliberately independent
+# processes. Never use an unbounded `wait` for either: on native Windows a
+# missing CAPTURE can otherwise leave the test inside the job-level timeout.
+# This helper uses only a bounded builtin loop so the runner remains usable when
+# npm's `seq` shim is the thing that is broken.
+_wait_launcher_pid_bounded() {
+  local pid="$1" ticks="$2" i=0
+  while [ "$i" -lt "$ticks" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+_report_launcher_failure() {
+  local reason="$1"
+  export LAUNCHER_FAILURE=1
+  {
+    printf 'codex launcher test diagnostic: %s\n' "$reason"
+    printf 'CAPTURE=%s exists=%s\n' "$CAPTURE" "$([ -f "$CAPTURE" ] && echo yes || echo no)"
+    printf '%s\n' 'launcher process tree:'
+    ps -eo pid=,ppid=,stat=,args= 2>/dev/null | grep -F "$TEST_SKILL_DIR" || true
+    printf '%s\n' 'launcher stdout:'
+    tail -200 "$LAUNCHER_STDOUT" 2>/dev/null || true
+    printf '%s\n' 'launcher stderr:'
+    tail -200 "$LAUNCHER_STDERR" 2>/dev/null || true
+  } >&2
+}
+
+assert_capture() {
+  if [ ! -f "$CAPTURE" ]; then
+    _report_launcher_failure "CAPTURE was expected but was not created"
+    return 1
+  fi
+}
+
+wait_launcher_or_report() {
+  local pid="$1" label="$2"
+  if ! _wait_launcher_pid_bounded "$pid" 200; then
+    _report_launcher_failure "$label did not exit within 20 seconds"
+    kill "$pid" 2>/dev/null || true
+    _wait_launcher_pid_bounded "$pid" 20 || true
+    wait "$pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$pid" 2>/dev/null || true
 }
 
 # Write a role-session record (team, agent) -> thread for a project.
@@ -162,6 +224,20 @@ write_request() {
   printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
+# The launcher dispatcher owns the seat app-server and therefore attempts to
+# parse its exact seat record when the test lifetime exits. The bridge tests do
+# not start a real app-server, but they still need a schema-valid record so a
+# missing fixture is not mistaken for a production record failure. Use this
+# test shell's live pid with an empty witness: the stop path must fail closed
+# at the witness check and leave the record untouched, without probing an
+# arbitrary Windows pid.
+write_seat_record_fixture() {
+  source "$SCRIPTS/lib/hash.sh"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")" \
+    "$(printf '%s' "$PROJ" | agmsg_sha1)" "$$" "1" "" "" "codex-test"
+}
+
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
 # runner, but stop it as soon as the asynchronous bridge launch is observable.
 # A short foreground lifetime followed by a capture wait is not equivalent:
@@ -169,18 +245,33 @@ write_request() {
 # the role child that creates CAPTURE.
 run_launcher_until_capture() { # [ENV=VALUE ...]
   sleep 30 3>&- & local parent=$!
-  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" \
+    >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- &
   local dispatcher=$! seen=0 i
-  for i in {1..200}; do
+  i=0
+  while [ "$i" -lt 200 ]; do
     if [ -f "$CAPTURE" ]; then seen=1; break; fi
     sleep 0.1
+    i=$((i + 1))
   done
   kill "$parent" 2>/dev/null || true
+  _wait_launcher_pid_bounded "$parent" 100 || true
   wait "$parent" 2>/dev/null || true
   # Retire the lifetime first and let the dispatcher observe that boundary.
   # Killing the dispatcher first can strand the detached role child it spawned.
+  if ! _wait_launcher_pid_bounded "$dispatcher" 100; then
+    _report_launcher_failure "dispatcher did not exit within 10 seconds"
+    kill "$dispatcher" 2>/dev/null || true
+    _wait_launcher_pid_bounded "$dispatcher" 20 || true
+    wait "$dispatcher" 2>/dev/null || true
+    return 1
+  fi
   wait "$dispatcher" 2>/dev/null || true
-  [ "$seen" -eq 1 ]
+  if [ "$seen" -ne 1 ]; then
+    _report_launcher_failure "CAPTURE was not created within 20 seconds"
+    return 1
+  fi
+  return 0
 }
 
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
@@ -188,22 +279,33 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
 # can't keep bats from exiting on macOS (#bats-fd3).
 run_launcher() {
   sleep 6 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" \
+    >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- & local dispatcher=$!
+  if ! _wait_launcher_pid_bounded "$dispatcher" 300; then
+    _report_launcher_failure "dispatcher did not exit within 30 seconds"
+    kill "$dispatcher" 2>/dev/null || true
+    _wait_launcher_pid_bounded "$dispatcher" 20 || true
+    wait "$dispatcher" 2>/dev/null || true
+    return 1
+  fi
+  wait "$dispatcher" 2>/dev/null || true
+  _wait_launcher_pid_bounded "$p" 100 || true
   wait "$p" 2>/dev/null || true
   # The launcher starts the mock through nohup. Its bound-thread metadata is
   # written synchronously, but the mock's capture can land just after the
   # parent exits, especially now that a per-role child launcher is involved.
-  local i
-  for i in {1..30}; do
+  local i=0
+  while [ "$i" -lt 30 ]; do
     [ -f "$CAPTURE" ] && break
     sleep 0.1
+    i=$((i + 1))
   done
 }
 
 @test "launcher: binds the recorded thread when the record's project matches (#350)" {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
-  [ -f "$CAPTURE" ]
+  assert_capture
   grep -q -- "--thread rec-thread-1" "$CAPTURE"
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
@@ -212,7 +314,7 @@ run_launcher() {
   setup_live_owner "$RUN_DIR" owner-session
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
   run_launcher
-  [ -f "$CAPTURE" ]
+  assert_capture
   grep -q -- "--owner owner-session" "$CAPTURE"
 }
 
@@ -247,7 +349,7 @@ run_launcher() {
   write_request old-request-thread ws://127.0.0.1:2
   run_launcher
 
-  [ -f "$CAPTURE" ]
+  assert_capture
   grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
   refute grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
@@ -269,7 +371,7 @@ run_launcher() {
   [ "$recorded" != 99999999 ]
   kill -0 "$recorded"
 
-  wait "$driver_pid" 2>/dev/null || true
+  wait_launcher_or_report "$driver_pid" driver || return 1
 }
 
 @test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
@@ -307,11 +409,11 @@ run_launcher() {
     [ -f "$CAPTURE" ] && break
     sleep 0.1
   done
-  [ -f "$CAPTURE" ]
+  assert_capture
   [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
 
-  wait "$launcher_a" 2>/dev/null || true
-  wait "$launcher_b" 2>/dev/null || true
+  wait_launcher_or_report "$launcher_a" launcher-a || return 1
+  wait_launcher_or_report "$launcher_b" launcher-b || return 1
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
 }
@@ -343,11 +445,11 @@ run_launcher() {
     [ -f "$CAPTURE" ] && break
     sleep 0.1
   done
-  [ -f "$CAPTURE" ]
+  assert_capture
   [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
 
-  wait "$launcher_a" 2>/dev/null || true
-  wait "$launcher_b" 2>/dev/null || true
+  wait_launcher_or_report "$launcher_a" launcher-a || return 1
+  wait_launcher_or_report "$launcher_b" launcher-b || return 1
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
 }
@@ -376,7 +478,7 @@ run_launcher() {
   done
   grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE"
   put_record team alice thread-after "$PROJ" codex
-  wait "$launcher_pid" 2>/dev/null || true
+  wait_launcher_or_report "$launcher_pid" launcher || return 1
   wait "$p" 2>/dev/null || true
 
   grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE"
@@ -430,7 +532,7 @@ wait_for_child_count() {
   # trapped the signal: the EXIT trap does not run, so the lock row is left
   # behind owned by a dead pid, exactly the state a replacement dispatcher hits.
   kill -9 "$dispatcher_a" 2>/dev/null || true
-  wait "$dispatcher_a" 2>/dev/null || true
+  wait_launcher_or_report "$dispatcher_a" dispatcher-a || return 1
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
   # Dispatcher B reclaims the stale lock and, with an empty known_pairs, spawns
@@ -445,7 +547,7 @@ wait_for_child_count() {
   [ "$(count_child_launchers)" -eq 1 ]
 
   kill "$dispatcher_b" 2>/dev/null || true
-  wait "$dispatcher_b" 2>/dev/null || true
+  wait_launcher_or_report "$dispatcher_b" dispatcher-b || return 1
   kill "$parent_a" "$parent_b" 2>/dev/null || true
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
@@ -475,7 +577,7 @@ wait_for_child_count() {
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
   kill "$dispatcher" 2>/dev/null || true
-  wait "$dispatcher" 2>/dev/null || true
+  wait_launcher_or_report "$dispatcher" dispatcher || return 1
   kill "$parent" 2>/dev/null || true
   wait "$parent" 2>/dev/null || true
 }
@@ -510,7 +612,7 @@ wait_for_child_count() {
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 
   kill "$dispatcher" 2>/dev/null || true
-  wait "$dispatcher" 2>/dev/null || true
+  wait_launcher_or_report "$dispatcher" dispatcher || return 1
   kill "$parent" 2>/dev/null || true
   wait "$parent" 2>/dev/null || true
 }
@@ -536,7 +638,7 @@ wait_for_child_count() {
   run_launcher_until_capture MSYSTEM=MINGW64 PATH="$stubdir:$PATH" || true
 
   # A bridge was launched at all -- this is what the whole class costs on Windows.
-  [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
+  assert_capture || { echo "no bridge was started under a blind tasklist"; false; }
   grep -q -- '--thread thread-msys' "$CAPTURE"
 }
 
@@ -548,11 +650,12 @@ wait_for_child_count() {
   # at :291 and :381 are asking tasklist about an MSYS pid -- false on the first
   # evaluation, which means neither loop turns over and no bridge is ever
   # started. Real tasklist, no stub.
+  write_seat_record_fixture
   put_record team alice thread-win "$PROJ" codex
 
   run_launcher_until_capture || true
 
-  [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
+  assert_capture || { echo "no bridge was started on native Windows"; false; }
   grep -q -- '--thread thread-win' "$CAPTURE"
 }
 
@@ -932,14 +1035,13 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ -n "${output#*"$tab"}" ]
 }
 
-@test "launcher: CLANGARM uname selects the Windows start token path" {
+@test "launcher: CLANGARM MSYSTEM selects the Windows start token path" {
   local stubdir="$TEST_SKILL_DIR/clangarm-bin"
   mkdir -p "$stubdir"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
-  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+  chmod +x "$stubdir/powershell.exe"
 
-  PATH="$stubdir:$PATH" _run_start_token 123
+  MSYSTEM=CLANGARM64 PATH="$stubdir:$PATH" _run_start_token 123
   [ "$status" -eq 0 ]
   [ "$output" = $'pwsh\t639231441791462826' ]
 }
@@ -958,4 +1060,134 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ "${output%%"$tab"*}" = pwsh ]
   local tok="${output#*"$tab"}"
   case "$tok" in ''|*[!0-9]*) false ;; esac
+}
+
+_load_safe_stop_functions() {
+  local pattern
+  source "$SCRIPTS/lib/hash.sh"
+  pattern='/^_read_lease() {/,/^}/p;/^_read_stop_record() {/,/^}/p;/^_write_stop_record() {/,/^}/p;/^_windows_process_state() {/,/^}/p;/^_windows_stop_request_from_fence() {/,/^}/p;/^_windows_begin_retire() {/,/^}/p;/^_windows_wait_exit_proof() {/,/^}/p;/^_windows_current_bridge_valid() {/,/^}/p'
+  eval "$(sed -n "$pattern" "$LAUNCHER")"
+  TAB=$'\t'
+  PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
+  BRIDGE_PAIRS_HASH="$(printf '%s' pair-set | agmsg_sha1)"
+  retire_fence="$RUN_DIR/codex-bridge-retire.$PROJECT_HASH.$BRIDGE_PAIRS_HASH"
+  appserver_file="$RUN_DIR/current.appserver"
+  thread_file="$RUN_DIR/current.thread"
+  _REAP_WAIT_TICKS=1
+}
+
+_safe_stop_probe_stub() {
+  local stubdir="$TEST_SKILL_DIR/safe-stop-bin"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/powershell.exe" <<'EOF'
+#!/usr/bin/env bash
+case "${POWERSHELL_RESULT:-UNKNOWN}" in
+  UNKNOWN) exit 3 ;;
+  *) printf '%s\n' "$POWERSHELL_RESULT" ;;
+esac
+EOF
+  chmod +x "$stubdir/powershell.exe"
+  ln -s powershell.exe "$stubdir/pwsh"
+  export PATH="$stubdir:$PATH"
+}
+
+# Bats' `run` waits without a test-local deadline. On Git Bash a native
+# PowerShell lookup can remain unresolved after the first probe, so exercise
+# the function in a child and bound that wait here. A timeout is recorded as a
+# failure status; it is never converted into a passing assertion.
+_run_safe_stop_bounded() {
+  local fn="$1" ticks="${2:-100}" output_file="$TEST_SKILL_DIR/safe-stop.output"
+  local worker i=0
+  : > "$output_file"
+  "$fn" >"$output_file" 2>&1 & worker=$!
+  while [ "$i" -lt "$ticks" ] && kill -0 "$worker" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$worker" 2>/dev/null; then
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    SAFE_STOP_STATUS=124
+  else
+    if wait "$worker" 2>/dev/null; then
+      SAFE_STOP_STATUS=0
+    else
+      SAFE_STOP_STATUS=$?
+    fi
+  fi
+  SAFE_STOP_OUTPUT="$(cat "$output_file" 2>/dev/null || true)"
+  return 0
+}
+
+@test "launcher safe-stop: PowerShell ABSENT and PID reuse are exit proof; UNKNOWN is not" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  POWERSHELL_RESULT=ABSENT run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = ABSENT ]
+  POWERSHELL_RESULT=$'LIVE\t222' run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = $'LIVE\t222' ]
+  POWERSHELL_RESULT=UNKNOWN run _windows_process_state 123
+  [ "$status" -ne 0 ] && [ "$output" = UNKNOWN ]
+}
+
+@test "launcher safe-stop: an exact lease creates durable fence and atomic request" {
+  _load_safe_stop_functions
+  local pid=123 start=638622100000000000 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$start" > "$RUN_DIR/codex-bridge-lease.$pid"
+  _windows_begin_retire "$pid" $'pwsh\t638622100000000000'
+  [ -f "$retire_fence" ]
+  [ -f "$RUN_DIR/codex-bridge-stop.$pid" ]
+  cmp -s "$retire_fence" "$RUN_DIR/codex-bridge-stop.$pid"
+  _read_stop_record "$retire_fence"
+  [ "$rpid" = "$pid" ] && [ "$rstart" = "$start" ]
+  [ "$rexpires" -le "$(( $(date +%s) + 10 ))" ]
+  ! compgen -G "$retire_fence.tmp.*" >/dev/null
+}
+
+@test "launcher safe-stop: malformed schema fails closed and preserves the fence" {
+  _load_safe_stop_functions
+  printf 'v=1\nproject=%s\nunknown=x\n' "$PROJECT_HASH" > "$retire_fence"
+  run _windows_stop_request_from_fence
+  [ "$status" -ne 0 ]
+  [ -f "$retire_fence" ]
+  ! compgen -G "$RUN_DIR/codex-bridge-stop.*" >/dev/null
+}
+
+@test "launcher safe-stop: UNKNOWN timeout keeps fence and does not manufacture exit proof" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=UNKNOWN _run_safe_stop_bounded _windows_wait_exit_proof 100
+  [ "$SAFE_STOP_STATUS" -ne 0 ]
+  [ -f "$retire_fence" ]
+}
+
+@test "launcher safe-stop: changed StartTime.Ticks proves PID reuse without ack" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000001' run _windows_wait_exit_proof
+  [ "$status" -eq 0 ]
+  [ ! -f "$RUN_DIR/codex-bridge-stop.123.ack" ]
+}
+
+@test "launcher safe-stop: replacement is accepted only with live token, lease, app-server, and thread match" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local pid=456 token=638622100000000222 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$token" > "$RUN_DIR/codex-bridge-lease.$pid"
+  printf '%s' ws://127.0.0.1:1 > "$appserver_file"
+  printf '%s' thread-new > "$thread_file"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -eq 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000223' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -ne 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 wrong-thread
+  [ "$status" -ne 0 ]
 }
