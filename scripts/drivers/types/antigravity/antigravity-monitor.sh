@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Linux/macOS で動作します。Windows では POSIX のプロセス識別と advisory lock を
-# 同じ保証で提供できないため、起動後に止められない状態を作らないよう拒否します。
+# Runs on Linux/macOS. Windows cannot provide the same POSIX process identity
+# and advisory-lock guarantees, so refuse instead of creating an unstoppable process.
 case "$(uname -s)" in
   Linux|Darwin) ;;
   *) echo 'Antigravity monitor requires POSIX process and lock primitives; this host is unsupported' >&2; exit 1 ;;

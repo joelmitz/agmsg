@@ -13,9 +13,9 @@ usage() {
   printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]'
   printf '%s\n' \
     '  diagnose     read seat/supervisor/child/phase/guard/delivery/engine in one pass (read-only by default)' \
-    '  ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' \
-    '  replay       未処理の同じbatchをagyへ再送する（メッセージは既読にしない）' \
-    '  reset-guard  通常inboxの誤操作による停止を解除する（メッセージは既読にしない）'
+    '  ack          mark saved messages read only after verifying the same batch was received and replied to on screen' \
+    '  replay       resend the unresolved saved batch to agy without marking messages read' \
+    '  reset-guard  clear a regular-inbox violation without marking messages read'
 }
 
 ACTION=""
@@ -41,17 +41,17 @@ if [ -z "$TEAM" ] && [ -z "$ROLE" ]; then
   if [ "$identity_count" -eq 1 ]; then
     IFS=$'\t' read -r TEAM ROLE <<< "$identities"
   elif [ "$identity_count" -gt 1 ]; then
-    printf 'agy-tui: projectに複数のantigravity identityがあります。--teamと--nameを指定してください。\n' >&2
+    printf 'agy-tui: project has multiple Antigravity identities; specify --team and --name.\n' >&2
     printf '%s\n' "$identities" | sed 's/^/  /' >&2
     exit 1
   else
-    printf 'agy-tui: projectにantigravity identityが一意に登録されていません。/agmsgでjoinするか--teamと--nameを指定してください。\n' >&2
+    printf 'agy-tui: project does not have exactly one registered Antigravity identity; join with /agmsg or specify --team and --name.\n' >&2
     exit 1
   fi
 fi
 
 if [ -z "$TEAM" ] || [ -z "$ROLE" ]; then
-  printf 'agy-tui: --teamと--nameは両方指定してください。\n' >&2
+  printf 'agy-tui: specify both --team and --name.\n' >&2
   exit 1
 fi
 
@@ -68,7 +68,7 @@ if [ -z "$ACTION" ]; then
     AGY="$(command -v agy || true)"
   fi
   if [ -z "$AGY" ] || [ ! -x "$AGY" ]; then
-    printf 'agy-tui: agyがPATHにありません。agyを導入するか--agy <path>を指定してください。\n' >&2
+    printf 'agy-tui: agy is not on PATH; install agy or specify --agy <path>.\n' >&2
     exit 1
   fi
 elif [ -z "$AGY" ]; then
