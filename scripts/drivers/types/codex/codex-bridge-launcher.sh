@@ -1027,12 +1027,14 @@ EOF
   printf '%s' "$thread_id" > "$thread_file"
   if _agmsg_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
     verified=0
-    for _verify_tick in $(seq 1 "$_REAP_WAIT_TICKS"); do
+    _verify_tick=0
+    while [ "$_verify_tick" -lt "$_REAP_WAIT_TICKS" ]; do
       if _windows_current_bridge_valid "$launched_pid" "$req_app_server" "$thread_id"; then
         verified=1
         break
       fi
       sleep 0.1
+      _verify_tick=$((_verify_tick + 1))
     done
     if [ "$verified" = 1 ]; then
       rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
