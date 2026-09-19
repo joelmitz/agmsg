@@ -482,12 +482,22 @@ EOF
   # (#188).
   local watch_command
   watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type")"
+  local rearm_note=""
+  if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
+    rearm_note=" This watch expires after at most 30 minutes; when the expiry
+notice arrives, immediately re-arm it by invoking Monitor again with this
+exact command and description — delivery depends on it, since nothing else
+keeps the stream running. Re-arm it silently: no message to the user, no
+\"re-armed\", no acknowledgement, no summary — just invoke Monitor again and
+continue, since announcing it every 30 minutes wastes tokens for no benefit."
+  fi
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
   command: $watch_command
   description: agmsg inbox stream
   persistent: true
+  timeout_ms: 1800000
 
 Pass the command above verbatim — the session_id is already filled in.
 Use Claude Code's generic Monitor tool only. Do not start this command with
@@ -497,7 +507,7 @@ description begins with "agmsg inbox stream" (after actas it reads
 transcript event named to match. The background-task footer is not a
 reliable check either way; use TaskList. If ToolSearch cannot find the
 generic Monitor tool, use turn/manual inbox as a fallback; that is not
-real-time monitor delivery.
+real-time monitor delivery.${rearm_note}
 EOF
 }
 

@@ -930,7 +930,7 @@ test('TUI monitor は対話端末でない起動を拒否する', () => {
   const wrapper = new URL('../scripts/drivers/types/antigravity/antigravity-tui-monitor.sh', import.meta.url).pathname;
   const result = spawnSync('bash', [wrapper, '--help'], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /対話端末/);
+  assert.match(result.stderr, /対話端末|interactive terminal/);
   const status = spawnSync('bash', [wrapper, 'status', '--project', '/tmp', '--team', 'no-such-team', '--name', 'no-such-role'], { encoding: 'utf8' });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /tui-pty 未起動/);
@@ -1121,10 +1121,10 @@ sys.exit(os.waitstatus_to_exitcode(status))
     const stop = spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(stop.status, 0, stop.stderr);
     await waitFor(() => child.exitCode !== null);
-    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty 停止\/要確認/);
+    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty (停止\/要確認|stopped\/needs-attention)/);
     const deadStatus = spawnSync('python3', [supervisorPath, '--action', 'status', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(deadStatus.status, 0, deadStatus.stderr);
-    assert.match(deadStatus.stdout, /runtime: worker tui-pty 停止\/要確認/);
+    assert.match(deadStatus.stdout, /runtime: worker tui-pty (停止\/要確認|stopped\/needs-attention)/);
     assert.match(stop.stdout, /停止要求を送信しました/);
     assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
     const unresolvedBeforeRecovery = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));

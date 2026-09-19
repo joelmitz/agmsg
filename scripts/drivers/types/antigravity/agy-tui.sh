@@ -10,7 +10,7 @@ ROLE="${AGMSG_ANTIGRAVITY_ROLE:-}"
 AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
-  printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
+  printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]'
   printf '%s\n' \
     '  diagnose     read seat/supervisor/child/phase/guard/delivery/engine in one pass (read-only by default)' \
     '  ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' \
