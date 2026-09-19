@@ -12,12 +12,12 @@ const strongDetectHelper=path.join(root,'scripts','lib','print-strong-detect-env
 const ENV_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
 export function strongDetectEnvKeys() {
   const r=spawnSync(strongDetectHelper,[],{encoding:'utf8'});
-  if(r.error) throw Error(`agy起動拒否: strong detect helper を実行できません (${r.error.code||r.error.message})`);
-  if(r.status!==0) throw Error(`agy起動拒否: strong detect helper が非0終了 (${r.status})`);
+  if(r.error) throw Error(`agy launch refused: cannot run the strong detect helper (${r.error.code||r.error.message})`);
+  if(r.status!==0) throw Error(`agy launch refused: strong detect helper exited nonzero (${r.status})`);
   const keys=[];
   for(const line of (r.stdout||'').split(/\r?\n/)) {
     if(!line) continue;
-    if(!ENV_NAME.test(line)) throw Error('agy起動拒否: strong detect helper が不正な env 名を返しました');
+    if(!ENV_NAME.test(line)) throw Error('agy launch refused: strong detect helper returned an invalid environment variable name');
     keys.push(line);
   }
   return keys;
@@ -123,7 +123,7 @@ export class Bridge {
     if(this.state.conversation_id) args.push('--conversation',this.state.conversation_id);
     if(this.o.model) args.push('--model',this.o.model);
     const executable=this.o.agy||'agy';
-    // fd3能力値はこの子へ継承しない。stdin/stdout/stderrだけを接続する。
+    // Do not pass the fd3 capability to this child; connect only stdin/stdout/stderr.
     this.child=spawn(executable,args,{cwd:this.project,stdio:['pipe','pipe','pipe'],env:childEnvWithoutStrongDetect()});
     this.childStart=null;try{this.childStart=proc(this.child.pid).start;}catch{}
     const child=this.child;

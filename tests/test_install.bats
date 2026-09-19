@@ -101,9 +101,9 @@ teardown() {
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" --help
   [ "$status" -eq 0 ]
-  grep -qF 'ack          画面上で同じbatchの受信確認と返信を確認済みの場合だけ、保存済みメッセージを既読にする' <<<"$output"
-  grep -qF 'replay       未処理の同じbatchをagyへ再送する（メッセージは既読にしない）' <<<"$output"
-  grep -qF 'reset-guard  通常inboxの誤操作による停止を解除する（メッセージは既読にしない）' <<<"$output"
+  grep -qF 'ack          mark saved messages read only after verifying the same batch was received and replied to on screen' <<<"$output"
+  grep -qF 'replay       resend the unresolved saved batch to agy without marking messages read' <<<"$output"
+  grep -qF 'reset-guard  clear a regular-inbox violation without marking messages read' <<<"$output"
 }
 
 @test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
