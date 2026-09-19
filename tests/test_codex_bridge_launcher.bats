@@ -227,14 +227,15 @@ write_request() {
 # The launcher dispatcher owns the seat app-server and therefore attempts to
 # parse its exact seat record when the test lifetime exits. The bridge tests do
 # not start a real app-server, but they still need a schema-valid record so a
-# missing fixture is not mistaken for a production record failure. The pid is
-# deliberately absent; the fail-closed stop path must report it as not alive
-# and leave the record untouched.
+# missing fixture is not mistaken for a production record failure. Use this
+# test shell's live pid with an empty witness: the stop path must fail closed
+# at the witness check and leave the record untouched, without probing an
+# arbitrary Windows pid.
 write_seat_record_fixture() {
   source "$SCRIPTS/lib/hash.sh"
   _agmsg_codex_seat_record_write \
     "$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")" \
-    "$(printf '%s' "$PROJ" | agmsg_sha1)" "999999999" "1" "" "" "codex-test"
+    "$(printf '%s' "$PROJ" | agmsg_sha1)" "$$" "1" "" "" "codex-test"
 }
 
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
