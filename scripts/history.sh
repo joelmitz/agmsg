@@ -70,7 +70,12 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
   printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
   printf "');\n"
 } > "$_agmsg_rows_sql"
-ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
+# Windows の sqlite3.exe は、標準入力をリダイレクトした場合でも batch mode
+# を明示しないと対話入力として扱い、成功終了しながら SQL を評価しないことが
+# ある。その場合 api.sh（SQL を argv で渡す）は読めるのに、history.sh は行を
+# 生成せず黙って終了していた。Windows のコマンドライン長制限を避ける stdin
+# 経路は維持し、全プラットフォームでモードを明示する。
+ROWS=$(agmsg_sqlite -batch ':memory:' < "$_agmsg_rows_sql")
 rm -f "$_agmsg_rows_sql"
 trap - EXIT HUP INT TERM
 
@@ -109,7 +114,7 @@ while IFS= read -r r; do
     printf '%s' "${uarr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
     printf "');\n"
   } > "$_agmsg_unread_sql"
-  ids=$(agmsg_sqlite ':memory:' < "$_agmsg_unread_sql")
+  ids=$(agmsg_sqlite -batch ':memory:' < "$_agmsg_unread_sql")
   rm -f "$_agmsg_unread_sql"
   trap - EXIT HUP INT TERM
   UNREAD_IDS+="$ids"$'\n'
