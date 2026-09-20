@@ -109,7 +109,7 @@ body:
 [/agmsg batch]
 ```
 
-To avoid corrupting terminal control sequences, the supervisor encodes control bytes into printable representations. The agent template instructs the agent to treat the envelope as a normal incoming message, replying via `send.sh ... --body -` when responses are required.
+To avoid corrupting terminal control sequences, the supervisor encodes control bytes into printable representations. The agent template instructs the agent to treat the envelope as a normal incoming message, replying via `send.sh ... --body -` (originally `--stdin` at the time of design) when responses are required.
 
 Entries in `messages[]` map one-to-one with message blocks and IDs in the envelope. The supervisor cross-checks the envelope count, each ID, order, and body hash against the prepared state, refusing injection if any field mismatches.
 
@@ -137,7 +137,7 @@ Detecting permission or trust prompts holds the batch until the user resolves or
 
 Active reservations forbid bare `$agmsg`, `inbox.sh`, and `check-inbox.sh` for regular message consumption. The template directs TUI monitor sessions to use non-acknowledging `tui-monitor status` instead. This status command reports only IDs, senders, and timestamps of prepared batches held by the supervisor, omitting bodies. If an agent or human invokes standard inbox commands and logs a read-denied event, it is treated as a secondary writer attempt and latches a violation. The supervisor transitions to `NEEDS_ATTENTION` and refuses to ack, upholding the same read-guard guarantees as headless mode.
 
-If the supervisor exits after latching a read-denied violation, recovery requires explicitly running `agy-tui reset-guard --team <team> --name <role>`. This command clears the violation latch only when the state's project/team/role match, no batch exists regardless of phase, no live reservation exists for the identity (stale reservations permitted), the TUI supervisor is inactive, and actas exclusivity is acquired. Foreign or corrupted reservations (such as headless bridges) are rejected. Unread messages and ack states are untouched. Mismatched preconditions fail closed; regular `resume` cannot substitute for reset-guard.
+If the supervisor exits after latching a read-denied violation, recovery requires explicitly running `agy-tui reset-guard --team <team> --name <role>`. This command clears the violation latch only when the state's project/team/role match, no batch exists regardless of phase, no reservation (including stale reservations) exists for the identity, the TUI supervisor is inactive, and actas exclusivity is acquired. Foreign or corrupted reservations (such as headless bridges) are rejected. Unread messages and ack states are untouched. Mismatched preconditions fail closed; regular `resume` cannot substitute for reset-guard.
 
 ## 8. Startup, Teardown, and Mode Changes
 

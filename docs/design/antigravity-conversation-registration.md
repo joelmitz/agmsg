@@ -68,7 +68,8 @@ Mismatched IDs are never silently unified, forked, or replaced with fresh conver
 Registration data is placed under `run/` in the same installation alongside existing agmsg state files.
 Registrations are never written to databases, team configurations, or tracked project git files.
 
-One JSON file is maintained per project, containing a `sessions` array to prevent multiple TUIs from overwriting one another:
+One JSON file is maintained per project, containing a `sessions` array to prevent multiple TUIs from overwriting one another.
+The candidate path is defined below, to be aligned with existing `storage` / path helper naming conventions upon implementation:
 
 ```text
 ~/.agents/skills/agmsg/run/antigravity-tui.<project-hash>.json
