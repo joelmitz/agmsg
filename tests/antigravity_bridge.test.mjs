@@ -54,7 +54,7 @@ test('stream tool detection looks only at the command',()=>{
   assert.equal(forbiddenTool(base),false);
 });
 
-test('予約なしでも通常inboxはtype guardで拒否し未読を残す',async()=>{
+test('type guard rejects standard inbox without reservation and preserves unread status',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -232,7 +232,7 @@ for(const mode of ['attack','append-failure','crash','broken'])test(`abnormal ${
 
 const STRONG_MARKERS=['CLAUDE_CODE_SESSION_ID','CODEX_THREAD_ID','CODEX_SANDBOX','GROK_SESSION_ID'];
 
-test('childEnvWithoutStrongDetect は process.env を mutate しない',()=>{
+test('childEnvWithoutStrongDetect does not mutate process.env',()=>{
   process.env.CLAUDE_CODE_SESSION_ID='parent-keep';
   process.env.GEMINI_API_KEY='keep-fallback';
   const env=childEnvWithoutStrongDetect();
@@ -243,7 +243,7 @@ test('childEnvWithoutStrongDetect は process.env を mutate しない',()=>{
   delete process.env.CLAUDE_CODE_SESSION_ID;
 });
 
-test('bridge 初回 spawn の子から strong キーが欠け GEMINI_API_KEY は残る',async()=>{
+test('initial bridge child spawn omits strong detect keys while preserving GEMINI_API_KEY',async()=>{
   const dump=path.join(os.tmpdir(),`agmsg-agy-env-${process.pid}-${Date.now()}`);
   const parentEnv={
     CLAUDE_CODE_SESSION_ID:'parent-claude',
@@ -264,7 +264,7 @@ test('bridge 初回 spawn の子から strong キーが欠け GEMINI_API_KEY は
   } finally { fs.rmSync(dump,{force:true}); await f.close(); }
 });
 
-test('bridge close 後再起動 spawn でも strong キーが欠ける',async()=>{
+test('restarted child spawn after bridge close still omits strong detect keys',async()=>{
   const dump=path.join(os.tmpdir(),`agmsg-agy-env-restart-${process.pid}-${Date.now()}`);
   const f=fixture('sqlite','exit-after-first',{
     CLAUDE_CODE_SESSION_ID:'parent-claude',
@@ -323,21 +323,21 @@ async function assertAgyNotStarted(prep, mutateHelper) {
   assert.match(output,/agy launch refused/);
 }
 
-test('helper 非0 なら bridge は agy を起動しない',async()=>{
+test('bridge does not launch agy if the helper exits non-zero',async()=>{
   const prep=helperInstall();
   try {
     await assertAgyNotStarted(prep,h=>fs.writeFileSync(h,'#!/bin/sh\nexit 7\n',{mode:0o700}));
   } finally { fs.rmSync(prep.dir,{recursive:true,force:true}); }
 });
 
-test('helper 実行不能なら bridge は agy を起動しない',async()=>{
+test('bridge does not launch agy if the helper is not executable',async()=>{
   const prep=helperInstall();
   try {
     await assertAgyNotStarted(prep,h=>fs.chmodSync(h,0o644));
   } finally { fs.rmSync(prep.dir,{recursive:true,force:true}); }
 });
 
-test('helper 不正な env 名なら bridge は agy を起動しない',async()=>{
+test('bridge does not launch agy if the helper returns an invalid env name',async()=>{
   const prep=helperInstall();
   try {
     await assertAgyNotStarted(prep,h=>fs.writeFileSync(h,'#!/bin/sh\necho BAD-NAME\n',{mode:0o700}));
