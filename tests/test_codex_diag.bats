@@ -4,6 +4,7 @@ load test_helper
 
 setup() {
   setup_test_env
+  export SKILL_DIR="$TEST_SKILL_DIR"
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
