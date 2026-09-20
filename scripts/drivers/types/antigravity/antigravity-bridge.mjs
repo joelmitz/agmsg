@@ -144,7 +144,7 @@ export class Bridge {
       const delay=[1000,5000,15000][this.restarts++];await sleep(delay);
       if(!this.stopping) await this.launch().catch(e=>this.fail(e));
     });});
-    await this.input(`You are the agmsg headless worker. team=${this.team}, role=${this.role}, project=${this.project}. The bridge exclusively handles delivery and marking messages read. Do not call inbox.sh, check-inbox.sh, or bare $agmsg. To reply, use bash ${root}/scripts/send.sh ${this.team} ${this.role} <recipient> --stdin. Report operations that cannot be approved. Reply only with initialization complete.`,true);
+    await this.input(`You are the agmsg headless worker. team=${this.team}, role=${this.role}, project=${this.project}. The bridge exclusively handles delivery and marking messages read. Do not call inbox.sh, check-inbox.sh, or bare $agmsg. To reply, use bash ${root}/scripts/send.sh ${this.team} ${this.role} <recipient> --body -. Report operations that cannot be approved. Reply only with initialization complete.`,true);
   }
   async event(e) {
     if(this.failed||this.stopping)return;

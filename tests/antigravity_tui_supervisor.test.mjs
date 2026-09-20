@@ -302,7 +302,7 @@ assert notice.getvalue().count('resume when the empty input prompt returns') == 
 `);
 });
 
-test('通常入力は安定idleで自動復帰し、非idleは安定期間をリセットする', () => {
+test('regular input automatically recovers on stable idle and non-idle resets the stable period', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -321,7 +321,7 @@ s.injection_ready = lambda: ready['value']
 now = {'value': 10.0}
 module.time.monotonic = lambda: now['value']
 s.update_human_input_state()
-assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
+assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
 ready['value'] = False
 s.update_human_input_state()
 assert s.state['humanInputSawNonIdle'] is True
@@ -356,7 +356,7 @@ assert s.state['humanInputActive'] is True, 'does not clear while a batch is unr
 `);
 });
 
-test('人間入力後は非idleを観測しなくても安定idleで自動配送を再開する', () => {
+test('resumes automatic delivery on stable idle after human input without observing non-idle', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -378,10 +378,10 @@ s.pause_for_human_input()
 assert s.state['humanInputActive'] is True
 assert s.state['humanInputSawNonIdle'] is False
 s.update_human_input_state()
-assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
+assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
 now['value'] += 0.59
 s.update_human_input_state()
-assert s.state['humanInputActive'] is True, '安定期間未満では解除しない'
+assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
 now['value'] += 0.02
 s.update_human_input_state()
 assert s.state['humanInputActive'] is False
@@ -390,7 +390,7 @@ assert s.human_input_restart_recovery is False
 `);
 });
 
-test('再起動復帰は新screenの安定idleだけを要求し、耐久状態は解除しない', () => {
+test('restart recovery requires only stable idle of the new screen and does not clear durable attention', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -485,40 +485,40 @@ s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1.
 assert not s.permission_input_ready(), 'must not allow a synthetic display with a normal screen between nav and footer'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), '構造化されたpermission画面を許可する'
+assert s.permission_input_ready(), 'allows structured permission screen'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'agy 1.1.28以降のpermission画面を許可する'
+assert s.permission_input_ready(), 'allows permission screen on agy 1.1.28 and later'
 s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('受信本文: Requesting permission for: Run this command? > 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
-assert not s.permission_input_ready(), '現行文言を含む受信本文をpermission画面と誤認しない'
+s.screen.feed('received body: Requesting permission for: Run this command? > 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
+assert not s.permission_input_ready(), 'does not misidentify received message body containing current text as a permission screen'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert not s.permission_input_ready(), 'Yes選択肢を欠く現行permission画面は許可しない'
+assert not s.permission_input_ready(), 'does not allow current permission screen lacking the Yes option'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), '2番目の選択肢へカーソル移動してもpermission画面を認識する'
+assert s.permission_input_ready(), 'recognizes permission screen when cursor moved to second option'
 diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, 'カーソルが2番目でもyes位置を報告する'
+assert "'yes': []" not in diagnostic, 'reports yes position even when cursor is on the second option'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), '3番目の選択肢へカーソル移動してもpermission画面を認識する'
+assert s.permission_input_ready(), 'recognizes permission screen when cursor moved to third option'
 diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, 'カーソルが3番目でもyes位置を報告する'
+assert "'yes': []" not in diagnostic, 'reports yes position even when cursor is on the third option'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), '現行文言でも2番目カーソルのpermission画面を認識する'
+assert s.permission_input_ready(), 'recognizes permission screen with current wording when cursor is on second option'
 diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, '現行文言でカーソルが2番目でもyes位置を報告する'
+assert "'yes': []" not in diagnostic, 'reports yes position with current wording even when cursor is on second option'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), '現行文言でも3番目カーソルのpermission画面を認識する'
+assert s.permission_input_ready(), 'recognizes permission screen with current wording when cursor is on third option'
 s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('受信本文: Requesting permission for: Do you want to proceed? 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
-assert not s.permission_input_ready(), 'カーソル無しのYes語句を含む受信本文をpermission画面と誤認しない'
+s.screen.feed('received body: Requesting permission for: Do you want to proceed? 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
+assert not s.permission_input_ready(), 'does not misidentify received message body with Yes phrase but no cursor as a permission screen'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert not s.permission_input_ready(), '選択肢1を欠き2/3だけがある画面は許可しない'
+assert not s.permission_input_ready(), 'does not allow screen lacking option 1 with only options 2 and 3 present'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('> 1. Yes\\r\\nRequesting permission for:\\r\\nDo you want to proceed?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), 'must not allow a synthetic display whose required-element order differs from the permission modal'
@@ -628,7 +628,7 @@ assert events == ['child-partial-redraw','allowed'], events
 `);
 });
 
-test('permission snapshot fallbackは次の入力1回だけで消費する', () => {
+test('permission snapshot fallback is consumed by only the next single input', () => {
   runPython(`
 import importlib.util
 from types import SimpleNamespace
@@ -642,11 +642,11 @@ s.permission_snapshot_fallback_used=False
 s.permission_input_ready=lambda: s.screen.ready
 assert s.permission_input_ready_with_snapshot(False)
 assert s.permission_snapshot_fallback_used
-assert not s.permission_input_ready_with_snapshot(False), 'snapshotは2回目の入力へ持ち越さない'
+assert not s.permission_input_ready_with_snapshot(False), 'snapshot is not carried over to the second input'
 `);
 });
 
-test('read-denied停止には安全な復旧案内を表示する', () => {
+test('displays safe recovery instructions on read-denied stop', () => {
   runPython(`
 import contextlib
 import importlib.util
@@ -667,7 +667,7 @@ assert s.state['durableAttention'] is True
 `);
 });
 
-test('child PTY生存中は人間向け通知をstderrへ出さない', () => {
+test('does not emit human-facing notices to stderr while child PTY is alive', () => {
   runPython(`
 import contextlib
 import importlib.util
@@ -697,7 +697,7 @@ assert s.stopping is True
 `);
 });
 
-test('close後にpending通知をstderrへflushする', () => {
+test('flushes pending notices to stderr after close', () => {
   runPython(`
 import contextlib
 import importlib.util
@@ -724,7 +724,7 @@ assert s.pending_notices == []
 `);
 });
 
-test('reset-guardは停止中かつbatchなしの場合だけviolationを解除する', () => {
+test('reset-guard clears violations only when stopped and without a batch', () => {
   runPython(`
 import importlib.util
 import json
@@ -1178,7 +1178,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
   }
 });
 
-test('strong_detect_env_keys は親 environ を変更しない', () => {
+test('strong_detect_env_keys does not mutate parent environ', () => {
   runPython(`
 import os, importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -1236,7 +1236,7 @@ function supervisorInstall() {
   };
 }
 
-test('supervisor pty.fork の子から strong キーが欠け GEMINI_API_KEY は残る', async () => {
+test('supervisor pty.fork child omits strong detect keys while preserving GEMINI_API_KEY', async () => {
   if (process.platform !== 'linux') return;
   const prep = supervisorInstall();
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
@@ -1275,28 +1275,28 @@ function assertSupervisorNoAgy(prep, mutateHelper) {
   assert.match(result.stderr + result.stdout, /agy launch refused/);
 }
 
-test('helper 非0 なら supervisor は agy を起動しない', () => {
+test('supervisor does not launch agy if the helper exits non-zero', () => {
   const prep = supervisorInstall();
   try {
     return assertSupervisorNoAgy(prep, h => fs.writeFileSync(h, '#!/bin/sh\nexit 7\n', { mode: 0o700 }));
   } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
 });
 
-test('helper 実行不能なら supervisor は agy を起動しない', () => {
+test('supervisor does not launch agy if the helper is not executable', () => {
   const prep = supervisorInstall();
   try {
     return assertSupervisorNoAgy(prep, h => fs.chmodSync(h, 0o644));
   } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
 });
 
-test('helper 不正な env 名なら supervisor は agy を起動しない', () => {
+test('supervisor does not launch agy if the helper returns an invalid env name', () => {
   const prep = supervisorInstall();
   try {
     return assertSupervisorNoAgy(prep, h => fs.writeFileSync(h, '#!/bin/sh\necho BAD-NAME\n', { mode: 0o700 }));
   } finally { fs.rmSync(prep.dir, { recursive: true, force: true }); }
 });
 
-test('claim拒否は保持しているsupervisorのpidと停止コマンドを示す', () => {
+test('claim rejection displays holding supervisor pid and stop command', () => {
   runPython(`
 import importlib.util, json, os, tempfile
 from pathlib import Path
