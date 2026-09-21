@@ -415,6 +415,16 @@ run_launcher() {
   ! grep -q -- $'--pair team\tbob' "$CAPTURE"
 }
 
+@test "launcher: a role child rejects a foreign effective home" {
+  put_record_with_home team alice thread-alice "$PROJ" codex owner-session "/foreign/codex-home"
+  sleep 8 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" $'team\talice' \
+    >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- & local child=$!
+  wait_launcher_or_report "$child" child || return 1
+  wait "$parent" 2>/dev/null || true
+  [ ! -f "$CAPTURE" ]
+}
+
 @test "launcher: only one dispatcher runs per project" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
