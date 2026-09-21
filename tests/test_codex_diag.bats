@@ -69,6 +69,42 @@ teardown() {
   state_file="$TEST_SKILL_DIR/run/codex-self-test.$diagnosis_id.json"
   [ "$(node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(o.codex_home_hash)' "$state_file")" = "$expected_hash" ]
 }
+
+@test "codex diagnose: Orca Codex home is used after explicit overrides" {
+  local orca_home="$TEST_SKILL_DIR/orca-managed-home"
+  mkdir -p "$orca_home"
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  export ORCA_CODEX_HOME="$orca_home"
+  unset AGMSG_CODEX_HOME CODEX_HOME
+
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  [ -n "$diagnosis_id" ]
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  expected_hash="$(printf '%s' "$orca_home" | agmsg_sha1)"
+  state_file="$TEST_SKILL_DIR/run/codex-self-test.$diagnosis_id.json"
+  [ "$(node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(o.codex_home_hash)' "$state_file")" = "$expected_hash" ]
+}
+
+@test "codex diagnose: explicit CODEX_HOME wins over Orca hint" {
+  local orca_home="$TEST_SKILL_DIR/orca-managed-home"
+  local explicit_home="$TEST_SKILL_DIR/explicit-codex-home"
+  mkdir -p "$orca_home" "$explicit_home"
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  export ORCA_CODEX_HOME="$orca_home"
+  export CODEX_HOME="$explicit_home"
+  unset AGMSG_CODEX_HOME
+
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  [ -n "$diagnosis_id" ]
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  expected_hash="$(printf '%s' "$explicit_home" | agmsg_sha1)"
+  state_file="$TEST_SKILL_DIR/run/codex-self-test.$diagnosis_id.json"
+  [ "$(node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(o.codex_home_hash)' "$state_file")" = "$expected_hash" ]
+}
 @test "codex diagnose: received marker records only THREAD_CONFIRMED and requires screen observation" {
   export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
   run bash "$DIAG" "$PROJ" team alice --self-test
