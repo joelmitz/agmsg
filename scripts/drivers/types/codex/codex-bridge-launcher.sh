@@ -342,7 +342,7 @@ if [ -z "$ROLE_PAIR" ]; then
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
-    done <<< "$current_pairs"
+    done <<< "$seat_pairs"
     poll_sleep
   done
   # #1254: this seat's TUI (LIFETIME_PID) is gone. Stop the seat's own
@@ -818,6 +818,21 @@ _windows_current_bridge_valid() {
   IFS= read -r got_thread < "$thread_file" 2>/dev/null || true
   [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
 }
+
+# A retire fence is deliberately fail-closed: a live process with a different
+# start token may be an unrelated process that reused the old PID, and an
+# UNKNOWN probe is not proof of exit. Bound this role's repeated observation
+# loop so one such fence cannot poll forever; leave the fence and records in
+# place, and require a fresh registration to retry.
+windows_retire_wait_failures=0
+_windows_retire_defer() {
+  windows_retire_wait_failures=$((windows_retire_wait_failures + 1))
+  if [ "$windows_retire_wait_failures" -ge 3 ]; then
+    echo "codex-bridge-launcher: retaining Windows retire fence after $windows_retire_wait_failures unproven exit checks; manual re-registration required" >&2
+    exit 0
+  fi
+  poll_sleep
+}
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -933,23 +948,27 @@ EOF
     fi
     retired_request_pid="$rpid"
     if ! _windows_wait_exit_proof; then
-      poll_sleep
+      _windows_retire_defer
       continue
     fi
     windows_exit_proven=1
     current_pid=""
     IFS= read -r current_pid < "$pidfile" 2>/dev/null || true
-    if [ -n "$current_pid" ] && [ "$current_pid" != "$retired_request_pid" ]; then
+    if [ -n "$current_pid" ]; then
       if _windows_current_bridge_valid "$current_pid" "$req_app_server" "$thread_id"; then
         rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
           "$RUN_DIR/codex-bridge-stop.$retired_request_pid.ack"
+        windows_retire_wait_failures=0
         poll_sleep
         continue
       fi
-      # A different live-but-unverified pid may be a bridge spawned just before
-      # a launcher crash. Never start beside it.
+      # A live-but-unverified pid may be a bridge spawned just before a
+      # launcher crash, or an unrelated process that reused the retired PID.
+      # Never start beside it, and bound the repeated fence observation.
       state="$(_windows_process_state "$current_pid" 2>/dev/null || true)"
-      case "$state" in "LIVE$TAB"*) poll_sleep; continue ;; esac
+      case "$state" in
+        "LIVE$TAB"*) _windows_retire_defer; continue ;;
+      esac
     fi
   fi
 
@@ -1024,9 +1043,16 @@ EOF
   # (orphan survival is acceptable; a wrong-kill or a double-start is not).
   if [ -n "$need_kill" ]; then
     if _agmsg_is_windows; then
-      if ! _windows_begin_retire "$need_kill" "$need_kill_token" \
-        || ! _windows_wait_exit_proof; then
-        poll_sleep
+      # A legacy pidfile may have no valid lease (or may point at a reused
+      # native PID).  Do not silently keep polling without an independent
+      # retire fence: retain the fail-closed state, bound the observation
+      # loop, and require fresh registration when no proof can be established.
+      if ! _windows_begin_retire "$need_kill" "$need_kill_token"; then
+        _windows_retire_defer
+        continue
+      fi
+      if ! _windows_wait_exit_proof; then
+        _windows_retire_defer
         continue
       fi
       windows_exit_proven=1

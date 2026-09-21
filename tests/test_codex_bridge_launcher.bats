@@ -1099,7 +1099,7 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
 _load_safe_stop_functions() {
   local pattern
   source "$SCRIPTS/lib/hash.sh"
-  pattern='/^_read_lease() {/,/^}/p;/^_read_stop_record() {/,/^}/p;/^_write_stop_record() {/,/^}/p;/^_windows_process_state() {/,/^}/p;/^_windows_stop_request_from_fence() {/,/^}/p;/^_windows_begin_retire() {/,/^}/p;/^_windows_wait_exit_proof() {/,/^}/p;/^_windows_current_bridge_valid() {/,/^}/p'
+  pattern='/^_read_lease() {/,/^}/p;/^_read_stop_record() {/,/^}/p;/^_write_stop_record() {/,/^}/p;/^_windows_process_state() {/,/^}/p;/^_windows_stop_request_from_fence() {/,/^}/p;/^_windows_begin_retire() {/,/^}/p;/^_windows_wait_exit_proof() {/,/^}/p;/^_windows_current_bridge_valid() {/,/^}/p;/^_windows_retire_defer() {/,/^}/p'
   eval "$(sed -n "$pattern" "$LAUNCHER")"
   TAB=$'\t'
   PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
@@ -1197,6 +1197,16 @@ _run_safe_stop_bounded() {
   POWERSHELL_RESULT=UNKNOWN _run_safe_stop_bounded _windows_wait_exit_proof 100
   [ "$SAFE_STOP_STATUS" -ne 0 ]
   [ -f "$retire_fence" ]
+}
+
+@test "launcher safe-stop: retire observation is bounded at the role boundary" {
+  _load_safe_stop_functions
+  poll_sleep() { :; }
+  windows_retire_wait_failures=2
+  run _windows_retire_defer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"retaining Windows retire fence"* ]]
+  [ "$windows_retire_wait_failures" -eq 2 ]
 }
 
 @test "launcher safe-stop: changed StartTime.Ticks proves PID reuse without ack" {
