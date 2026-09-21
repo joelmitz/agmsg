@@ -167,6 +167,37 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | sort -u
 }
 
+# SessionStart narrows this dispatcher to the one role pair claimed by its
+# seat. A missing or malformed request is not permission to fan out to every
+# project role.
+read_seat_request() {
+  REQUEST_THREAD=""; REQUEST_APP_SERVER="$APP_SERVER"; REQUEST_PAIR=""
+  local request_line="" request_type="" request_team="" request_name=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$request_line" || return 1
+  request_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
+  REQUEST_THREAD="${AGMSG_CODEX_REQUEST_THREAD:-}"
+  REQUEST_APP_SERVER="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+  request_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
+  request_name="${AGMSG_CODEX_REQUEST_NAME:-}"
+  [ "$request_type" = "$TYPE" ] && [ -n "$REQUEST_THREAD" ] \
+    && [ -n "$request_team" ] && [ -n "$request_name" ] || return 1
+  REQUEST_PAIR="$request_team$TAB$request_name"
+}
+
+request_pair_matches_record() {
+  local pair="$1" team name record_project record_project_phys
+  IFS="$TAB" read -r team name <<EOF
+$pair
+EOF
+  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+  [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$REQUEST_THREAD" ] || return 1
+  record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
+  record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+  [ "$record_project_phys" = "$PROJECT_PHYS" ]
+}
+
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
 # sqlite3 processes per team file, ~57 processes and ~145 ms total on an
 # eight-team install, and a poll loop was paying that several times a second.
@@ -270,7 +301,7 @@ build_safety_state() {
 }
 
 # actas may register the role a moment after launch, so retry while the parent
-# (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
+# (codex-monitor.sh) is alive. Dispatch only the pair claimed by this seat.
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
@@ -280,14 +311,25 @@ if [ -z "$ROLE_PAIR" ]; then
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
+    seat_pairs=""
+    if read_seat_request && request_pair_matches_record "$REQUEST_PAIR" \
+      && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
+      seat_pairs="$REQUEST_PAIR"
+    fi
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+    if [ -z "$seat_pairs" ]; then
+      echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+      known_pairs=""
+      poll_sleep
+      continue
+    fi
     # Forget pairs that are no longer registered. A child now exits by itself
     # once its own registration is gone, so a stale known_pairs entry would
     # suppress the respawn if that same pair were registered again later.
     retained=""
     while IFS= read -r seen_pair; do
       [ -n "$seen_pair" ] || continue
-      pair_registered "$seen_pair" "$current_pairs" || continue
+      pair_registered "$seen_pair" "$seat_pairs" || continue
       retained="${retained:+$retained$'\n'}$seen_pair"
     done <<< "$known_pairs"
     known_pairs="$retained"

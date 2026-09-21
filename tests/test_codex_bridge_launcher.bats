@@ -38,6 +38,7 @@ setup() {
   # shellcheck disable=SC1091
   source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
   export AGMSG_CODEX_SEAT_KEY="$(_agmsg_codex_seat_key_new)"
+  unset AGMSG_ROLE_SESSION_OWNER
   export PROJ="$TEST_SKILL_DIR/proj"; mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
@@ -214,14 +215,30 @@ put_record() {
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
     'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
     _ "$SCRIPTS" "$@"
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  request_pair=""
+  if [ -f "$request_file" ]; then
+    IFS=$'\t' read -r _rt _rthread _rapp _rteam _rname < "$request_file" || true
+    [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ] && request_pair="$_rteam"$'\t'"$_rname"
+  fi
+  if [ -z "$request_pair" ] || [ "$request_pair" = "$1"$'\t'"$2" ]; then
+    printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$3" "$1" "$2" > "$request_file"
+  fi
+}
+
+put_record_with_home() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "$7" "$8"' \
+    _ "$SCRIPTS" "$@"
 }
 
 write_request() {
-  local thread="$1" app_server="${2:-ws://127.0.0.1:1}"
+  local thread="$1" pair_team="${2:-}" pair_name="${3:-}"
   # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
   # project hash -- this file's setup() exports one fixed key for the whole
   # suite, which every launcher invocation below inherits.
-  printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$thread" "$pair_team" "$pair_name" \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
 # The launcher dispatcher owns the seat app-server and therefore attempts to
@@ -312,6 +329,7 @@ run_launcher() {
 
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
+  export AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1"
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
   run_launcher
   assert_capture
@@ -346,7 +364,8 @@ run_launcher() {
 
 @test "launcher: ignores a stale request app-server URL and binds to its live server" {
   put_record team alice rec-thread-1 "$PROJ" codex
-  write_request old-request-thread ws://127.0.0.1:2
+  printf 'codex\trec-thread-1\tws://127.0.0.1:2\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   run_launcher
 
   assert_capture
@@ -374,23 +393,26 @@ run_launcher() {
   wait_launcher_or_report "$driver_pid" driver || return 1
 }
 
-@test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
+@test "launcher: dispatches only the role recorded for this seat (#1280)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
   run_launcher
 
-  local i lines=0
-  for i in {1..30}; do
-    if [ -f "$CAPTURE" ]; then
-      lines=$(wc -l < "$CAPTURE" | tr -d ' ')
-    fi
-    [ "$lines" -ge 2 ] && break
-    sleep 0.1
-  done
-  [ "$lines" -ge 2 ]
+  assert_capture
   grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
-  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+  ! grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: a foreign-home role does not block the seat's matching role" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record_with_home team bob thread-bob "$PROJ" codex owner-session "/foreign/codex-home"
+  run_launcher
+
+  assert_capture
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  ! grep -q -- $'--pair team\tbob' "$CAPTURE"
 }
 
 @test "launcher: only one dispatcher runs per project" {
@@ -458,12 +480,11 @@ run_launcher() {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
-  write_request thread-bob
+  write_request thread-bob team bob
   run_launcher
 
-  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
-  ! grep -q -- $'--pair team\talice --thread thread-bob' "$CAPTURE"
+  ! grep -q -- $'--pair team\talice' "$CAPTURE"
 }
 
 @test "launcher: role record update keeps child scoped to the same pair" {
@@ -605,6 +626,9 @@ wait_for_child_count() {
   sleep 3
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team bob thread-bob "$PROJ" codex
+  # SessionStart publishes the seat's narrowed pair. Until that request is
+  # written, the project-wide identity is deliberately ignored.
+  write_request thread-bob team bob
   for i in {1..100}; do
     grep -q -- $'--pair team\tbob' "$CAPTURE" 2>/dev/null && break
     sleep 0.1
