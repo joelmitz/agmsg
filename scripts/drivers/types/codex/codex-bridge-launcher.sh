@@ -94,7 +94,7 @@ PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PRO
 # Native Node receives the MSYS `/c/...` launcher argument as `C:\...`.
 # Hash the platform-independent native spelling so the launcher and bridge
 # publish the same lease identity on Windows.
-PROJECT_HASH="$(agmsg_normalize_project_path "$PROJECT" | tr '\\' '/')"
+PROJECT_HASH="$(agmsg_normalize_project_path "$PROJECT" | tr '\\' '/' | agmsg_sha1)"
 
 mkdir -p "$RUN_DIR"
 
