@@ -6,6 +6,11 @@ agmsg_codex_effective_home() {
     printf '%s' "$AGMSG_CODEX_HOME"
   elif [ -n "${CODEX_HOME:-}" ]; then
     printf '%s' "$CODEX_HOME"
+  elif [ -n "${ORCA_CODEX_HOME:-}" ]; then
+    # Integration hint for an Orca-managed account home. The variable name is
+    # not part of the public Orca CLI contract; verify it in the managed pane.
+    # Keep explicit agmsg/Codex overrides ahead of this unverified hint.
+    printf '%s' "$ORCA_CODEX_HOME"
   elif [ -n "${HOME:-}" ]; then
     printf '%s/.codex' "$HOME"
   fi
