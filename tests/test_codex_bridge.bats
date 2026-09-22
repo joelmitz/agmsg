@@ -162,6 +162,11 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "codex-bridge: project identity spelling is stable across MSYS and native Windows paths" {
+  run node -e 'const { projectIdentityPath } = require(process.argv[1]); const expected = "C:/Users/me/OneDrive/codex-work"; if (projectIdentityPath("/c/Users/me/OneDrive/codex-work") !== expected) process.exit(1); if (projectIdentityPath(String.raw`C:\Users\me\OneDrive\codex-work`) !== expected) process.exit(1); if (projectIdentityPath("C:/Users/me/OneDrive/codex-work") !== expected) process.exit(1);' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
 @test "codex-bridge: toPosixPath maps UNC paths to POSIX paths" {
   run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath(String.raw`\\host\share\proj`) !== "//host/share/proj") process.exit(1);' "$TYPES/codex/codex-bridge.js"
   [ "$status" -eq 0 ]
