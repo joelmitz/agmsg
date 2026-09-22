@@ -29,6 +29,11 @@ case "${1:-}" in
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
     fi
+    if [ -n "${MONITOR_ENV_LOG:-}" ]; then
+      printf '%s\t%s\n' \
+        "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" \
+        "${AGMSG_CODEX_SEAT_KEY:-}" > "$MONITOR_ENV_LOG"
+    fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
     # cmdline check matches. The child exits when this parent is killed.
@@ -102,6 +107,24 @@ teardown() {
 }
 
 # --- #1254: one app-server per seat, never reused ---
+
+@test "codex-monitor: app-server inherits the launcher contract for SessionStart" {
+  local monitor_env_log="$TEST_PROJECT/monitor-env.log"
+
+  run env -u AGMSG_CODEX_BRIDGE_LAUNCHER -u AGMSG_CODEX_SEAT_KEY \
+    MONITOR_ENV_LOG="$monitor_env_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" \
+      --project "$TEST_PROJECT" --codex-command codex --
+
+  [ "$status" -eq 0 ]
+  [ -f "$monitor_env_log" ]
+  local launcher_flag seat_key
+  IFS=$'\t' read -r launcher_flag seat_key < "$monitor_env_log"
+  [ "$launcher_flag" = "1" ]
+  [ -n "$seat_key" ]
+}
 
 @test "codex-monitor: a second launch in the same project never reuses the first launch's server (#1254)" {
   skip_on_windows "spawns a python socket listener; flaky on the Windows runner"

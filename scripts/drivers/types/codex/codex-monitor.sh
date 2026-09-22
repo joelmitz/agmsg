@@ -187,12 +187,13 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # built to outlive its caller and is stopped only by codex-bridge-launcher.sh
 # once this seat's TUI exits (see _seat-key.sh's stop function).
 #
-# AGMSG_CODEX_SEAT_KEY is set on the app-server's OWN command, not just
-# exported below: its children (the shell-tool-command processes Codex runs
-# under --remote) inherit THIS process's environment directly, which is the
-# whole point -- no ancestry walk is needed anywhere downstream to find a
-# seat's own server (design review, replacing an earlier ancestry-walk design).
-AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
+# These values are set on the app-server's OWN command, not just exported
+# below: SessionStart hooks run in the already-started app-server's environment,
+# so a later export in this parent shell cannot switch them to the request-only
+# launcher path. The endpoint itself remains in the seat record because its
+# dynamic port is not known until after this process starts.
+AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
   "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
 server_bg="$!"
 
