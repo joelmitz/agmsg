@@ -263,6 +263,16 @@ function toPosixPath(p) {
   return `/${match[1].toLowerCase()}${p.slice(2).replace(/\\/g, "/")}`;
 }
 
+// Keep the lease project identity stable across the MSYS-to-native boundary.
+// The launcher hashes `/c/path` as `C:/path`; native Node may receive the same
+// argument as `C:\path`. Both spellings must therefore share one identity.
+function projectIdentityPath(p) {
+  const posix = toPosixPath(p);
+  const drive = /^\/([a-zA-Z])(?:\/|$)/.exec(posix || "");
+  if (drive) return `${drive[1].toUpperCase()}:${posix.slice(2)}`;
+  return typeof posix === "string" ? posix.replace(/\\/g, "/") : posix;
+}
+
 function parseArgs(argv) {
   const opts = {
     type: "codex",
@@ -1046,7 +1056,7 @@ class CodexBridge {
     this.leasefile = path.join(RUN_DIR, `codex-bridge-lease.${process.pid}`);
     this.leaseStart = "";
     this.leaseStartSrc = "";
-    this.projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
+    this.projectHash = crypto.createHash("sha1").update(projectIdentityPath(this.opts.project)).digest("hex");
     this.pairsHash = crypto.createHash("sha1")
       .update(
         this.identities
@@ -2106,6 +2116,7 @@ if (require.main === module) {
 // is the only way to state it without standing up an app-server.
 module.exports = {
   toPosixPath,
+  projectIdentityPath,
   writeErr,
   logLine,
   parseSelfTestMarker,

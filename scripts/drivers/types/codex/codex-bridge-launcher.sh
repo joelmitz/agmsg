@@ -69,7 +69,6 @@ _agmsg_codex_seat_key_ok "$SEAT_KEY" || {
 # below -- the request file, the dispatcher/child locks, the rate-limiter
 # identity -- is this seat's own coordination and is keyed by SEAT_KEY so
 # concurrent seats in the same project never contend with each other over it.
-PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
 
@@ -92,6 +91,10 @@ source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # Canonicalize once so the record's project (stored from the codex actas flow's
 # cwd) compares equal to this launcher's project even across a symlinked path.
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+# Native Node receives the MSYS `/c/...` launcher argument as `C:\...`.
+# Hash the platform-independent native spelling so the launcher and bridge
+# publish the same lease identity on Windows.
+PROJECT_HASH="$(agmsg_normalize_project_path "$PROJECT" | tr '\\' '/')"
 
 mkdir -p "$RUN_DIR"
 
