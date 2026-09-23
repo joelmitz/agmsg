@@ -26,7 +26,7 @@ self-addressed marker message. It is refused unless the seat is idle and has
 no unresolved batch, because a batch it created would make an existing
 `uncertain` batch harder to resolve, not easier.
 
-Exit codes follow codex-diagnose.sh, and the 1/2 split is the point:
+Exit codes follow codex-diag.sh, and the 1/2 split is the point:
   0 every layer MATCH (with --self-test: SCREEN_CONFIRMED)
   1 asked and the answer was wrong (MISMATCH)
   2 could not ask (UNKNOWN), or bad arguments

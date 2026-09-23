@@ -1815,7 +1815,7 @@ class CodexBridge {
   }
 
   buildSelfTestPrompt(record, pair, marker) {
-    const diagnose = path.join(SCRIPT_DIR, "codex-diagnose.sh");
+    const diagnose = path.join(SCRIPT_DIR, "codex-diag.sh");
     return [
       `agmsg self-delivery marker reached this Codex turn for ${pair.team}/${pair.name}.`,
       "",

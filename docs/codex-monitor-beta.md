@@ -203,11 +203,11 @@ flowchart TD
 
 ## End-to-end self-delivery diagnosis
 
-The fork-only `codex-diagnose.sh` keeps its optionless read-only three-layer
+The fork-only `codex-diag.sh` keeps its optionless read-only three-layer
 diagnosis and adds an explicit two-turn test:
 
 ```bash
-scripts/drivers/types/codex/codex-diagnose.sh <project> <team> <agent> --self-test
+scripts/drivers/types/codex/codex-diag.sh <project> <team> <agent> --self-test
 ```
 
 The start command sends one structured marker and returns `PENDING` with exit
@@ -227,6 +227,15 @@ Internal record state `SENT` is displayed as `PENDING`. `SEND_FAILED`, an
 incomplete `PREPARED` record, or insufficient evidence exits 2; a confirmed
 mismatch or expiry exits 1. State files are retained under the run directory
 for diagnosis and are not an automatic repair mechanism.
+
+On Windows Git Bash, PowerShell is the authoritative native-process probe;
+MSYS `ps` PIDs are never mixed with WinPIDs. A missing process observation is
+reported as `UNKNOWN` while app-server and thread diagnosis continues. The
+optionless command exits 0 only for `MATCH`, and exits 1 for `MISMATCH` or
+`UNKNOWN`. `--confirm` intentionally keeps the existing stricter contract: a
+`THREAD_CONFIRMED` receipt with an overall `UNKNOWN` exits 2. The old
+`codex-diagnose.sh` path is a temporary exec-only compatibility wrapper and is
+not the canonical command.
 
 ## Worker Guardrails
 

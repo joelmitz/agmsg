@@ -8,7 +8,8 @@ setup() {
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
-  export DIAG="$TYPES/codex/codex-diagnose.sh"
+  export DIAG="$TYPES/codex/codex-diag.sh"
+  export DIAG_COMPAT="$TYPES/codex/codex-diagnose.sh"
 }
 
 teardown() {
@@ -20,6 +21,16 @@ teardown() {
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -qF -- "THREAD_CONFIRMED"
   [[ "$output" == *"visibly"* ]]
+}
+
+@test "codex diag: compatibility wrapper reports the canonical command" {
+  run bash "$DIAG_COMPAT" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage: codex-diag.sh"* ]]
+  run bash "$DIAG_COMPAT" "$PROJ" team alice
+  compat_status="$status"
+  run bash "$DIAG" "$PROJ" team alice
+  [ "$status" -eq "$compat_status" ]
 }
 
 @test "codex diagnose: legacy invocation keeps the binary non-match exit contract" {
