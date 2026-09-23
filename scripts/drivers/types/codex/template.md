@@ -18,7 +18,7 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 <!-- agmsg:slot actas -->
 If argument starts with "actas" followed by an agent name:
 1. Resolve the role and run `identities.sh`/`join.sh` for `__AGENT_TYPE__` as needed.
-2. Record the Codex thread with `codex-record-session.sh` so a later spawn can resume it.
+2. Record the Codex thread with `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name>` so a later spawn can resume it.
 3. Use the role as the active FROM; monitor delivery is routed only to its recorded thread.
 <!-- /agmsg:slot actas -->
 
