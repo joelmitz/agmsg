@@ -26,7 +26,7 @@ teardown() {
 @test "codex diag: compatibility wrapper reports the canonical command" {
   run bash "$DIAG_COMPAT" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Usage: codex-diag.sh"* ]]
+  printf '%s\n' "$output" | grep -qF -- "Usage: codex-diag.sh"
   run bash "$DIAG_COMPAT" "$PROJ" team alice
   compat_status="$status"
   run bash "$DIAG" "$PROJ" team alice
