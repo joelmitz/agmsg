@@ -37,6 +37,11 @@ setup() {
   # this export without needing to repeat it at each of the ~20 call sites.
   # shellcheck disable=SC1091
   source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  # The replacement-dispatcher regression test observes the lock handoff to
+  # distinguish "B has not started yet" from "B has started and its duplicate
+  # child was rejected". Use the same lock reader as the storage tests.
+  # shellcheck source=../scripts/lib/storage.sh
+  source "$SCRIPTS/lib/storage.sh"
   export AGMSG_CODEX_SEAT_KEY="$(_agmsg_codex_seat_key_new)"
   export PROJ="$TEST_SKILL_DIR/proj"; mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
@@ -506,15 +511,34 @@ count_child_launchers() {
            END { n = 0; for (p in pid) if (!(parent[p] in pid)) n++; print n }'
 }
 
-# Block until the child count settles on <n>, then return it. Spawn and exit are
-# both asynchronous, so sampling on the first sighting races the transition.
+# Block until the child count remains at <n> for five consecutive samples, then
+# return it. Spawn and exit are both asynchronous, so a single matching sample
+# can land before the transition has finished.
 wait_for_child_count() {
-  local want="$1" i
+  local want="$1" i stable=0
   for i in {1..100}; do
-    [ "$(count_child_launchers)" -eq "$want" ] && break
+    if [ "$(count_child_launchers)" -eq "$want" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 5 ] && break
+    else
+      stable=0
+    fi
     sleep 0.1
   done
   count_child_launchers
+}
+
+# Wait until this dispatcher generation owns the seat lock. Its PID is written
+# only after it has reclaimed the stale generation and entered the dispatcher
+# path, so assertions below cannot pass against the old child before B starts.
+wait_for_dispatcher_lock_owner() {
+  local want="$1" i owner
+  for i in {1..100}; do
+    owner="$(agmsg_runtime_lock_owner "codex-dispatcher:$AGMSG_CODEX_SEAT_KEY" || true)"
+    [ "$owner" = "$want" ] && return 0
+    sleep 0.1
+  done
+  return 1
 }
 
 @test "launcher: a replacement dispatcher does not double the role children (#485)" {
@@ -540,12 +564,17 @@ wait_for_child_count() {
   # live on and poll forever alongside the first.
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
   local dispatcher_b=$!
-  # The duplicate is spawned and then has to lose the lock race; settle on the
-  # steady state rather than on whichever side of that transition we land.
-  [ "$(wait_for_child_count 1)" -eq 1 ]
-  sleep 1
+  # Wait for B to take over the dispatcher lock before observing the children;
+  # otherwise the existing child alone could satisfy the count prematurely.
+  if ! wait_for_dispatcher_lock_owner "$dispatcher_b"; then
+    _report_launcher_failure "replacement dispatcher: B did not acquire dispatcher lock; dispatcher_b=$dispatcher_b"
+    return 1
+  fi
+  # The duplicate is spawned and then has to lose the lock race. Require the
+  # count to settle rather than accepting whichever side of that transition
+  # one scheduler-dependent sample happens to observe.
   local observed_children
-  observed_children="$(count_child_launchers)"
+  observed_children="$(wait_for_child_count 1)"
   if [ "$observed_children" -ne 1 ]; then
     _report_launcher_failure "replacement dispatcher: expected one role child, observed $observed_children; parent_a=$parent_a parent_b=$parent_b dispatcher_b=$dispatcher_b"
     return 1
