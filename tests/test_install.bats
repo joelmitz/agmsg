@@ -11,6 +11,14 @@ setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
+  # install.sh's Codex sandbox config now also writes to $CODEX_HOME/config.toml
+  # when CODEX_HOME is set and differs from the default. A developer machine
+  # running Codex under a profile (CODEX_HOME set in the ambient shell) would
+  # otherwise leak every `install.sh --cmd agmsg` run below straight into that
+  # REAL file — caught in review by finding this suite's own tmp-dir paths
+  # accumulated inside a real ~/.codex_profiles/*/config.toml. Only the test
+  # that exercises CODEX_HOME itself sets it, scoped to that one invocation.
+  unset CODEX_HOME
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
@@ -35,8 +43,42 @@ _agmsg_watch_pid() {
   WATCHED_PIDS="${WATCHED_PIDS}${WATCHED_PIDS:+$'\n'}${pid}"$'\t'"${expect}"
 }
 
+# Signal <pid> and CONFIRM it is actually gone before returning, rather than
+# firing a signal and moving on. Escalates TERM -> KILL -> loud failure,
+# confirming after EACH signal rather than assuming the stronger one landed
+# just because it was sent (review finding, #1390: the first version of this
+# fired kill -9 as a fallback but never re-checked afterward, reintroducing
+# exactly the "signalled, not confirmed" gap this function exists to close
+# -- a KILL can still race a not-yet-scheduled process, or, in a sandboxed
+# CI runner, be denied outright).
+#
+# `wait "$pid"` is not proof of anything for a pid like these: each was
+# started via nohup from a subshell (`run env ... bash .../remote.sh sync
+# start ...`) that has long since exited, so by the time this runs the pid
+# has been reparented to init and is not a child of THIS shell -- bash's
+# `wait` fails immediately ("not a child of this shell") rather than
+# blocking. `wait "$pid" 2>/dev/null || true` swallowed that error silently
+# and returned instantly regardless of whether the process had actually
+# exited (#1387: this is how a leftover of these tests was found still
+# running days later -- not a missed kill, an unconfirmed one).
+# wait_for_pid_exit actually polls, up to its own 10s ceiling.
+#
+# Returns 1 (and prints the pid) if the process is STILL alive after both
+# signals and both confirmations -- teardown propagates that as a failed
+# test rather than silently leaving an engine behind for a human to find
+# days later, which is what happened before this existed.
+_agmsg_kill_confirmed() {
+  local pid="$1"
+  kill "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  echo "_agmsg_kill_confirmed: pid $pid still alive after TERM and KILL" >&2
+  return 1
+}
+
 teardown() {
-  local pid expect cmd
+  local pid expect cmd rc=0
   while IFS=$'\t' read -r pid expect; do
     [ -n "$pid" ] || continue
     # A pid recorded from a pidfile only says where the number came from, not
@@ -51,10 +93,11 @@ teardown() {
     kill -0 "$pid" 2>/dev/null || continue
     cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null)"
     case "$cmd" in
-      *"$expect"*) kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true ;;
+      *"$expect"*) _agmsg_kill_confirmed "$pid" || rc=1 ;;
     esac
   done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
+  return "$rc"
 }
 
 @test "install: fresh install ships scripts/lib and the commands actually run" {
@@ -168,6 +211,132 @@ teardown() {
   [ -f "$shim" ]
 
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$shim" ]
+}
+
+@test "uninstall: removes only the targeted install, leaving a second install's command, project hooks/commands, and writable_roots in place (#1400)" {
+  # Ran uninstall.sh removed EVERY ~/.agents/skills/*/ install on the machine,
+  # not just its own -- a throwaway --cmd install's uninstall wiped every
+  # other real one, including machine-wide shared pieces like this shim.
+  #
+  # "agmsg" and "agmsg-second" (review): a plain substring/prefix match on
+  # the shorter name or its bare SKILL_DIR, with no boundary, ALSO matches
+  # the longer install's own name/path/hooks/commands -- "agmsg" is a
+  # literal substring of "agmsg-second", and "$SK" (no trailing slash) is a
+  # literal prefix of "$SK-second". Uninstalling the shorter one must not
+  # touch the longer one's own registrations.
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  local sk_second="$FAKE_HOME/.agents/skills/agmsg-second"
+
+  local project="$FAKE_HOME/project"
+  mkdir -p "$project"
+  bash "$SK/scripts/join.sh" myteam alice claude-code "$project" >/dev/null
+  bash "$sk_second/scripts/join.sh" myteam bob claude-code "$project" >/dev/null
+  # turn mode is what installs the Stop/PostToolUse hooks uninstall.sh
+  # cleans up; monitor mode uses no settings.json hooks at all.
+  HOME="$FAKE_HOME" bash "$SK/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  HOME="$FAKE_HOME" bash "$sk_second/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  # Nothing currently writes a per-PROJECT command file (only the global
+  # ~/.claude/commands/<name>.md below) -- this loop is legacy cleanup with
+  # no live writer, but the review finding is about its MATCH condition, so
+  # exercise it directly with a hand-built fixture per install.
+  mkdir -p "$project/.claude/commands"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$SK" > "$project/.claude/commands/agmsg-project.md"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$sk_second" > "$project/.claude/commands/agmsg-second-project.md"
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local proj_cmd_first="$project/.claude/commands/agmsg-project.md"
+  local proj_cmd_second="$project/.claude/commands/agmsg-second-project.md"
+  local settings="$project/.claude/settings.local.json"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_first" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$SK/" "$settings"
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  [ -f "$shim" ]
+
+  # Run the COPY inside the "agmsg" install itself (the normal way a real
+  # user uninstalls one) -- $0's own directory is what identifies which one
+  # install this run is about (#1400).
+  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+
+  [ ! -e "$SK" ]
+  [ ! -f "$cmd_first" ]
+  [ ! -f "$proj_cmd_first" ]
+  refute grep -qF "$SK/" "$settings"
+  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  # The untouched install: global command, project hook and command file,
+  # writable_roots entry, and the machine-wide shim it still needs.
+  [ -d "$sk_second" ]
+  [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  [ -f "$shim" ]
+
+  # (review, round 2) The target install has NO writable_roots entry of
+  # its own -- only a same-prefix sibling's ("third" / "third-second") --
+  # so uninstalling it must not touch config.toml at all: not rewrite it
+  # to the same content, and critically, not even create a .bak. A loose
+  # entry pre-check (even a boundary-correct one) would still enter the
+  # block and do both merely because the FILE mentions "third" somewhere,
+  # despite nothing in it actually needing to change.
+  #
+  # The earlier uninstall above already left its own config.toml.bak from
+  # its own (real) rewrite -- remove it first so its mere presence here
+  # cannot be mistaken for one this second uninstall created.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third
+  local sk_third="$FAKE_HOME/.agents/skills/third"
+  # ~/.codex/config.toml does not exist until here, so "third" never gets
+  # a root of its own -- install.sh only adds one when the file is
+  # already there when it runs.
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third-second
+  local sk_third_second="$FAKE_HOME/.agents/skills/third-second"
+  grep -qF "$sk_third_second/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$sk_third/" "$FAKE_HOME/.codex/config.toml"
+
+  # install.sh's own codex-config step makes its own .bak when it added
+  # third-second's entry above -- clear it too, so the check below is only
+  # about what THIS uninstall did.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  local codex_before; codex_before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  HOME="$FAKE_HOME" bash "$sk_third/uninstall.sh" --yes
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$codex_before" ]
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
+}
+
+@test "uninstall --all --yes: removes every install and the shared shim (#1400)" {
+  mkdir -p "$FAKE_HOME/.claude"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$shim" ]
+
+  # Run from a kept checkout ($REPO_ROOT/uninstall.sh, not either install's
+  # own copy) -- --all must work the same regardless of where it is run
+  # from, unlike the no-args form, which without it would refuse here with
+  # two installs present and no single one identified.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
+
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg" ]
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  [ ! -f "$cmd_first" ]
+  [ ! -f "$cmd_second" ]
   [ ! -e "$shim" ]
 }
 
@@ -421,6 +590,35 @@ teardown() {
   run env PATH="$fake_bin:$PATH" bash "$SK/scripts/remote.sh" status testteam
   [ "$status" -eq 0 ]
   [[ "$output" == *"connected (engine running, pid $new_pid)"* ]]
+}
+
+# #1387: reproduces the exact shape that leaked a real fake-node engine for
+# days on a shared machine -- a pid reparented to init (nohup'd from a
+# subshell that has already exited), so `wait "$pid"` cannot block on it and
+# silently lies about the process being gone. This is the fixed mechanism
+# itself, isolated from the rest of the #963 test above: a background process
+# whose TERM trap deliberately takes a moment to run (0.3s) before exiting,
+# so a caller that does not actually wait for it would still see it alive
+# immediately afterward.
+@test "_agmsg_kill_confirmed waits out a reparented process's TERM trap instead of trusting wait (#1387)" {
+  local marker="$BATS_TEST_TMPDIR/reparented.pid"
+  ( nohup bash -c '
+      trap "sleep 0.3; exit 0" TERM INT
+      echo "$$" > "'"$marker"'"
+      while :; do sleep 1; done
+    ' >/dev/null 2>&1 & )
+  wait_for_file "$marker"
+  local pid
+  pid="$(cat "$marker")"
+  kill -0 "$pid"   # sanity: it really is running before the call under test
+
+  _agmsg_kill_confirmed "$pid"
+
+  # No sleep, no retry here -- if _agmsg_kill_confirmed returned, the process
+  # must already be gone. A version that only fires `kill` and trusts `wait`
+  # would still see this process alive at this exact line (mutation-checked).
+  run kill -0 "$pid"
+  [ "$status" -ne 0 ]
 }
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
@@ -840,7 +1038,7 @@ PS1
 }
 
 # --- Codex sandbox writable_roots (#41) ---
-@test "install: configures Codex writable_roots for db teams and run" {
+@test "install: configures Codex writable_roots for db teams run and ext-tools" {
   mkdir -p "$FAKE_HOME/.codex"
   cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
 model = "gpt-test"
@@ -851,6 +1049,36 @@ EOF
   grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  # A sandboxed Codex seat runs an ext-tool member's `setup` (secret and
+  # save) too, which writes under ext-tools/ the same way the bridge writes
+  # under db/teams/run — measured directly against a real seat
+  # (`codex exec -s workspace-write`) before this entry existed:
+  # `mkdir: .../ext-tools/<team>: Operation not permitted`.
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "install: honors CODEX_HOME, and also configures the plain ~/.codex default when it differs" {
+  # A machine running more than one Codex identity points CODEX_HOME at a
+  # per-profile dir; that is the file the seat actually reads, not
+  # ~/.codex/config.toml — measured directly: a seat running under such a
+  # profile still got `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # after install.sh reported success, because it had edited a file nothing
+  # read. The Codex desktop app, on the same machine, uses the plain
+  # ~/.codex default regardless of a shell's CODEX_HOME, so both need it
+  # when CODEX_HOME points elsewhere.
+  local profile_home="$FAKE_HOME/.codex_profiles/work"
+  mkdir -p "$FAKE_HOME/.codex" "$profile_home"
+  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+  cat > "$profile_home/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+
+  CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  grep -q "$SK/ext-tools" "$profile_home/config.toml"
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install --update: adds missing Codex run writable_root for existing installs" {

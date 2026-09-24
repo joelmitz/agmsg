@@ -73,6 +73,50 @@ settings_file() {
   ! has_check_inbox "$(settings_file)"
 }
 
+# #1392: a refused hooks_file write used to be silent in effect -- exit
+# non-zero via `set -e` alone (no test pinned that), but with only a bare
+# `mv: ... Permission denied` and no agmsg context, easy to miss and no next
+# step. Reproduces the real shape (Codex's workspace-write sandbox keeps
+# .codex/ read-only even inside an otherwise-writable project, confirmed
+# live, #1392) with a read-only .codex/ rather than mocking mv, so this
+# catches a regression in the real mv call, not in a stand-in for it.
+#
+# The project path itself carries a space, a literal $, and a single quote
+# (review finding: the recovery line's command used to be built with naive
+# `'$var'` interpolation, which a quote in the path broke outright -- the
+# header comment right above _agmsg_shq's own definition already says why
+# that pattern is never enough on its own). The line-content checks below
+# only prove the path appears as a SUBSTRING, which broken quoting could
+# still satisfy, so the final assertion goes further: feeds the PRINTED line
+# back to a real bash and asserts the argv it produces is byte-identical to
+# the original project path, including the literal (never-expanded) '$HOME'
+# and the embedded quotes.
+@test "delivery set: a refused hooks_file write fails loudly, names the file, and the recovery line survives a quoted/spaced/\$-bearing project path" {
+  local weird_project="$TEST_PROJECT/proj \$HOME 'quoted'"
+  mkdir -p "$weird_project/.codex"
+  chmod 555 "$weird_project/.codex"
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$weird_project"
+  chmod 755 "$weird_project/.codex"   # teardown's rm -rf must not trip over this
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "could not write $weird_project/.codex/hooks.json"
+  printf '%s\n' "$output" | grep -q -F -- "delivery for codex was NOT set up"
+  printf '%s\n' "$output" | grep -q -F -- "run this same command from a normal, unsandboxed shell"
+  case "$output" in *"Delivery mode set to"*) return 1 ;; esac
+  [ ! -f "$weird_project/.codex/hooks.json" ]
+
+  local recovery_line
+  recovery_line="$(printf '%s\n' "$output" | grep '^  bash ')"
+  [ -n "$recovery_line" ]
+
+  local -a argv=()
+  eval "argv=(${recovery_line#  bash })"
+  # Indexed via count-1, not a negative subscript -- bash 3.2 (macOS's
+  # /bin/bash, and this suite's own house rule) does not support negative
+  # array indices.
+  local last_idx=$((${#argv[@]} - 1))
+  [ "${argv[$last_idx]}" = "$weird_project" ]
+}
+
 # --- idempotency ---
 
 @test "delivery set monitor: idempotent" {
@@ -92,6 +136,79 @@ settings_file() {
   t=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$(settings_file)")'), '\$.hooks.Stop'));")
   [ "$s" = "1" ]
   [ "$t" = "1" ]
+}
+
+# #1429: a shared, git-tracked hooks_file (e.g. a team's own .codex/hooks.json)
+# used to get an unconditional rewrite on every `set` call even when the
+# registration content was already unchanged -- a new temp file, minified to
+# one line, replacing the original via mv regardless of whether anything
+# differed. That defeated a chmod-a-w protection the file's owner set up on
+# purpose, and forced Codex to re-ask for hook-trust review on every call
+# because the file's hash kept changing.
+#
+# The file on disk is reformatted BY HAND before the second `set` call,
+# holding the exact same registration under different bytes AND different
+# object key order (`jq -S`, plus blank lines top/bottom no reindent step
+# would reproduce). Two things broke on earlier cuts of this fix, both
+# review findings, both covered here:
+#   - comparing by reindenting <tmp> to <path>'s indentation and then
+#     diffing raw bytes: a hand-formatted file that never matches
+#     json_pretty's own layout never compared equal, so it got rewritten
+#     once regardless of content (review round 1).
+#   - comparing via sqlite's plain json(): a compact rendering, but NOT
+#     canonical on object key order -- `json('{"a":1,"b":2}')` and
+#     `json('{"b":2,"a":1}')` are unequal strings in sqlite -- so a
+#     key-reordered file (e.g. hand-edited through `jq -S`) still compared
+#     "different" even though its content was identical (review round 2).
+# `set` must leave a content-identical file completely untouched, bytes AND
+# permission mode, no matter how it is formatted or how its keys are
+# ordered on disk.
+#
+# The same test then goes on to force a GENUINE content change (`set off`,
+# which strips the registration this fixture has none of otherwise) and
+# confirms the opposite: the file DOES get rewritten, and its permission
+# mode (640, set on the hand-formatted file above) survives that real
+# rewrite -- review round 2 also found the mode-restore step silently
+# swallowed a failed read of the original mode and a failed chmod after the
+# write, either of which could leave a real rewrite at the wrong mode with
+# exit 0.
+@test "delivery set monitor (codex): a hand-formatted, key-reordered hooks_file with the same registration already present is left untouched, and a genuine change still preserves its mode (#1429)" {
+  local hooks_file="$TEST_PROJECT/.codex/hooks.json"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ -f "$hooks_file" ]
+
+  # jq -S sorts every object's keys (matcher/hooks, inner type/command...)
+  # into an order strip->add never rebuilds; --indent 4 plus blank lines
+  # top/bottom is a layout no indent-matching reindent step could
+  # reproduce either -- same content, different bytes and different key
+  # order.
+  { echo; jq -S --indent 4 '.' "$hooks_file"; echo; } > "$hooks_file.tmp"
+  mv "$hooks_file.tmp" "$hooks_file"
+  chmod 640 "$hooks_file"
+
+  local before_bytes before_mode
+  before_bytes="$(cat "$hooks_file")"
+  before_mode="$(file_mode "$hooks_file")"
+
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+
+  local after_bytes after_mode
+  after_bytes="$(cat "$hooks_file")"
+  after_mode="$(file_mode "$hooks_file")"
+  [ "$before_bytes" = "$after_bytes" ]
+  [ "$before_mode" = "$after_mode" ]
+
+  # Now force a genuine content change and confirm the rewrite happens
+  # (content differs) but the file's permission mode is still the one set
+  # above, not mktemp's.
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local changed_bytes changed_mode
+  changed_bytes="$(cat "$hooks_file")"
+  changed_mode="$(file_mode "$hooks_file")"
+  [ "$changed_bytes" != "$after_bytes" ]
+  [ "$changed_mode" = "640" ]
 }
 
 # --- mode transitions ---

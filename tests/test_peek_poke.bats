@@ -116,6 +116,89 @@ _install_fake_herdr_empty_box() {
   export PATH="$FAKEBIN:$PATH"
 }
 
+# Codex's flat (unboxed) empty box: marker line, exactly one blank line, then
+# a footer line containing "·" -- agmsg_input_box_raw_flat's own required
+# triplet (scripts/lib/input-box.sh). Never contains claude-code's "❯"/boxed
+# rule shape, so a caller still classifying by claude-code's contract cannot
+# locate a box here at all.
+_install_fake_herdr_codex_empty_box() {
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '›' '' 'gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task'\n"
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+# #1384 (herdr only): a real, stalled draft with NOBODY focused on the pane
+# -- `pane list` answers focused=false unconditionally (one pane, asked
+# about twice: once before clearing, once right after -- #1384's own two
+# re-reads), and `pane read --format ansi` answers STATEFULLY, by counting
+# this SAME fake's own prior calls in $ARGV_LOG (review: the first version
+# of this fixture answered the identical draft no matter what happened,
+# which could not tell a clear that actually worked apart from one that
+# did not, or a restore that landed apart from one that failed):
+#   - no `agent send-keys` (clear) logged yet -> the real, non-dim draft
+#     ("hello draft"), so `agmsg_input_box_is_real_draft` reads it as real
+#     on the very first snapshot.
+#   - a clear IS logged, and $FAKEBIN/.clear_empties exists -> empty box.
+#   - a clear is logged but $FAKEBIN/.clear_empties does NOT exist -> still
+#     the draft (simulates a clear that sent keys but did not actually
+#     empty the box -- too long a draft, a key that did not land).
+#   - a `pane send-text` (restore) is ALSO logged -> the draft again
+#     (retyped successfully), UNLESS $FAKEBIN/.restore_fails exists, in
+#     which case `pane send-text` itself exits 1 and the box stays empty.
+# Each test controls behavior by touching/removing those two files before
+# each `run`, and truncating $ARGV_LOG between scenarios so the call
+# counts this fake reads are scoped to that one scenario.
+_install_fake_herdr_real_draft_unfocused() {
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf '  sends=$(grep -c '\''^herdr \\[pane\\] \\[send-text\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '  clears=$(grep -c '\''^herdr \\[agent\\] \\[send-keys\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '  if [ "$sends" -gt 0 ]; then\n'
+    printf '    if [ -f "%s/.restore_fails" ]; then draft=0; else draft=1; fi\n' "$FAKEBIN"
+    printf '  elif [ "$clears" -gt 0 ]; then\n'
+    printf '    if [ -f "%s/.clear_empties" ]; then draft=0; else draft=1; fi\n' "$FAKEBIN"
+    printf '  else\n'
+    printf '    draft=1\n'
+    printf '  fi\n'
+    printf '  if [ "$draft" = 1 ]; then\n'
+    printf "    printf '%%s\\\\n' '%s testteam-alice ─' '❯ hello draft' '%s'\n" "$rule" "$rule"
+    printf '  else\n'
+    printf "    printf '%%s\\\\n' '%s' '❯' '%s'\n" "$rule" "$rule"
+    printf '  fi\n'
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'if [ "$1" = pane ] && [ "$2" = send-text ]; then\n'
+    printf '  [ -f "%s/.restore_fails" ] && exit 1\n' "$FAKEBIN"
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'if [ "$1" = pane ] && [ "$2" = list ]; then\n'
+    printf '  if [ -f "%s/.focus_on_second_check" ]; then\n' "$FAKEBIN"
+    printf '    lists=$(grep -c '\''^herdr \\[pane\\] \\[list\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '    if [ "$lists" -ge 2 ]; then\n'
+    printf '      printf '\''{"result":{"panes":[{"pane_id":"wC:p4","focused":true}]}}\\n'\''\n'
+    printf '      exit 0\n'
+    printf '    fi\n'
+    printf '  fi\n'
+    printf '  printf '\''{"result":{"panes":[{"pane_id":"wC:p4","focused":false}]}}\\n'\''\n'
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 _install_fake_osascript() {
   cat > "$FAKEBIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -324,8 +407,13 @@ EOF
   peek2="$(sed -n '2p' "$ARGV_LOG")"
   first="$(sed -n '3p' "$ARGV_LOG")"
   second="$(sed -n '4p' "$ARGV_LOG")"
-  [ "$peek1" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
-  [ "$peek2" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
+  # -e, not plain: tmux now offers terminal_peek_styled (#1389), so poke.sh's
+  # own STYLED dispatch (declare -F terminal_peek_styled) picks it for BOTH
+  # snapshots here, the same as it already did for herdr -- tmux pokes get
+  # the #1322 round-2 real-draft protection too, not just the round-1
+  # two-snapshot check this test originally pinned before that existed.
+  [ "$peek1" = 'tmux [capture-pane] [-e] [-p] [-t] [%5]' ]
+  [ "$peek2" = 'tmux [capture-pane] [-e] [-p] [-t] [%5]' ]
   # Burst 1 is the literal text and carries NO Enter — the equality is what
   # goes red if the Enter ever rejoins the text burst (an Enter appended to
   # this line makes the string differ).
@@ -341,13 +429,111 @@ EOF
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
   # Three herdr invocations: the #1322 two-snapshot input-box check (pane
-  # read, pane read), then the single agent-prompt submission call.
+  # read, pane read -- styled, since terminal_peek_styled exists for herdr),
+  # then the single agent-prompt submission call.
   [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 3 ]
-  [ "$(grep -c '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\]$' "$ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\] \[--format\] \[ansi\]$' "$ARGV_LOG")" -eq 2 ]
   # The inner ':' of the herdr pane id must survive the record round-trip.
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
   [ "$(grep -ci 'enter' "$ARGV_LOG" || true)" -eq 0 ]
+}
+
+@test "poke: a stale claude-code placement record is overridden by the roster's codex, reported, and actually used to classify the box (#1391)" {
+  # _write_record always writes 'claude-code' as the record's own type field
+  # (a hand-started seat's self-naming hook used to fall back to a guessed
+  # default that could be wrong). Register the SAME (team, name) in the
+  # roster as codex instead -- the roster is authoritative on a mismatch.
+  _install_fake_herdr_codex_empty_box
+  _write_record "herdr:wC:p4"
+  bash "$SCRIPTS/join.sh" testteam alice codex /tmp/project-a >/dev/null
+
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  # The fake screen contains ONLY codex's marker/footer shape (›, one blank
+  # line, a footer with ·) -- never claude-code's boxed ❯ rule. A caller
+  # still trusting the record's claude-code type would search for ❯, fail to
+  # locate the box at all, and refuse (exit 15) rather than deliver. Success
+  # here is itself proof the roster's codex contract -- not the record's
+  # stale claude-code one -- was what classified the box.
+  [ "$status" -eq 0 ] || { echo "expected poke to succeed via the roster's codex contract; got status=$status output=$output"; false; }
+  _out_has "poked 'testteam/alice' via herdr"
+  _out_has "placement record says type 'claude-code' but the roster says 'codex' — using 'codex' (#1391)"
+  grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
+}
+
+@test "poke: herdr, unfocused real draft -- clears, pokes, then restores the draft, in that order (#1384)" {
+  _install_fake_herdr_real_draft_unfocused
+  _write_record "herdr:wC:p4"
+
+  # --- 1) happy path: clear actually empties the box, restore actually
+  # lands -- clears, pokes, then restores, in that order, and the saved
+  # draft file is removed once the restore verifies byte-for-byte.
+  : > "$FAKEBIN/.clear_empties"
+  rm -f "$FAKEBIN/.restore_fails"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via herdr"
+
+  local clear_line poke_line restore_line
+  clear_line="$(grep -n '^herdr \[agent\] \[send-keys\] \[wC:p4\]' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  poke_line="$(grep -n '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  restore_line="$(grep -n '^herdr \[pane\] \[send-text\] \[wC:p4\] \[hello draft\]$' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$clear_line" ]
+  [ -n "$poke_line" ]
+  [ -n "$restore_line" ]
+  [ "$clear_line" -lt "$poke_line" ]
+  [ "$poke_line" -lt "$restore_line" ]
+  # The draft was saved under run/ with 600, then removed once the restore
+  # verified byte-for-byte against the original -- a removal test without a
+  # keep-set proves nothing, but here the survive/remove question is the
+  # test itself: none should remain after a clean run.
+  [ -z "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+
+  # --- 2) clear sends the keys but the box reads back with
+  # the draft STILL there (too long a draft, a key that did not land) --
+  # must not type the poke's own text over it. No `agent prompt` call may
+  # appear at all, and the saved draft must survive, not be silently
+  # dropped as though nothing had been saved.
+  : > "$ARGV_LOG"
+  rm -f "$FAKEBIN/.clear_empties"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -ne 0 ]
+  refute grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+
+  # --- 3) clear DOES empty the box and the poke DOES land,
+  # but the retype back fails (`pane send-text` itself errors) -- the
+  # message still delivered (this is not a poke failure), but the saved
+  # draft file must NOT be deleted just because terminal_input_type was
+  # merely CALLED; only a verified, matching restore may remove it.
+  : > "$ARGV_LOG"
+  : > "$FAKEBIN/.clear_empties"
+  : > "$FAKEBIN/.restore_fails"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+
+  # --- 4) (review, round 2) the FIRST focus check (before
+  # recovery starts) reads unfocused, clearing sends the keys but the draft
+  # is STILL there afterward, and the SECOND focus check (right after
+  # clearing) now reads focused -- someone arrived mid-clear. The abort
+  # branch must confirm the box is empty BEFORE ever retyping the draft
+  # back; here it never is, so `pane send-text` must not be called at all,
+  # not even the restore -- a partial clear plus a blind restore would
+  # append the whole draft on top of whatever the clear left behind.
+  : > "$ARGV_LOG"
+  rm -f "$FAKEBIN/.clear_empties" "$FAKEBIN/.restore_fails"
+  : > "$FAKEBIN/.focus_on_second_check"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -ne 0 ]
+  refute grep -q '^herdr \[pane\] \[send-text\]' "$ARGV_LOG"
+  refute grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+  rm -f "$FAKEBIN/.focus_on_second_check"
 }
 
 @test "poke: a plain record is unsupported as a TERMINAL answer, and points at the type's native channel (peek deliberately does not — no CLI read path)" {
@@ -993,10 +1179,22 @@ _write_codex_record() {
 # line's own <tail>, bottom rule. Mirrors a real pane's shape (measured live
 # 2026-09-18). RULE60 is built, not hand-typed, so its length (60 >= the
 # 20-character run the checker requires) is provable, not eyeballed.
+#
+# <dim> (yes|"") wraps <tail> in SGR faint (ESC[2m...ESC[0m) or leaves it
+# plain -- matches how Claude Code actually draws candidate/suggestion text
+# (dim) versus a person's own typed characters (not dim), measured live
+# 2026-09-21/22 (#1322 round 2). The marker itself and the space after it
+# are never dim, same as every real capture.
 _boxed_screen() {
-  local tail="$1" rule
+  local tail="$1" dim="$2" rule esc
   rule="$(printf '─%.0s' $(seq 1 60))"
-  printf '%s testteam-alice ─\n❯%s\n%s\n' "$rule" "${tail:+ $tail}" "$rule"
+  esc="$(printf '\033')"
+  if [ "$dim" = yes ]; then
+    printf '%s testteam-alice ─\n❯ %s[0m%s[2m%s%s[0m\n%s\n' \
+      "$rule" "$esc" "$esc" "$tail" "$esc" "$rule"
+  else
+    printf '%s testteam-alice ─\n❯%s\n%s\n' "$rule" "${tail:+ $tail}" "$rule"
+  fi
 }
 
 # Builds one flat-shape (Codex) screen: marker line's own <tail>, one
@@ -1006,55 +1204,80 @@ _boxed_screen() {
 # judging it blank, or every read of a genuinely idle Codex pane fails to
 # confirm the live widget at all), a status footer containing "·" -- the
 # live-widget triplet #1321 requires to confirm this is the real box.
+#
+# <dim>, same meaning as _boxed_screen's -- matches Codex's own placeholder
+# (dim) versus a real typed draft (not dim), measured live 2026-09-22.
 _flat_screen() {
-  local tail="$1"
-  printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+  local tail="$1" dim="$2" esc
+  esc="$(printf '\033')"
+  if [ "$dim" = yes ]; then
+    printf 'some transcript line\n›%s[0m%s[2m%s%s[0m\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
+      "$esc" "$esc" "$tail" "$esc"
+  else
+    printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+  fi
 }
 
-@test "poke.sh types when the input box is unchanged across two reads (empty, candidate text, or a Codex placeholder alike), and refuses only when it changes (#1321, #1322)" {
+@test "poke.sh types over empty/candidate/placeholder input boxes but refuses a real draft, styled or not, stalled or actively typed (#1321, #1322)" {
   # Claude Code, genuinely empty, unchanged across both reads.
-  _install_fake_herdr_screen_sequence "$(_boxed_screen '')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen '' '')"
   _write_record "herdr:w1:p5"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
 
-  # Claude Code, Claude's OWN candidate/suggestion text sitting in the box,
-  # unchanged across both reads — #1322's own motivating case. A
-  # content-pattern check would have refused this (non-blank marker line);
-  # the two-read comparison correctly lets it through since it never moves.
+  # Claude Code, Claude's OWN candidate/suggestion text sitting in the box
+  # (drawn dim, matching a real measured capture), unchanged across both
+  # reads — #1322 round 1's own motivating case. A content-pattern check
+  # would have refused this (non-blank marker line); dim styling plus an
+  # unchanged read both agree it is safe.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step' yes)"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Claude Code, someone actively typing: the second read shows one more
-  # character than the first — refuses, and never reaches the submission
-  # call.
+  # Claude Code, a REAL draft sitting STALLED (not dim -- matches a real
+  # captured draft, unlike candidate text) but otherwise unchanged across
+  # both reads: #1322 round 1 alone would have let this through (nothing
+  # changed); round 2's style classification refuses it on the very FIRST
+  # read, before a second read is even taken.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_boxed_screen 'half-typed')" "$(_boxed_screen 'half-typed draft')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'a real stalled draft' '')"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 14 ]
   _out_has "input in progress"
+  [ "$(grep -c '^herdr \[pane\] \[read\]' "$ARGV_LOG")" -eq 1 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
-  # Codex, genuinely empty (its own placeholder), unchanged across both
-  # reads. Real Codex panes draw a decorative Braille animation OVER this
-  # exact placeholder that changes on every redraw even though nothing was
-  # typed (measured live, 2026-09-21, see scripts/lib/input-box.sh) — using
-  # the identical screen for both reads here is deliberate: that decoration
-  # is covered by the dedicated normalization test below, not this one.
+  # Claude Code, someone STARTS typing between the two reads: the first read
+  # shows dim candidate text (safe on its own), the second shows real,
+  # non-dim characters -- refused by the SECOND read's own classification,
+  # not by a content diff.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_flat_screen 'Ask Codex to do anything')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step' yes)" "$(_boxed_screen 'h' '')"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[pane\] \[read\]' "$ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, genuinely empty (its own placeholder, drawn dim -- matches a real
+  # measured capture), unchanged across both reads. Real Codex panes draw a
+  # decorative Braille animation OVER this exact placeholder that changes on
+  # every redraw even though nothing was typed and it is never dim itself
+  # (measured live, 2026-09-21/22, see scripts/lib/input-box.sh) — using the
+  # identical screen for both reads here is deliberate: that decoration is
+  # covered by the dedicated normalization test below, not this one.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'Ask Codex to do anything' yes)"
   _write_codex_record codex1 "herdr:w1:p6"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Codex, someone actively typing a real draft: refuses.
+  # Codex, a real draft (not dim), refused on the first read alone.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_flat_screen 'half typed')" "$(_flat_screen 'half typed draft')"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'a real draft' '')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 14 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
@@ -1064,11 +1287,13 @@ _flat_screen() {
   # "near the bottom" guess accepted as empty, because proximity alone
   # cannot tell a live box from a leftover one. Neither read can confirm
   # this is the live widget, so it refuses even though the two reads are
-  # identical -- "cannot tell" still fails toward refusing (#1321).
+  # identical -- "cannot tell" still fails toward refusing (#1321), and as
+  # its own code, 15, not 14: this is "could not locate the box", not
+  # "found it and it looks occupied" (#1391/#1402).
   : > "$ARGV_LOG"
   _install_fake_herdr_screen_sequence "$(printf '›\n\n\n')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
-  [ "$status" -eq 14 ]
+  [ "$status" -eq 15 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
   # plain (#1321 review): the input-box check must not block plain's
@@ -1086,8 +1311,8 @@ _flat_screen() {
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/input-box.sh"
 
-  # Two REAL raw lines captured live from a stuck Codex pane (`advisor`,
-  # 2026-09-21) 2 seconds apart, showing its idle "Ask Codex to do anything"
+  # Two REAL raw lines captured live from a stuck Codex pane
+  # (2026-09-21) 2 seconds apart, showing its idle "Ask Codex to do anything"
   # placeholder -- unchanged in substance, but Codex's own decorative
   # Braille animation (U+2800-U+28FF) drew differently across the two
   # reads. A naive raw-text comparison would see these as different forever
@@ -1105,4 +1330,41 @@ _flat_screen() {
   local ja_a='❯ こんにちは、これは'
   local ja_b='❯ こんにちは、これは書きかけ'
   [ "$(_agmsg_strip_decorative_braille "$ja_a")" != "$(_agmsg_strip_decorative_braille "$ja_b")" ]
+}
+
+@test "input-box: a real (unstyled) draft is a real draft; dim candidate text and Codex's placeholder are not (#1322 round 2)" {
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/input-box.sh"
+  local esc; esc="$(printf '\033')"
+
+  # Claude Code candidate/suggestion text, captured live from a real pane
+  # (2026-09-22): marker, a non-breaking space, then the suggestion
+  # wrapped in SGR faint (dim, code 2). Must NOT read as a real draft.
+  local cc_marker cc_ghost
+  cc_marker='❯'
+  cc_ghost="${cc_marker}$(printf '\xc2\xa0')${esc}[0m${esc}[2m承認する${esc}[0m"
+  refute agmsg_input_box_is_real_draft "$cc_marker" "$cc_ghost"
+
+  # Claude Code, a genuinely real draft, captured live from a real pane
+  # (2026-09-21): marker, a non-breaking space, then plain
+  # unstyled text -- no SGR at all. MUST read as a real draft; this is the
+  # exact shape #1322 round 1 alone let poke type over (measured live: a
+  # maintainer's stalled draft and a poke's own body landed as one
+  # submitted message).
+  local cc_real
+  cc_real="${cc_marker}$(printf '\xc2\xa0')実際の入力文字"
+  agmsg_input_box_is_real_draft "$cc_marker" "$cc_real"
+
+  # Codex's own "Ask Codex to do anything" placeholder, captured live from a
+  # real pane (2026-09-21): bold + background codes, THEN the
+  # placeholder text wrapped in dim, THEN Codex's own decorative Braille
+  # animation drawn in a plain foreground color (not dim) -- the exact shape
+  # that would misread as a real draft if Braille weren't stripped BEFORE
+  # the dim check (the animation is not dim itself, so left in place it
+  # counts as real, non-dim, visible content). Must NOT read as a real
+  # draft.
+  local codex_marker codex_placeholder
+  codex_marker='›'
+  codex_placeholder="${esc}[0m${esc}[1m${esc}[48;2;65;65;65m$(printf '\xe2\xa2\x80')${esc}[0m${esc}[48;2;65;65;65m ${esc}[0m${esc}[2m${esc}[48;2;65;65;65mAsk Codex to do anything${esc}[0m${esc}[48;2;65;65;65m                                 ${esc}[0m"
+  refute agmsg_input_box_is_real_draft "$codex_marker" "$codex_placeholder"
 }

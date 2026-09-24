@@ -86,48 +86,64 @@ permissions:
 # 35 runs that day, 140 macOS jobs, queue waits of 0-50 min, one PR's shard
 # waiting 50 min behind runs whose heads had already been replaced). So a new
 # run for the same PR cancels the one before it. The same reasoning applies to
-# an integration branch, which is only ever dogfooded at its tip. A push to main
-# is the one case that is never cancelled: its group is its own run id, and that
-# run is what a release reads (#848). The block below spells out all three.
+# an integration branch, which is only ever dogfooded at its tip.
 #
-# The `pull_request` case above ALSO now fires on `closed` (merged or just
-# closed, #1304), which is what finally cancels the in-flight run for a PR
-# that gets merged/closed without a further push -- until this, that run had
-# no way to be superseded and just ran to completion on its own, burning a
-# macOS slot for a PR that was already resolved. This is safe against the
-# hazard that matters here -- cancelling a run whose result some OTHER run
-# still needs -- for two reasons specific to this group: (1) the group key is
-# `pr-<number>`, so a closed event for PR N can only ever cancel something
-# already in PR N's own group; it can never reach a different PR's group or
-# main's (main pushes group by run id, never cancelled, and closing a PR
-# never fires a push event on main). (2) `closed` only fires once PR N itself
-# is already merged or abandoned, i.e. after whatever gated on PR N's own
-# checks has already been decided -- there is nothing left downstream that
-# still needs the in-flight run's verdict once its own PR has closed.
+# A push to main used to be the one case that was never cancelled -- its group
+# was its own run id -- on the theory that a release reads the run for the
+# commit it ships, and a main run that another main run cancelled would leave
+# that commit with no verdict at all (#848). That theory does not survive
+# checking the actual release path (#1304): cutting a release tags whatever is
+# CURRENTLY at the tip of main right after merging the release PR (see
+# RELEASING.md), and neither release.yml nor cut-release.sh look up a tests.yml
+# run by run id or SHA -- release.yml is self-contained (its own checkout,
+# verify, publish) and is triggered by a TAG push, a different event tests.yml
+# does not even listen for. Branch protection's required checks (`bats`, `bats
+# (windows-latest, install helpers)`) are satisfied on the PR's own head-SHA
+# run before merge is even allowed -- a main-push run has never gated a merge.
+# So nothing anywhere reads an intermediate main commit's own run once a newer
+# commit has landed on top of it; the newer run's tree already contains
+# whatever the intermediate commit changed, so it verifies that too. Without
+# cancellation this pattern showed up for real on 2026-09-22: three main-push
+# runs queued back to back, the two older ones already superseded by a newer
+# commit before they'd even started their macOS jobs, each still holding
+# scarce macOS slots until it finished on its own.
+#
+# So push to main now groups the same way push to an integration branch
+# already did: by ref, cancelled on a newer push. The `pull_request` case
+# ALSO now fires on `closed` (merged or just closed, #1304), which is what
+# finally cancels the in-flight run for a PR that gets merged/closed without a
+# further push -- until this, that run had no way to be superseded and just
+# ran to completion on its own, burning a macOS slot for a PR that was already
+# resolved. This is safe against the hazard that matters here -- cancelling a
+# run whose result some OTHER run still needs -- for two reasons specific to
+# this group: (1) the group key is `pr-<number>`, so a closed event for PR N
+# can only ever cancel something already in PR N's own group; it can never
+# reach a different PR's group or a push group. (2) `closed` only fires once
+# PR N itself is already merged or abandoned, i.e. after whatever gated on PR
+# N's own checks has already been decided -- there is nothing left downstream
+# that still needs the in-flight run's verdict once its own PR has closed.
 concurrency:
-  # Three cases, and they want different things.
+  # Two cases now, and they want the same thing.
   #
-  #   pull_request        -- group by PR. A head that has moved makes the run
-  #                          worthless, so cancel the one before it.
-  #   push to main        -- group by run id, i.e. never cancel. A release reads
-  #                          the run for the commit it ships (#848); a main run
-  #                          that another main run cancelled would leave that
-  #                          commit with no verdict at all.
-  #   push to integration -- group by ref, and cancel. An integration branch
-  #                          collects several PRs one after another, and it is
-  #                          only ever dogfooded at its tip. Without this the
-  #                          five merges of one release queue five full suites
-  #                          that all compete for the same five macOS slots
-  #                          (the header above measured 0-50 min queue waits at
-  #                          that contention), and four of the five verdicts are
-  #                          about a tip that no longer exists by the time they
-  #                          land.
+  #   pull_request -- group by PR. A head that has moved makes the run
+  #                   worthless, so cancel the one before it.
+  #   push         -- group by ref (main and integration/** alike, the only
+  #                   two `on.push.branches` this workflow listens for). A
+  #                   branch is only ever dogfooded/released at its tip, so an
+  #                   older push's run is worthless the moment a newer one
+  #                   lands -- see the header above for why that now also
+  #                   holds for main. Without this, several pushes in a row
+  #                   queue that many full suites competing for the same five
+  #                   macOS slots (the header above measured exactly this
+  #                   happening on main on 2026-09-22, and #933 measured the
+  #                   same shape on integration branches earlier), and all but
+  #                   the last verdict are about a tip that no longer exists
+  #                   by the time they land.
   group: >-
     tests-${{ github.event_name == 'pull_request'
     && format('pr-{0}', github.event.pull_request.number)
-    || (github.ref == 'refs/heads/main' && github.run_id
-    || format('push-{0}', github.ref)) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+    || format('push-{0}', github.ref) }}
+  cancel-in-progress: true
 
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
@@ -524,14 +540,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Record which files this shard ran
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: bats-manifest-${{ matrix.os }}-${{ matrix.shard }}
-          path: shard-files.txt
-          retention-days: 1
-
   # Keep the required check name stable even if the shard count changes.
   bats:
     name: bats
@@ -565,31 +573,37 @@ jobs:
           echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
           printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Download shard manifests
+      - name: Verify the shard partition covers the whole suite
         if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          pattern: bats-manifest-*
-          path: manifests
-
-      - name: Verify the shards covered the whole suite
-        if: needs.changes.outputs.docs_only != 'true'
+        # Recomputes the partition instead of collecting each shard's own
+        # record of what it ran (a bats-manifest-* artifact, downloaded and
+        # unioned here). That depended on every shard from THIS run having
+        # uploaded one -- true for an ordinary run, false for `gh run rerun
+        # --failed`, which only re-executes the shards that failed and
+        # leaves the rest without a fresh artifact (measured, #1057: `cat:
+        # manifests/bats-manifest-macos-latest-*/shard-files.txt: No such
+        # file`), so a --failed rerun went red here even when every shard
+        # had actually passed. shard-tests.sh's partition is a pure function
+        # of the tree and $SHARD_TOTAL -- no OS parameter, see its own
+        # header -- so recomputing it here needs nothing any shard produced,
+        # and is the same union on every run regardless of which shards (if
+        # any) were actually re-executed.
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
-          status=0
-          for os in ubuntu-latest macos-latest; do
-            actual="$(cat manifests/bats-manifest-"$os"-*/shard-files.txt | LC_ALL=C sort)"
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::$os shards do not exactly cover tests/*.bats"
-              status=1
-            fi
-          done
+          actual="$(
+            for shard in $(seq 1 "$SHARD_TOTAL"); do
+              .github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"
+            done | LC_ALL=C sort
+          )"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats"
+            exit 1
+          fi
           # The other green, named the same way (#798): how many files the
           # shards ran, so a full pass and a skip never read alike.
           count="$(printf '%s\n' "$expected" | grep -c .)"
-          printf '%s\n' "## bats: suite ran" "" "The shards ran $count test files on ubuntu-latest and macos-latest and every shard passed." >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
   # pinned standard age implementation instead of accepting only mock crypto
