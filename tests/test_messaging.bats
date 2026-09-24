@@ -253,9 +253,9 @@ line"
 @test "history: uses batch mode for redirected sqlite input on Windows" {
   bash "$SCRIPTS/send.sh" testteam alice bob "batch-required"
 
-  # Windows の sqlite3.exe が標準入力を -batch なしで対話入力として受け、
-  # 成功終了しながら評価しない挙動を再現する。その他の呼び出しは本物の
-  # sqlite3 に委譲する。
+  # Reproduce the Windows sqlite3.exe behavior: redirected stdin without
+  # -batch exits successfully without evaluating the SQL. Other invocations
+  # are delegated to the real sqlite3 binary.
   local real_stub="$BATS_TEST_TMPDIR/sqlite3"
   local real_sqlite; real_sqlite="$(command -v sqlite3)"
   cat >"$real_stub" <<EOF
@@ -276,7 +276,13 @@ EOF
 
   run bash "$SCRIPTS/history.sh" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"batch-required"* ]]
+  # The body comes from the ROWS query's own -batch (first site); the ●
+  # (unread) marker comes from the SEPARATE ids=$(...) query a few lines
+  # below in history.sh (second site) -- dropping -batch from THAT query
+  # alone still lets ROWS through untouched, so body-only used to stay
+  # green while every message silently read back as ○ (review finding:
+  # the first version of this test covered only the first site).
+  [[ "$output" == *"● "*"batch-required"* ]]
 }
 
 @test "history: filters by agent" {

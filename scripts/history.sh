@@ -70,11 +70,10 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
   printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
   printf "');\n"
 } > "$_agmsg_rows_sql"
-# Windows の sqlite3.exe は、標準入力をリダイレクトした場合でも batch mode
-# を明示しないと対話入力として扱い、成功終了しながら SQL を評価しないことが
-# ある。その場合 api.sh（SQL を argv で渡す）は読めるのに、history.sh は行を
-# 生成せず黙って終了していた。Windows のコマンドライン長制限を避ける stdin
-# 経路は維持し、全プラットフォームでモードを明示する。
+# Windows sqlite3.exe may treat redirected stdin as interactive input unless
+# batch mode is explicit, returning success without evaluating the SQL. Keep
+# the stdin path (it avoids command-line length limits) and make the mode
+# explicit on every platform.
 ROWS=$(agmsg_sqlite -batch ':memory:' < "$_agmsg_rows_sql")
 rm -f "$_agmsg_rows_sql"
 trap - EXIT HUP INT TERM

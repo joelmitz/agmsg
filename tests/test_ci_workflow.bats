@@ -60,9 +60,23 @@
   grep -Fq '::notice title=bats::docs-only diff — the bats suite did not run on any shard' "$workflow"
   grep -Fq '"## bats: docs-only, suite skipped"' "$workflow"
   grep -Fq '"## bats: suite ran"' "$workflow"
-  grep -Fq 'The shards ran $count test files' "$workflow"
+  grep -Fq 'The shard partition covers $count test files' "$workflow"
   # 4. And on the shard itself, so the checks tab shows it per job.
   grep -Fq '::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files' "$workflow"
+  # 5. #1057 (measured): `gh run rerun --failed` only re-executes the shards
+  #    that failed, so a shard from the ORIGINAL run had no fresh
+  #    bats-manifest-* artifact in the rerun -- the aggregate's manifest
+  #    download came up empty for it (`cat: manifests/bats-manifest-macos-
+  #    latest-*/shard-files.txt: No such file`) and the required check went
+  #    red even though every shard had actually passed. The aggregate no
+  #    longer depends on any artifact a shard uploaded: it recomputes the
+  #    same partition itself, via shard-tests.sh for every shard
+  #    1..SHARD_TOTAL, which needs nothing from this run's own shards to
+  #    have produced anything.
+  if grep -Fq 'Download shard manifests' "$workflow"; then false; fi
+  if grep -Fq 'name: bats-manifest-' "$workflow"; then false; fi
+  grep -Fq 'for shard in $(seq 1 "$SHARD_TOTAL")' "$workflow"
+  grep -Fq '.github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"' "$workflow"
 }
 
 @test "CI: the #798 pins go red when the marker is taken back out (mutation control)" {
@@ -91,22 +105,30 @@
   [ "$output" = "2" ]
 }
 
-# Guards the OTHER direction. A group expression alone cannot fail this: swap
-# cancel-in-progress to a bare `true` and the group still reads correctly while
-# main runs begin cancelling each other -- and a cancelled main run leaves the
-# commit a release ships with no verdict at all (#848). So the main arm is
-# asserted by name, not inferred from the group.
-@test "only main is exempt from cancellation" {
+# #1304: main pushes used to be the one case exempt from cancellation (their
+# own group was a unique run id, so nothing could ever supersede one), on the
+# theory that a release reads a specific main-push run and losing it would
+# leave that commit with no verdict. Checking the actual release path found
+# nothing depends on that: a release always tags main's CURRENT tip right
+# after merging, and neither release.yml nor cut-release.sh look up a
+# tests.yml run at all (release.yml is self-contained and tag-triggered, a
+# different event). Three main-push runs queuing back to back on
+# 2026-09-22, two of them already superseded before their macOS jobs even
+# started, is what made this worth fixing rather than leaving as-is. Pins
+# that main now shares the SAME cancel-on-newer-push behavior every other
+# push branch already had, with no special case left for it.
+@test "main pushes are cancelled by a newer push, the same as any other push branch" {
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
 
-  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}" "$workflow"
+  run grep -F 'cancel-in-progress: true' "$workflow"
   [ "$status" -eq 0 ]
 
-  # main pushes group by run id, so nothing can ever supersede them.
+  # No more special-cased run-id grouping for main.
   run grep -F "github.ref == 'refs/heads/main' && github.run_id" "$workflow"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
 
-  # Every other push groups by ref, so a later merge supersedes an earlier one.
+  # main and every other push branch (only integration/** in practice) share
+  # the same by-ref group, so a later push supersedes an earlier one on both.
   run grep -F "format('push-{0}', github.ref)" "$workflow"
   [ "$status" -eq 0 ]
 }
