@@ -544,7 +544,12 @@ wait_for_child_count() {
   # steady state rather than on whichever side of that transition we land.
   [ "$(wait_for_child_count 1)" -eq 1 ]
   sleep 1
-  [ "$(count_child_launchers)" -eq 1 ]
+  local observed_children
+  observed_children="$(count_child_launchers)"
+  if [ "$observed_children" -ne 1 ]; then
+    _report_launcher_failure "replacement dispatcher: expected one role child, observed $observed_children; parent_a=$parent_a parent_b=$parent_b dispatcher_b=$dispatcher_b"
+    return 1
+  fi
 
   kill "$dispatcher_b" 2>/dev/null || true
   wait_launcher_or_report "$dispatcher_b" dispatcher-b || return 1
