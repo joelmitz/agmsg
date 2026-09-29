@@ -4,7 +4,7 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-USAGE='Usage: team.sh <team> [--json] [--delete] [--purge-messages] [--yes]'
+USAGE='Usage: team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]'
 # Printed, not passed to ${1:?...}: the shell prefixes that form with its own
 # "line N: 1:" and mangles it. Kept even now that the message is one line --
 # the property being guarded is "no shell-diagnostic corruption", not "multiple
@@ -25,12 +25,14 @@ OUTPUT_MODE=human
 # agmsg_team_create_placement_from_label, all four defined in team-status.sh)
 # are gone with them, not replaced by a softer version of the same authority.
 DELETE=false
+FORCE=false
 PURGE_MESSAGES=false
 AUTO_YES=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) OUTPUT_MODE=json ;;
     --delete) DELETE=true ;;
+    --force) FORCE=true ;;
     --purge-messages) PURGE_MESSAGES=true ;;
     --yes) AUTO_YES=true ;;
     *) echo "$USAGE" >&2; exit 2 ;;
@@ -92,13 +94,32 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
     exit 1
   fi
 
+  # --force (#1493): a team the desktop app created always has at least one
+  # member (its own app-user registration), so a plain --delete could never
+  # remove an app-created team. --force does NOT call leave.sh per member --
+  # the whole team folder is coming down anyway, and leave.sh's own
+  # last-member cleanup can delete config.json (and the team dir, if it ends
+  # up empty) for a non-journaled team, which would make the agmsg_lock_acquire
+  # below fail to create .config.lock and abort with the team half-deleted
+  # (review finding). leave.sh only ever touches config.json/roster.jsonl --
+  # it does nothing to actas locks, role-session records, or any other run/
+  # state -- so skipping it changes nothing the run/ sweep below wasn't
+  # already going to remove on its own. DELETE_FORCE_NAMES here is only for
+  # the confirmation text; the delete below still reads the untouched config.
+  DELETE_FORCE_NAMES=""
   if [ "$DELETE" = true ]; then
     DELETE_AGENT_COUNT="$(agmsg_sqlite_mem \
       "SELECT count(*) FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
     if [ "${DELETE_AGENT_COUNT:-0}" -ne 0 ]; then
-      echo "Team '$TEAM' still has $DELETE_AGENT_COUNT member(s); refusing --delete." >&2
-      echo "Run leave.sh for each remaining member first." >&2
-      exit 1
+      if [ "$FORCE" != true ]; then
+        echo "Team '$TEAM' still has $DELETE_AGENT_COUNT member(s); refusing --delete." >&2
+        echo "Run leave.sh for each remaining member first, or pass --force to remove them and delete the team in one step." >&2
+        exit 1
+      fi
+      DELETE_FORCE_NAMES="$(agmsg_sqlite_mem \
+        "SELECT key FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
+      DELETE_FORCE_LIST="$(agmsg_sqlite_mem \
+        "SELECT group_concat(key, ', ') FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
     fi
   fi
 
@@ -113,8 +134,14 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
   echo "  ──────────────────"
   echo ""
   if [ "$DELETE" = true ]; then
-    echo "  This permanently deletes team '$TEAM': its configuration, roster,"
-    echo "  identity history, and per-agent runtime records. This cannot be undone."
+    if [ -n "$DELETE_FORCE_NAMES" ]; then
+      echo "  This removes $DELETE_AGENT_COUNT member(s) ($DELETE_FORCE_LIST), then"
+      echo "  permanently deletes team '$TEAM': its configuration, roster, identity"
+      echo "  history, and per-agent runtime records. This cannot be undone."
+    else
+      echo "  This permanently deletes team '$TEAM': its configuration, roster,"
+      echo "  identity history, and per-agent runtime records. This cannot be undone."
+    fi
   fi
   if [ "$PURGE_MESSAGES" = true ]; then
     echo "  This permanently deletes all message history for team '$TEAM'; it"

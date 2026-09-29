@@ -935,6 +935,45 @@ pub fn agmsg_leave(team: String, name: String) -> Result<(), String> {
     run_script("leave.sh", &[&team, &name]).map(|_| ())
 }
 
+/// Rename a whole team (rename-team.sh; repoints messages, cursors and sync
+/// state at the new name).
+#[tauri::command]
+pub fn agmsg_rename_team(old_team: String, new_team: String) -> Result<(), String> {
+    run_script("rename-team.sh", &[&old_team, &new_team]).map(|_| ())
+}
+
+/// Delete a team (team.sh --delete --yes, #1475). Confirmation happens in the
+/// UI before this is called. Refuses (with the reason on stderr, surfaced as
+/// Err by run_script) when members remain, a remote binding is active, or the
+/// team uses the jsonl storage driver.
+#[tauri::command]
+pub fn agmsg_delete_team(team: String) -> Result<(), String> {
+    run_script("team.sh", &[&team, "--delete", "--yes"]).map(|_| ())
+}
+
+/// Delete a team's message history only, keeping the team and its members
+/// (team.sh --purge-messages --yes, #1475). Same refusal/error surfacing as
+/// agmsg_delete_team.
+#[tauri::command]
+pub fn agmsg_purge_team_messages(team: String) -> Result<(), String> {
+    run_script("team.sh", &[&team, "--purge-messages", "--yes"]).map(|_| ())
+}
+
+/// Delete a team even though members remain, removing them all first
+/// (team.sh --delete --force --yes, #1493; --purge-messages stays an
+/// independent flag). Confirmed core CLI shape as of this writing (branch
+/// fix-1493-delete-force, not yet merged pending final review). Only
+/// reachable in the UI after a plain agmsg_delete_team has already failed
+/// with the members-remain refusal.
+#[tauri::command]
+pub fn agmsg_delete_team_force(team: String, purge_messages: bool) -> Result<(), String> {
+    let mut args = vec![team.as_str(), "--delete", "--force", "--yes"];
+    if purge_messages {
+        args.push("--purge-messages");
+    }
+    run_script("team.sh", &args).map(|_| ())
+}
+
 /// The actual delivery mode for (agent_type, project): "monitor", "turn",
 /// "both", or "off". Shells out to `delivery.sh status` — agmsg's own
 /// source of truth (it derives the mode from the project's hooks file,

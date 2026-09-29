@@ -108,6 +108,10 @@ _agmsg_team_delete_rm_family() {   # <team> <name> <prefix> <suffix> [rm_reclaim
 # it is not addressable here -- and killing a LIVE watcher's pidfile out
 # from under it is exactly the class of danger #1470 ruled unsafe. A stale
 # watcher for a deleted team finds nothing on its next poll and is harmless.
+#
+# --delete --force (#1493) does not call leave.sh per member before this
+# runs -- the config/journal this reads from is still the untouched original,
+# so no extra name list needs to be threaded in from the caller.
 agmsg_team_delete_run_records() {
   local team="$1" team_dir="$2" config="$3" name t a
   while IFS= read -r name; do
