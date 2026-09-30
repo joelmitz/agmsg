@@ -330,14 +330,14 @@ setTimeout(() => {
 EOF
 }
 
-# 隔離launcherだけの分岐trace。native PIDの操作や通常profileには触れない。
+# 全コマンドtraceは診断再実行時だけ有効にし、通常観測の負荷と分離する。
 fixture_trace_init() {
   cat > "$RUN_DIR/fixture-bash-env" <<'EOF'
 case "$0" in
   "$LAUNCHER")
     PS4='+ fixture pid=$$ clock=${EPOCHREALTIME:-$SECONDS} '
     exec 2>> "$RUN_DIR/launcher-decisions.trace"
-    set -x
+    [ "${AGMSG_TEST_FULL_TRACE:-0}" != 1 ] || set -x
     ;;
 esac
 EOF
@@ -1746,7 +1746,16 @@ _load_role_binding_functions() {
   export TEST_BINDING_SWAP_FLAG="$RUN_DIR/binding-swap-once"
   # argv採取後のspawn gateで更新を挟み、実launcherの再評価を検査する。
   awk '
+    /^    exec "\$0"/ {
+      print "    printf \"binding-reexec pid=%s clock=%s thread=%s\\n\" \"$$\" \"${EPOCHREALTIME:-$SECONDS}\" \"$ROLE_BINDING_SESSION\" >> \"$RUN_DIR/fixture-events.log\""
+    }
     { print }
+    /^  if ! _role_binding_spawn_unchanged/ {
+      print "    printf \"spawn-rejected pid=%s clock=%s thread=%s\\n\" \"$$\" \"${EPOCHREALTIME:-$SECONDS}\" \"$thread_id\" >> \"$RUN_DIR/fixture-events.log\""
+    }
+    /^  ROLE_BINDING_SNAPSHOT="\$binding_candidate"/ {
+      print "  printf \"spawn-accepted pid=%s clock=%s thread=%s\\n\" \"$$\" \"${EPOCHREALTIME:-$SECONDS}\" \"$thread_id\" >> \"$RUN_DIR/fixture-events.log\""
+    }
     /^_spawn_rate_ok\(\) \{/ {
       print "  printf \"gate pid=%s clock=%s\\n\" \"$$\" \"${EPOCHREALTIME:-$SECONDS}\" >> \"$RUN_DIR/fixture-events.log\""
       print "  if [ ! -e \"$TEST_BINDING_SWAP_FLAG\" ]; then"
@@ -1761,6 +1770,11 @@ _load_role_binding_functions() {
   assert_capture
   grep -Fq -- '--thread updated' "$CAPTURE"
   refute grep -Fq -- '--thread original' "$CAPTURE"
+  grep -Eq '^spawn-rejected .* thread=original$' "$RUN_DIR/fixture-events.log"
+  grep -Eq '^binding-reexec .* thread=updated$' "$RUN_DIR/fixture-events.log"
+  grep -Eq '^spawn-accepted .* thread=updated$' "$RUN_DIR/fixture-events.log"
+  refute grep -Eq '^spawn-accepted .* thread=original$' "$RUN_DIR/fixture-events.log"
+  cat "$RUN_DIR/fixture-events.log" >&3
 }
 
 @test "launcher: lease acceptance waits for delayed publication and rejects a foreign project" {
