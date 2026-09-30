@@ -155,8 +155,19 @@ teardown() {
       sleep 0.1
     done
     [ -z "${NATIVE_PARENT:-}" ] || kill "$NATIVE_PARENT" 2>/dev/null || true
-    [ -z "${NATIVE_DISPATCHER:-}" ] || wait "$NATIVE_DISPATCHER" 2>/dev/null || true
-    sleep 1
+    local native_failed=0
+    if [ "$finished" -lt "$started" ]; then
+      native_failed=1
+      _report_launcher_failure "native fixture exit remains unproved after 45 seconds"
+    fi
+    if [ -n "${NATIVE_DISPATCHER:-}" ] && ! _wait_launcher_pid_bounded "$NATIVE_DISPATCHER" 100; then
+      native_failed=1
+      _report_launcher_failure "native dispatcher exit remains unproved"
+    fi
+    if [ "$native_failed" = 1 ] || [ "${LAUNCHER_FAILURE:-0}" = 1 ]; then
+      printf 'native fixture artifacts preserved at %s\n' "$TEST_SKILL_DIR" >&2
+      return 1
+    fi
     teardown_test_env
     return
   fi
@@ -247,6 +258,7 @@ setup_native_bridge_fixture() {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const run = path.resolve(__dirname, '../../../../run');
 const pid = process.pid;
@@ -268,7 +280,7 @@ setTimeout(() => {
   const body = [
     'v=1',
     `project=${process.env.NATIVE_FIXTURE_MODE === 'mismatch' ? '0'.repeat(40) : process.env.NATIVE_PROJECT_HASH}`,
-    `pairs=${process.env.NATIVE_PAIRS_HASH}`,
+    `pairs=${crypto.createHash("sha1").update(crypto.createHash("sha1").update(`${team}\t${agent}`).digest("hex")).digest("hex")}`,
     `host=${os.hostname()}`,
     `pid=${pid}`,
     `start=${start}`,
@@ -726,7 +738,7 @@ wait_for_dispatcher_lock_owner() {
   # looping has to be picked up anyway.
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=20
-  sleep 25 3>&- & local parent=$!
+  sleep 65 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
   local dispatcher=$!
   local i
@@ -1458,4 +1470,117 @@ _run_safe_stop_bounded() {
   [ "$status" -ne 0 ]
   POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 wrong-thread
   [ "$status" -ne 0 ]
+}
+
+_load_role_binding_functions() {
+  source "$SCRIPTS/lib/hash.sh"
+  source "$SCRIPTS/lib/role-session.sh"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  SCRIPT_DIR="$(dirname "$LAUNCHER")"; PROJECT="$PROJ"; TYPE=codex; TAB=$'\t'; ROLE_PAIR=$'team\talice'
+  eval "$(sed -n '/^_role_binding_read() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
+  put_record team alice original "$PROJ" codex
+  _role_binding_read
+  ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
+}
+
+@test "launcher: role binding ignores other-pair invalid missing and legacy requests" {
+  _load_role_binding_functions
+  local request="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  printf 'codex\tbob-thread\tws://127.0.0.1:1\tteam\tbob\n' > "$request"
+  refute _windows_role_change_confirmed
+  printf 'malformed\n' > "$request"
+  refute _windows_role_change_confirmed
+  printf 'codex\tlegacy\tws://127.0.0.1:1\n' > "$request"
+  refute _windows_role_change_confirmed
+  rm "$request"
+  refute _windows_role_change_confirmed
+}
+
+@test "launcher: role binding confirms own thread project home owner and registration changes" {
+  _load_role_binding_functions
+  _agmsg_role_session_path_into team alice
+  local record="$_AGMSG_ROLE_SESSION_PATH" field value baseline
+  baseline="$(cat "$record")"
+  for field in session project codex_home owner; do
+    value=changed
+    if [ "$field" = project ]; then value="$PROJ/other"; mkdir -p "$value"; fi
+    printf '%s\n' "$baseline" | sed "/^$field=/d" > "$record"
+    printf '%s=%s\n' "$field" "$value" >> "$record"
+    _windows_role_change_confirmed
+    printf '%s\n' "$baseline" > "$record"
+  done
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  _windows_role_change_confirmed
+}
+
+@test "launcher: role binding read failure and malformed record never prove retirement" {
+  _load_role_binding_functions
+  _agmsg_role_session_path_into team alice
+  local record="$_AGMSG_ROLE_SESSION_PATH" original
+  original="$(cat "$record")"
+  printf 'project=%s\n' "$PROJ" > "$record"
+  refute _windows_role_change_confirmed
+  rm "$record"
+  refute _windows_role_change_confirmed
+  printf '%s\n' "$original" > "$record"
+  # 成功した空の登録結果と、コマンドの失敗を区別する。
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$SCRIPTS/identities.sh"
+  refute _windows_role_change_confirmed
+}
+
+@test "launcher: native teardown failure preserves fixture instead of claiming cleanup" {
+  : > "$RUN_DIR/native-exits"
+  printf '123\n' > "$RUN_DIR/native-spawns"
+  _native_teardown_failure_probe() {
+    NATIVE_BRIDGE_FIXTURE=1; NATIVE_PARENT=""; NATIVE_DISPATCHER=123
+    sleep() { :; }
+    _wait_launcher_pid_bounded() { return 1; }
+    teardown_test_env() { echo unexpected-cleanup; }
+    teardown
+  }
+  run _native_teardown_failure_probe
+  [ "$status" -ne 0 ]
+  grep -Fq "artifacts preserved" <<< "$output"
+  [[ "$output" != *"unexpected-cleanup"* ]]
+}
+
+@test "launcher: custom multi-role request for bob does not retire alice" {
+  put_record team alice thread-alice "$PROJ" codex
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export MOCK_BRIDGE_SLEEP=60
+  sleep 65 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$parent" >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- & local dispatcher=$!
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ] && [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ] && break
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ]
+  [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ]
+  local alice_pid bob_pid
+  alice_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  bob_pid="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  sleep 1
+  kill -0 "$alice_pid"
+  kill -0 "$bob_pid"
+  kill "$dispatcher" "$parent" 2>/dev/null || true
+}
+
+@test "launcher: native multi-role request for bob does not retire alice" {
+  skip_unless_windows "requires Git Bash native leases"
+  setup_native_bridge_fixture
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 2
+  sleep 3
+  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  sleep 1
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
 }

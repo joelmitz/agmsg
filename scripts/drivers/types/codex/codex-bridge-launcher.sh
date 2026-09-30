@@ -264,6 +264,8 @@ build_safety_state() {
   if [ -f "$REQUEST_FILE" ]; then
     IFS= read -r request < "$REQUEST_FILE" 2>/dev/null || true
   fi
+  # role childでは共有requestの変化を退役判定から外す。
+  if [ -n "$ROLE_PAIR" ]; then request=""; fi
   SAFETY_STATE="request=$request"
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
@@ -782,18 +784,54 @@ _windows_current_bridge_valid() {
   [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
 }
 
+# このchild自身の登録とbindingだけを観測する。共有requestは別roleの
+# SessionStartでも更新されるため、退役の根拠にしない。
+_role_binding_read() {
+  local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
+  local nsession=0 nproject=0 nhome=0 nowner=0
+  ROLE_BINDING_CURRENT=""
+  rows="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null)" || return 1
+  while IFS="$TAB" read -r row_team row_name extra; do
+    [ "$row_team$TAB$row_name" != "$ROLE_PAIR" ] || found=1
+  done <<EOF
+$rows
+EOF
+  if [ "$found" = 0 ]; then ROLE_BINDING_CURRENT=ABSENT; return 0; fi
+  IFS="$TAB" read -r team name <<EOF
+$ROLE_PAIR
+EOF
+  _agmsg_role_session_path_into "$team" "$name" || return 1
+  [ -f "$_AGMSG_ROLE_SESSION_PATH" ] && [ -r "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  text="$(cat "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      session=*) session="${line#session=}"; nsession=$((nsession + 1)) ;;
+      project=*) project="${line#project=}"; nproject=$((nproject + 1)) ;;
+      codex_home=*) home="${line#codex_home=}"; nhome=$((nhome + 1)) ;;
+      owner=*) owner="${line#owner=}"; nowner=$((nowner + 1)) ;;
+    esac
+  done <<EOF
+$text
+EOF
+  [ "$nsession" = 1 ] && [ "$nproject" = 1 ] && [ "$nhome" -le 1 ] && [ "$nowner" -le 1 ] || return 1
+  [ -n "$session" ] && [ -n "$project" ] || return 1
+  project="$(agmsg_canonical_path "$project" 2>/dev/null)" || return 1
+  ROLE_BINDING_CURRENT="$(printf '%s\0' "$session" "$project" "$home" "$owner" | agmsg_sha1)" || return 1
+  [ -n "$ROLE_BINDING_CURRENT" ]
+}
+
 _windows_role_changed_once() {
-  local ids
-  ids="$(resolve_identity)" || return 1
-  [ "$ids" != "$ROLE_PAIR" ] && return 0
-  read_seat_request || return 1
-  [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]
+  _role_binding_read || return 1
+  [ "$ROLE_BINDING_CURRENT" != "$ROLE_BINDING_SNAPSHOT" ]
 }
 
 _windows_role_change_confirmed() {
+  local first
   _windows_role_changed_once || return 1
+  first="$ROLE_BINDING_CURRENT"
   sleep 0.3
-  _windows_role_changed_once
+  _windows_role_changed_once || return 1
+  [ "$ROLE_BINDING_CURRENT" = "$first" ]
 }
 
 _windows_retire_published_bridge() {
@@ -852,14 +890,13 @@ retire_recorded_bridge() {
   kill "$old_pid" 2>/dev/null || true
 }
 
+ROLE_BINDING_SNAPSHOT=""
+_role_binding_read && ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
-  # Resolved once per iteration and threaded through the fingerprint, so a tick
-  # runs identities.sh once rather than twice — and usually not at all, because
-  # the resolve is served from the mtime-guarded cache.
-  refresh_identity_cache
-  current_ids="$IDENTITY_CACHE"
-  [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+  # 不確定な登録/record読取を空の登録とみなさない。
+  if ! _role_binding_read; then poll_sleep; continue; fi
+  if [ "$ROLE_BINDING_CURRENT" = ABSENT ]; then current_ids=""; else current_ids="$ROLE_PAIR"; fi
   # This child is scoped to one role (`resolve_identity` filters on ROLE_PAIR),
   # so an empty list means the role itself is gone. Nothing upstream retires a
   # child: losing the registration only sends it back through the re-exec, whose
@@ -886,6 +923,8 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # so the new role is actually subscribed instead of being stranded.
   build_safety_state "$current_ids"
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
+    # 完成lease公開後の通常loopでも、同じ変更を2回確認する。
+    if ! _windows_role_change_confirmed; then poll_sleep; continue; fi
     if ! retire_recorded_bridge; then
       poll_sleep
       continue
@@ -1052,6 +1091,12 @@ EOF
   rm -f "$pidfile" "$appserver_file" "$thread_file"
   bridge_owner_args=(--owner "$rec_owner")
 
+  # 読取失敗・欠損recordではspawnしない。公開待ち中もこのbindingを基準にする。
+  if ! _role_binding_read || [ "$ROLE_BINDING_CURRENT" = ABSENT ]; then
+    poll_sleep
+    continue
+  fi
+  ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --workspace-root "$STORAGE_DIR" \
@@ -1072,28 +1117,10 @@ EOF
     printf '%s\n' "$launched_pid" > "$pidfile"
   fi
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
-    # A custom bridge is foregrounded by the test harness, so a plain wait
-    # would hide a role change until the bridge exits on its own. Poll the
-    # request while it runs and retire this exact leased bridge when the seat
-    # selects another pair; the normal outer loop handles the same transition
-    # for the default bridge, which is not waited on here.
+    # 同じroleのbinding変更だけを確認する。別pairや不正requestは退役理由にしない。
     while _agmsg_pid_alive_local "$launched_pid"; do
-      _bridge_request_pair=""
-      if [ -f "$REQUEST_FILE" ]; then
-        _bridge_request_line=""
-        IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null || true
-        _agmsg_codex_request_parse "$_bridge_request_line" || true
-        _bridge_req_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
-        _bridge_req_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
-        _bridge_req_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
-        _bridge_req_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
-        _bridge_req_name="${AGMSG_CODEX_REQUEST_NAME:-}"
-        if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
-          _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
-        fi
-      fi
-      if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
-        retire_recorded_bridge
+      if _windows_role_change_confirmed; then
+        retire_recorded_bridge || true
       fi
       sleep 0.2
     done
@@ -1129,7 +1156,7 @@ EOF
         while _agmsg_pid_alive_local "$PARENT_PID"; do
           if _windows_retire_published_bridge "$published_pid" "$published_start" \
             "$req_app_server" "$thread_id"; then
-            exit 0
+            exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
           fi
           sleep 1
         done
@@ -1150,7 +1177,7 @@ EOF
             published_start="$lstart"
             if _windows_retire_published_bridge "$published_pid" "$published_start" \
               "$req_app_server" "$thread_id"; then
-              exit 0
+              exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
             fi
           fi
         fi
