@@ -944,7 +944,6 @@ EOF
 # Nodeはprobe完了まで保持し、専用stopファイルで自発終了する。
 # native PIDへMSYS killを渡さない。失敗時もteardownから同じ終了確認を行う。
 setup_native_pid_probe() {
-  export PID_PROBE_FIXTURE=1
   cat > "$RUN_DIR/native-pid-probe.js" <<'EOF'
 const fs = require('fs');
 const path = require('path');
@@ -965,7 +964,9 @@ const timer = setInterval(() => {
   clearInterval(timer);
 }, 100);
 EOF
-  cat > "$RUN_DIR/native-pid-probe-cleanup.ps1" <<'EOF'
+  # PS5.1の既定文字コードでもUTF-8と判別できるBOMを明示する。
+  printf '\357\273\277' > "$RUN_DIR/native-pid-probe-cleanup.ps1"
+  cat >> "$RUN_DIR/native-pid-probe-cleanup.ps1" <<'EOF'
 param([string]$ProbeRoot)
 $ErrorActionPreference = 'Stop'
 $identity = Get-Content -LiteralPath (Join-Path $ProbeRoot 'native-pid-probe.json') -Raw | ConvertFrom-Json
@@ -978,7 +979,7 @@ if ($null -ne $process) {
     throw 'PID probe identity changed before cleanup'
   }
 }
-# 固有のfixture rootにあるstopだけを書き、PIDへの停止操作は行わない。
+# Request self-exit through this fixture root only; never signal a PID.
 [System.IO.File]::WriteAllText((Join-Path $ProbeRoot 'native-pid-probe.stop'), 'stop')
 if ($null -ne $process -and -not $process.WaitForExit(300000)) {
   throw 'PID probe did not exit within 300 seconds'
@@ -995,6 +996,34 @@ if ($null -ne $after -and $after.StartTime.Ticks.ToString() -ceq [string]$identi
 }
 Write-Output "PID_PROBE_EXIT_CONFIRMED pid=$($identity.pid) start=$($identity.start)"
 EOF
+  cat > "$RUN_DIR/native-pid-probe-parser.ps1" <<'EOF'
+param([string]$Target)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'PID probe cleanup parse errors' }
+$write = @($ast.FindAll({ param($n)
+  $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+  $n.Member.Value -ceq 'WriteAllText' -and
+  $n.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+  $n.Expression.TypeName.FullName -ceq 'System.IO.File'
+}, $true))
+if ($write.Count -ne 1) { throw 'PID probe cleanup WriteAllText AST missing or ambiguous' }
+$commands = @($ast.FindAll({ param($n)
+  $n -is [System.Management.Automation.Language.CommandAst] -and
+  $n.GetCommandName() -ceq 'Write-Output'
+}, $true))
+if ($commands.Count -ne 1) { throw 'PID probe cleanup confirmation CommandAst missing or ambiguous' }
+Write-Output 'PID_PROBE_AST_CONFIRMED errors=0 WriteAllText=1 Write-Output=1'
+EOF
+  if ! powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+    "$(cygpath -w "$RUN_DIR/native-pid-probe-parser.ps1")" \
+    -Target "$(cygpath -w "$RUN_DIR/native-pid-probe-cleanup.ps1")" >> "$RUN_DIR/fixture-events.log" 2>&1; then
+    _report_launcher_failure "PS5.1 cleanup AST validation failed before Node startup"
+    return 1
+  fi
+  export PID_PROBE_FIXTURE=1
   node "$RUN_DIR/native-pid-probe.js" > "$RUN_DIR/native-pid-probe" 2> "$RUN_DIR/native-pid-probe.stderr" 3>&- &
   PID_PROBE_LOCAL_PID=$!
 }
