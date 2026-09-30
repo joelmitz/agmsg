@@ -247,33 +247,6 @@ poll_sleep() {
   return 0
 }
 
-# Any change here can change the safe subscription set. Include the request
-# thread, owner, and each role's recorded project, not merely registrations:
-# actas/resume rewrites a role record without changing identities.sh output.
-# $1 is this tick's already-resolved identity list. It is passed in rather than
-# re-resolved so one iteration runs identities.sh once, not twice.
-#
-# Assigns to SAFETY_STATE instead of printing, and reads the roles with a
-# herestring rather than a pipeline, so the whole thing runs in the caller's
-# shell. Both matter: agmsg_role_session_load memoizes the record path, and a
-# memo written inside a command substitution or a pipeline subshell is
-# discarded the moment it is useful.
-build_safety_state() {
-  local identity="$1"
-  local request="" team name
-  if [ -f "$REQUEST_FILE" ]; then
-    IFS= read -r request < "$REQUEST_FILE" 2>/dev/null || true
-  fi
-  # role childでは共有requestの変化を退役判定から外す。
-  if [ -n "$ROLE_PAIR" ]; then request=""; fi
-  SAFETY_STATE="request=$request"
-  while IFS="$TAB" read -r team name; do
-    [ -n "$team" ] || continue
-    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER$TAB$AGMSG_ROLE_SESSION_CODEX_HOME"
-  done <<< "$identity"
-}
-
 # actas may register the role a moment after launch, so retry while the parent
 # (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
 # The parent only dispatches. Every role receives an independent child launcher
@@ -342,8 +315,6 @@ while _agmsg_pid_alive_local "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
-build_safety_state "$ids"
-safety_state="$SAFETY_STATE"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -790,6 +761,7 @@ _role_binding_read() {
   local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
   local nsession=0 nproject=0 nhome=0 nowner=0
   ROLE_BINDING_CURRENT=""
+  ROLE_BINDING_SESSION=""; ROLE_BINDING_PROJECT=""; ROLE_BINDING_HOME=""; ROLE_BINDING_OWNER=""
   rows="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null)" || return 1
   while IFS="$TAB" read -r row_team row_name extra; do
     [ "$row_team$TAB$row_name" != "$ROLE_PAIR" ] || found=1
@@ -816,8 +788,18 @@ EOF
   [ "$nsession" = 1 ] && [ "$nproject" = 1 ] && [ "$nhome" -le 1 ] && [ "$nowner" -le 1 ] || return 1
   [ -n "$session" ] && [ -n "$project" ] || return 1
   project="$(agmsg_canonical_path "$project" 2>/dev/null)" || return 1
+  ROLE_BINDING_SESSION="$session"; ROLE_BINDING_PROJECT="$project"
+  ROLE_BINDING_HOME="$home"; ROLE_BINDING_OWNER="$owner"
   ROLE_BINDING_CURRENT="$(printf '%s\0' "$session" "$project" "$home" "$owner" | agmsg_sha1)" || return 1
   [ -n "$ROLE_BINDING_CURRENT" ]
+}
+
+# argvを採取したdescriptorと直前読取が一致する場合だけspawnを許す。
+# 不一致やUNKNOWNでは既存metadataを変更せず、次tickで再評価する。
+_role_binding_spawn_unchanged() {
+  local candidate="$1"
+  _role_binding_read || return 1
+  [ "$ROLE_BINDING_CURRENT" != ABSENT ] && [ "$ROLE_BINDING_CURRENT" = "$candidate" ]
 }
 
 _windows_role_changed_once() {
@@ -921,8 +903,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  build_safety_state "$current_ids"
-  if [ "$SAFETY_STATE" != "$safety_state" ]; then
+  if [ "$ROLE_BINDING_CURRENT" != "$ROLE_BINDING_SNAPSHOT" ]; then
     # 完成lease公開後の通常loopでも、同じ変更を2回確認する。
     if ! _windows_role_change_confirmed; then poll_sleep; continue; fi
     if ! retire_recorded_bridge; then
@@ -931,34 +912,13 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     fi
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
-  # Resolve the thread this iteration would launch against. A request file may
-  # outlive the app-server that wrote it: SessionStart deliberately exits before
-  # rewriting the request when no recorded role belongs to the new thread, and
-  # actas records the role later without rewriting this project-wide file. The
-  # launcher's APP_SERVER argument, however, comes from the live app-server that
-  # owns this launcher generation, so it is the sole endpoint authority. Keep the
-  # request's thread hint for older Codex versions, but never let its stale URL
-  # override the live launcher's endpoint.
-  thread_id="loaded"
+  # spawn引数とsnapshotは成功した同一record読取から作る。
+  binding_candidate="$ROLE_BINDING_CURRENT"
+  rec_thread="$ROLE_BINDING_SESSION"
+  rec_project_phys="$ROLE_BINDING_PROJECT"
+  rec_home="$ROLE_BINDING_HOME"
+  rec_owner="$ROLE_BINDING_OWNER"
   req_app_server="$APP_SERVER"
-  if [ -f "$REQUEST_FILE" ]; then
-    _rtype=""; _rthread=""; _rapp=""
-    IFS="$TAB" read -r _rtype _rthread _rapp < "$REQUEST_FILE" 2>/dev/null || true
-    [ -n "${_rthread:-}" ] && thread_id="$_rthread"
-  fi
-
-  # A child launcher is role-scoped. The project request file only supplies a
-  # current app-server endpoint; its thread belongs to whichever role most
-  # recently fired SessionStart and must never override this role's seat.
-  IFS="$TAB" read -r team name <<EOF
-$ids
-EOF
-  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-  rec_thread="$AGMSG_ROLE_SESSION_UUID"
-  rec_project="$AGMSG_ROLE_SESSION_PROJECT"
-  rec_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
-  rec_owner="$AGMSG_ROLE_SESSION_OWNER"
-  rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] || ! agmsg_codex_role_home_matches "$rec_home"; then
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That
@@ -1086,17 +1046,14 @@ EOF
     fi
     fi
   fi
-  # Committed to spawning now: clear the stale records immediately before writing
-  # the new ones, so no gate can bail out between the wipe and the rewrite.
-  rm -f "$pidfile" "$appserver_file" "$thread_file"
-  bridge_owner_args=(--owner "$rec_owner")
-
-  # 読取失敗・欠損recordではspawnしない。公開待ち中もこのbindingを基準にする。
-  if ! _role_binding_read || [ "$ROLE_BINDING_CURRENT" = ABSENT ]; then
+  if ! _role_binding_spawn_unchanged "$binding_candidate"; then
     poll_sleep
     continue
   fi
-  ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
+  # 再確認後もargvを採取した世代を保持する。直後の更新は次tickで検出する。
+  ROLE_BINDING_SNAPSHOT="$binding_candidate"
+  rm -f "$pidfile" "$appserver_file" "$thread_file"
+  bridge_owner_args=(--owner "$rec_owner")
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --workspace-root "$STORAGE_DIR" \
@@ -1146,6 +1103,7 @@ EOF
         _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
         published=1
         published_start="$lstart"
+        printf "native-publication accepted pid=%s project=%s pairs=%s\n" "$published_pid" "$lproj" "$lpairs" >> "$log"
         break
       fi
       sleep 0.1

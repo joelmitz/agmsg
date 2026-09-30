@@ -4,6 +4,7 @@ load test_helper
 
 setup() {
   setup_test_env
+  export SKILL_DIR="$TEST_SKILL_DIR"
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
@@ -166,6 +167,7 @@ EOF
   posix="$project"
   source "$SCRIPTS/lib/resolve-project.sh"
   expected="$(agmsg_normalize_project_path "$posix" | tr '\\' '/' | sha1sum | cut -c1-40)"
+  [ -n "$expected" ]
   actual="$(node -e 'const c=require("crypto"),p=require("path"),{projectIdentityPath}=require(process.argv[1]); process.stdout.write(c.createHash("sha1").update(projectIdentityPath(p.resolve(process.argv[2]))).digest("hex"))' "$TYPES/codex/codex-bridge.js" "$native")"
   if [ "$actual" != "$expected" ]; then
     printf 'project=%s native=%s actual=%s expected=%s\n' "$posix" "$native" "$actual" "$expected"

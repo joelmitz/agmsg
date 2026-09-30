@@ -250,7 +250,9 @@ setup_native_bridge_fixture() {
   : > "$RUN_DIR/native-exits"
   export AGMSG_NODE="$(command -v node)"
   source "$SCRIPTS/lib/hash.sh"
+  source "$SCRIPTS/lib/resolve-project.sh"
   export NATIVE_PROJECT_HASH="$(agmsg_normalize_project_path "$PROJ" | tr '\\' '/' | agmsg_sha1)"
+  [ -n "$NATIVE_PROJECT_HASH" ]
   local pair_hash
   pair_hash="$(printf 'team\talice' | agmsg_sha1)"
   export NATIVE_PAIRS_HASH="$(printf '%s' "$pair_hash" | agmsg_sha1)"
@@ -318,6 +320,17 @@ start_native_launcher() {
   NATIVE_DISPATCHER=$!
 }
 
+assert_native_publication_accepted() {
+  local pid="$1" i
+  grep -Fq "project=$NATIVE_PROJECT_HASH" "$RUN_DIR/codex-bridge-lease.$pid"
+  for i in {1..300}; do
+    if grep -Fq "native-publication accepted pid=$pid project=$NATIVE_PROJECT_HASH " "$RUN_DIR"/*.log 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  echo "native lease acceptance unproved for PID $pid" >&2
+  return 1
+}
+
 wait_for_native_spawns() {
   local want="$1" i count
   for i in {1..200}; do
@@ -353,6 +366,7 @@ write_request() {
 # arbitrary Windows pid.
 write_seat_record_fixture() {
   source "$SCRIPTS/lib/hash.sh"
+  source "$SCRIPTS/lib/resolve-project.sh"
   _agmsg_codex_seat_record_write \
     "$(_agmsg_codex_seat_record_path "$RUN_DIR" "$AGMSG_CODEX_SEAT_KEY")" \
     "$(agmsg_normalize_project_path "$PROJ" | tr '\\' '/' | agmsg_sha1)" "$$" "1" "" "" "codex-test"
@@ -367,7 +381,7 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
   sleep 30 3>&- & local parent=$!
   env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" \
     >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- &
-  local dispatcher=$! seen=0 i
+  local dispatcher=$! seen=0 i started_seconds=$SECONDS
   i=0
   while [ "$i" -lt 200 ]; do
     if [ -f "$CAPTURE" ]; then seen=1; break; fi
@@ -388,7 +402,7 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
   fi
   wait "$dispatcher" 2>/dev/null || true
   if [ "$seen" -ne 1 ]; then
-    _report_launcher_failure "CAPTURE was not created within 20 seconds"
+    _report_launcher_failure "CAPTURE was not created within 20 seconds (elapsed=$((SECONDS - started_seconds)) seconds)"
     return 1
   fi
   return 0
@@ -842,6 +856,7 @@ wait_for_dispatcher_lock_owner() {
   done
   [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$native_pid" ]
+  assert_native_publication_accepted "$native_pid"
   sleep 3
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
 }
@@ -888,6 +903,7 @@ wait_for_dispatcher_lock_owner() {
   setup_native_bridge_fixture
   export NATIVE_PUBLISH_DELAY_MS=2500
   put_record team alice thread-transient "$PROJ" codex
+  write_request thread-transient
   start_native_launcher
   wait_for_native_spawns 1
   local native_pid i request_file
@@ -1477,7 +1493,7 @@ _load_role_binding_functions() {
   source "$SCRIPTS/lib/role-session.sh"
   source "$SCRIPTS/lib/resolve-project.sh"
   SCRIPT_DIR="$(dirname "$LAUNCHER")"; PROJECT="$PROJ"; TYPE=codex; TAB=$'\t'; ROLE_PAIR=$'team\talice'
-  eval "$(sed -n '/^_role_binding_read() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
+  eval "$(sed -n '/^_role_binding_read() {/,/^}/p;/^_role_binding_spawn_unchanged() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
   put_record team alice original "$PROJ" codex
   _role_binding_read
   ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
@@ -1578,9 +1594,56 @@ _load_role_binding_functions() {
   put_record team bob thread-bob "$PROJ" codex
   start_native_launcher
   wait_for_native_spawns 2
+  local pid
+  while IFS= read -r pid; do assert_native_publication_accepted "$pid"; done < "$RUN_DIR/native-spawns"
   sleep 3
   printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   sleep 1
   [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
+}
+
+@test "launcher: binding update between argv capture and spawn rejects stale descriptor" {
+  _load_role_binding_functions
+  local candidate="$ROLE_BINDING_CURRENT" captured_thread="$ROLE_BINDING_SESSION"
+  put_record team alice updated "$PROJ" codex
+  refute _role_binding_spawn_unchanged "$candidate"
+  [ "$ROLE_BINDING_SNAPSHOT" = "$candidate" ]
+  [ "$captured_thread" = original ]
+  [ "$ROLE_BINDING_SESSION" = updated ]
+  # 新世代を再採取した後は同じdescriptorだけを受理する。
+  candidate="$ROLE_BINDING_CURRENT"
+  _role_binding_spawn_unchanged "$candidate"
+}
+
+@test "launcher: equivalent project spelling keeps the same binding descriptor" {
+  _load_role_binding_functions
+  local candidate="$ROLE_BINDING_CURRENT"
+  put_record team alice original "$PROJ/./" codex
+  _role_binding_spawn_unchanged "$candidate"
+  refute _windows_role_change_confirmed
+}
+
+@test "launcher: record update during spawn gate never starts the old thread" {
+  put_record team alice original "$PROJ" codex
+  source "$SCRIPTS/lib/role-session.sh"
+  _agmsg_role_session_path_into team alice
+  export TEST_BINDING_RECORD="$_AGMSG_ROLE_SESSION_PATH"
+  export TEST_BINDING_SWAP_FLAG="$RUN_DIR/binding-swap-once"
+  # argv採取後のspawn gateで更新を挟み、実launcherの再評価を検査する。
+  awk '
+    { print }
+    /^_spawn_rate_ok\(\) \{/ {
+      print "  if [ ! -e \"$TEST_BINDING_SWAP_FLAG\" ]; then"
+      print "    agmsg_role_session_record team alice updated \"$PROJ\" codex"
+      print "    : > \"$TEST_BINDING_SWAP_FLAG\""
+      print "  fi"
+    }
+  ' "$LAUNCHER" > "$LAUNCHER.patched"
+  mv "$LAUNCHER.patched" "$LAUNCHER"
+  chmod +x "$LAUNCHER"
+  run_launcher_until_capture
+  assert_capture
+  grep -Fq -- '--thread updated' "$CAPTURE"
+  refute grep -Fq -- '--thread original' "$CAPTURE"
 }
