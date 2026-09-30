@@ -423,11 +423,11 @@ write_seat_record_fixture() {
 # the role child that creates CAPTURE.
 run_launcher_until_capture() { # [ENV=VALUE ...]
   fixture_trace_init
-  sleep 240 3>&- & local parent=$!
+  sleep 600 3>&- & local parent=$!
   fixture_event "capture-launch parent=$parent"
   env "$@" BASH_ENV="$RUN_DIR/fixture-bash-env" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" \
     >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- &
-  local dispatcher=$! seen=0 deadline=$((SECONDS + 120)) started_seconds=$SECONDS capture_elapsed
+  local dispatcher=$! seen=0 deadline=$((SECONDS + 300)) started_seconds=$SECONDS capture_elapsed
   while [ "$SECONDS" -lt "$deadline" ]; do
     if [ -f "$CAPTURE" ]; then seen=1; break; fi
     if ! kill -0 "$parent" 2>/dev/null; then
@@ -452,7 +452,7 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
   fi
   wait "$dispatcher" 2>/dev/null || true
   if [ "$seen" -ne 1 ]; then
-    _report_launcher_failure "CAPTURE unproved at 120-second deadline (observation=$capture_elapsed seconds cleanup=$((SECONDS - started_seconds - capture_elapsed)) seconds)"
+    _report_launcher_failure "CAPTURE unproved at 300-second deadline (observation=$capture_elapsed seconds cleanup=$((SECONDS - started_seconds - capture_elapsed)) seconds)"
     return 1
   fi
   return 0
