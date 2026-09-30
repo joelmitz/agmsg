@@ -757,6 +757,8 @@ _windows_current_bridge_valid() {
 
 # このchild自身の登録とbindingだけを観測する。共有requestは別roleの
 # SessionStartでも更新されるため、退役の根拠にしない。
+# SessionStartやresumeが共有requestだけを書いた場合、このroleのbindingは
+# 意図的に変えない。ROLE_PAIRのrole-session recordが更新された時点で再bindする。
 _role_binding_read() {
   local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
   local nsession=0 nproject=0 nhome=0 nowner=0
