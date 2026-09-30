@@ -146,6 +146,20 @@ _launcher_bridge_pids() {
 # teardown_test_env's rm -rf from racing a process still touching this test's
 # $TEST_SKILL_DIR (#595/#615).
 teardown() {
+  if [ "${PID_PROBE_FIXTURE:-}" = 1 ]; then
+    if ! cleanup_native_pid_probe; then
+      _report_launcher_failure "native PID probe cleanup unproved"
+      return 1
+    fi
+    if [ "${BATS_TEST_COMPLETED:-}" != 1 ]; then
+      _report_launcher_failure "PID probe assertion failed; cleanup confirmed and evidence retained"
+      cat "$RUN_DIR/pid-probe-events.jsonl" >&2
+      return 1
+    fi
+    [ "${LAUNCHER_FAILURE:-0}" != 1 ] || return 1
+    teardown_test_env
+    return
+  fi
   if [ "${NATIVE_BRIDGE_FIXTURE:-}" = 1 ]; then
     : > "$RUN_DIR/native-fixture-stop"
     local i started=0 finished=0
@@ -927,22 +941,101 @@ EOF
   grep -q -- '--thread thread-win' "$CAPTURE"
 }
 
+# Nodeはprobe完了まで保持し、専用stopファイルで自発終了する。
+# native PIDへMSYS killを渡さない。失敗時もteardownから同じ終了確認を行う。
+setup_native_pid_probe() {
+  export PID_PROBE_FIXTURE=1
+  cat > "$RUN_DIR/native-pid-probe.js" <<'EOF'
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const run = __dirname;
+const event = (name) => fs.appendFileSync(path.join(run, 'pid-probe-events.jsonl'),
+  JSON.stringify({ event: name, pid: process.pid, time: new Date().toISOString() }) + '\n');
+event('node-start');
+const start = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+  `(Get-Process -Id ${process.pid}).StartTime.Ticks`], { encoding: 'utf8' }).trim();
+const identity = { pid: process.pid, start };
+fs.writeFileSync(path.join(run, 'native-pid-probe.json'), JSON.stringify(identity));
+console.log(process.pid);
+const timer = setInterval(() => {
+  if (!fs.existsSync(path.join(run, 'native-pid-probe.stop'))) return;
+  event('node-exit');
+  fs.writeFileSync(path.join(run, 'native-pid-probe.exited.json'), JSON.stringify(identity));
+  clearInterval(timer);
+}, 100);
+EOF
+  cat > "$RUN_DIR/native-pid-probe-cleanup.ps1" <<'EOF'
+param([string]$ProbeRoot)
+$ErrorActionPreference = 'Stop'
+$identity = Get-Content -LiteralPath (Join-Path $ProbeRoot 'native-pid-probe.json') -Raw | ConvertFrom-Json
+$process = $null
+try { $process = [System.Diagnostics.Process]::GetProcessById([int]$identity.pid) }
+catch [System.ArgumentException] { }
+if ($null -ne $process) {
+  if ($process.ProcessName -ne 'node' -or
+      $process.StartTime.Ticks.ToString() -cne [string]$identity.start) {
+    throw 'PID probe identity changed before cleanup'
+  }
+}
+# 固有のfixture rootにあるstopだけを書き、PIDへの停止操作は行わない。
+[System.IO.File]::WriteAllText((Join-Path $ProbeRoot 'native-pid-probe.stop'), 'stop')
+if ($null -ne $process -and -not $process.WaitForExit(300000)) {
+  throw 'PID probe did not exit within 300 seconds'
+}
+$exited = Get-Content -LiteralPath (Join-Path $ProbeRoot 'native-pid-probe.exited.json') -Raw | ConvertFrom-Json
+if ([int]$exited.pid -ne [int]$identity.pid -or [string]$exited.start -cne [string]$identity.start) {
+  throw 'PID probe exit identity mismatch'
+}
+$after = $null
+try { $after = [System.Diagnostics.Process]::GetProcessById([int]$identity.pid) }
+catch [System.ArgumentException] { }
+if ($null -ne $after -and $after.StartTime.Ticks.ToString() -ceq [string]$identity.start) {
+  throw 'Original PID probe remains alive'
+}
+Write-Output "PID_PROBE_EXIT_CONFIRMED pid=$($identity.pid) start=$($identity.start)"
+EOF
+  node "$RUN_DIR/native-pid-probe.js" > "$RUN_DIR/native-pid-probe" 2> "$RUN_DIR/native-pid-probe.stderr" 3>&- &
+  PID_PROBE_LOCAL_PID=$!
+}
+
+cleanup_native_pid_probe() {
+  [ "${PID_PROBE_CLEANED:-0}" != 1 ] || return 0
+  fixture_event 'pid-probe-cleanup-start'
+  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+    "$(cygpath -w "$RUN_DIR/native-pid-probe-cleanup.ps1")" \
+    -ProbeRoot "$(cygpath -w "$RUN_DIR")" >> "$RUN_DIR/fixture-events.log" 2>&1 || return 1
+  _wait_launcher_pid_bounded "$PID_PROBE_LOCAL_PID" 300 || return 1
+  wait "$PID_PROBE_LOCAL_PID" || return 1
+  PID_PROBE_CLEANED=1
+  fixture_event 'pid-probe-cleanup-complete'
+}
+
 @test "launcher: Windows Git Bash background pid differs from native Node pid" {
   skip_unless_windows "requires Git Bash and a native Node"
-  node -e 'console.log(process.pid); setTimeout(() => {}, 1500)' > "$RUN_DIR/native-pid-probe" &
-  local local_pid=$! native_pid="" i
-  for i in {1..50}; do
+  setup_native_pid_probe
+  local native_pid="" deadline=$((SECONDS + 300))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     [ -s "$RUN_DIR/native-pid-probe" ] && break
-    sleep 0.05
+    sleep 0.1
   done
+  [ -s "$RUN_DIR/native-pid-probe" ]
   native_pid="$(tr -d '\r\n' < "$RUN_DIR/native-pid-probe")"
+  fixture_event "pid-probe-start native=$native_pid local=$PID_PROBE_LOCAL_PID"
   [ -n "$native_pid" ]
-  [ "$local_pid" != "$native_pid" ]
+  [ "$PID_PROBE_LOCAL_PID" != "$native_pid" ]
   source "$SCRIPTS/lib/instance-id.sh"
-  _agmsg_pid_alive_local "$local_pid"
-  refute _agmsg_pid_alive "$local_pid"
+  _agmsg_pid_alive_local "$PID_PROBE_LOCAL_PID"
+  refute _agmsg_pid_alive "$PID_PROBE_LOCAL_PID"
   _agmsg_pid_alive "$native_pid"
-  wait "$local_pid"
+  fixture_event "pid-probe-complete native=$native_pid"
+  # 失敗時teardownの終了確認を独立検査する診断用の負例。
+  if [ "${AGMSG_TEST_PID_PROBE_FAIL:-0}" = 1 ]; then
+    fixture_event 'pid-probe-forced-failure'
+    false
+  fi
+  cleanup_native_pid_probe
+  cat "$RUN_DIR/fixture-events.log" "$RUN_DIR/pid-probe-events.jsonl" >&3
 }
 
 @test "launcher: Windows waits for native pidfile and lease without a second spawn" {
