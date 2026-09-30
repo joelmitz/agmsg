@@ -216,6 +216,10 @@ _report_launcher_failure() {
     ps -eo pid=,ppid=,stat=,args= 2>/dev/null | grep -F "$TEST_SKILL_DIR" || true
     printf '%s\n' 'launcher stdout:'
     tail -200 "$LAUNCHER_STDOUT" 2>/dev/null || true
+    printf '%s\n' 'fixture events:'
+    cat "$RUN_DIR/fixture-events.log" 2>/dev/null || true
+    printf '%s\n' 'launcher decisions:'
+    tail -200 "$RUN_DIR/launcher-decisions.trace" 2>/dev/null || true
     printf '%s\n' 'launcher stderr:'
     tail -200 "$LAUNCHER_STDERR" 2>/dev/null || true
   } >&2
@@ -314,20 +318,48 @@ setTimeout(() => {
 EOF
 }
 
+# 隔離launcherだけの分岐trace。native PIDの操作や通常profileには触れない。
+fixture_trace_init() {
+  cat > "$RUN_DIR/fixture-bash-env" <<'EOF'
+case "$0" in
+  "$LAUNCHER")
+    PS4='+ fixture pid=$$ clock=${EPOCHREALTIME:-$SECONDS} '
+    exec 2>> "$RUN_DIR/launcher-decisions.trace"
+    set -x
+    ;;
+esac
+EOF
+}
+
+fixture_event() {
+  printf 'clock=%s pid=%s event=%s\n' "${EPOCHREALTIME:-$SECONDS}" "$$" "$*" >> "$RUN_DIR/fixture-events.log"
+}
+
 start_native_launcher() {
-  sleep 180 3>&- & NATIVE_PARENT=$!
-  bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$NATIVE_PARENT" >/dev/null 2>&1 3>&- &
+  fixture_trace_init
+  sleep 300 3>&- & NATIVE_PARENT=$!
+  fixture_event "native-launch parent=$NATIVE_PARENT"
+  env BASH_ENV="$RUN_DIR/fixture-bash-env" bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$NATIVE_PARENT" >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- &
   NATIVE_DISPATCHER=$!
 }
 
 assert_native_publication_accepted() {
-  local pid="$1" i
-  grep -Fq "project=$NATIVE_PROJECT_HASH" "$RUN_DIR/codex-bridge-lease.$pid"
-  for i in {1..300}; do
-    if grep -Fq "native-publication accepted pid=$pid project=$NATIVE_PROJECT_HASH " "$RUN_DIR"/*.log 2>/dev/null; then return 0; fi
+  local pid="$1" deadline=$((SECONDS + 60)) lease="$RUN_DIR/codex-bridge-lease.$1"
+  fixture_event "lease-wait pid=$pid"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -f "$lease" ]; then
+      if ! grep -Fxq "project=$NATIVE_PROJECT_HASH" "$lease"; then
+        _report_launcher_failure "native lease project mismatch for PID $pid"
+        return 1
+      fi
+      if grep -Fq "native-publication accepted pid=$pid project=$NATIVE_PROJECT_HASH " "$RUN_DIR"/*.log 2>/dev/null; then
+        fixture_event "lease-accepted pid=$pid"
+        return 0
+      fi
+    fi
     sleep 0.1
   done
-  echo "native lease acceptance unproved for PID $pid" >&2
+  _report_launcher_failure "native lease acceptance unproved for PID $pid after 60-second deadline"
   return 1
 }
 
@@ -378,16 +410,22 @@ write_seat_record_fixture() {
 # once the lifetime process exits, the dispatcher is no longer allowed to spawn
 # the role child that creates CAPTURE.
 run_launcher_until_capture() { # [ENV=VALUE ...]
-  sleep 30 3>&- & local parent=$!
-  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" \
+  fixture_trace_init
+  sleep 240 3>&- & local parent=$!
+  fixture_event "capture-launch parent=$parent"
+  env "$@" BASH_ENV="$RUN_DIR/fixture-bash-env" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" \
     >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- &
-  local dispatcher=$! seen=0 i started_seconds=$SECONDS
-  i=0
-  while [ "$i" -lt 200 ]; do
+  local dispatcher=$! seen=0 deadline=$((SECONDS + 120)) started_seconds=$SECONDS capture_elapsed
+  while [ "$SECONDS" -lt "$deadline" ]; do
     if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    if ! kill -0 "$parent" 2>/dev/null; then
+      _report_launcher_failure "capture lifetime exited before observation"
+      break
+    fi
     sleep 0.1
-    i=$((i + 1))
   done
+  capture_elapsed=$((SECONDS - started_seconds))
+  fixture_event "capture-observation seen=$seen elapsed=$capture_elapsed parent=$parent"
   kill "$parent" 2>/dev/null || true
   _wait_launcher_pid_bounded "$parent" 100 || true
   wait "$parent" 2>/dev/null || true
@@ -402,7 +440,7 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
   fi
   wait "$dispatcher" 2>/dev/null || true
   if [ "$seen" -ne 1 ]; then
-    _report_launcher_failure "CAPTURE was not created within 20 seconds (elapsed=$((SECONDS - started_seconds)) seconds)"
+    _report_launcher_failure "CAPTURE unproved at 120-second deadline (observation=$capture_elapsed seconds cleanup=$((SECONDS - started_seconds - capture_elapsed)) seconds)"
     return 1
   fi
   return 0
@@ -938,9 +976,18 @@ wait_for_dispatcher_lock_owner() {
     sleep 0.1
   done
   [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  assert_native_publication_accepted "$native_pid"
   stopfile="$RUN_DIR/codex-bridge-stop.$native_pid"
+  fixture_event "leave-start pid=$native_pid"
   bash "$SCRIPTS/leave.sh" team alice >/dev/null
-  sleep 7
+  fixture_event "leave-complete pid=$native_pid"
+  local stop_deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$stop_deadline" ] && [ ! -f "$stopfile" ]; do sleep 0.1; done
+  if [ ! -f "$stopfile" ]; then
+    _report_launcher_failure "stop request unproved 60 seconds after leave for PID $native_pid"
+    return 1
+  fi
+  fixture_event "stop-observed pid=$native_pid"
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
   source "$SCRIPTS/lib/instance-id.sh"
   _agmsg_pid_alive "$native_pid"
@@ -1625,15 +1672,16 @@ _load_role_binding_functions() {
 }
 
 @test "launcher: record update during spawn gate never starts the old thread" {
+  write_seat_record_fixture
   put_record team alice original "$PROJ" codex
   source "$SCRIPTS/lib/role-session.sh"
   _agmsg_role_session_path_into team alice
-  export TEST_BINDING_RECORD="$_AGMSG_ROLE_SESSION_PATH"
   export TEST_BINDING_SWAP_FLAG="$RUN_DIR/binding-swap-once"
   # argv採取後のspawn gateで更新を挟み、実launcherの再評価を検査する。
   awk '
     { print }
     /^_spawn_rate_ok\(\) \{/ {
+      print "  printf \"gate pid=%s clock=%s\\n\" \"$$\" \"${EPOCHREALTIME:-$SECONDS}\" >> \"$RUN_DIR/fixture-events.log\""
       print "  if [ ! -e \"$TEST_BINDING_SWAP_FLAG\" ]; then"
       print "    agmsg_role_session_record team alice updated \"$PROJ\" codex"
       print "    : > \"$TEST_BINDING_SWAP_FLAG\""
@@ -1646,4 +1694,23 @@ _load_role_binding_functions() {
   assert_capture
   grep -Fq -- '--thread updated' "$CAPTURE"
   refute grep -Fq -- '--thread original' "$CAPTURE"
+}
+
+@test "launcher: lease acceptance waits for delayed publication and rejects a foreign project" {
+  export NATIVE_PROJECT_HASH="$(printf fixture-project | sha1sum | cut -c1-40)"
+  local pid=12345 publisher
+  (
+    sleep 0.2
+    printf 'project=%s\n' "$NATIVE_PROJECT_HASH" > "$RUN_DIR/codex-bridge-lease.$pid.tmp"
+    mv "$RUN_DIR/codex-bridge-lease.$pid.tmp" "$RUN_DIR/codex-bridge-lease.$pid"
+    sleep 0.2
+    printf 'native-publication accepted pid=%s project=%s pairs=fixture\n' "$pid" "$NATIVE_PROJECT_HASH" > "$RUN_DIR/acceptance-fixture.log"
+  ) 3>&- & publisher=$!
+  assert_native_publication_accepted "$pid"
+  wait "$publisher"
+  grep -Fq "lease-accepted pid=$pid" "$RUN_DIR/fixture-events.log"
+  printf 'project=foreign\n' > "$RUN_DIR/codex-bridge-lease.$pid"
+  run assert_native_publication_accepted "$pid"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"native lease project mismatch"* ]]
 }
