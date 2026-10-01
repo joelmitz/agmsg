@@ -1729,7 +1729,16 @@ _load_role_binding_functions() {
   source "$SCRIPTS/lib/role-session.sh"
   source "$SCRIPTS/lib/resolve-project.sh"
   SCRIPT_DIR="$(dirname "$LAUNCHER")"; PROJECT="$PROJ"; TYPE=codex; TAB=$'\t'; ROLE_PAIR=$'team\talice'
-  eval "$(sed -n '/^_role_binding_read() {/,/^}/p;/^_role_binding_spawn_unchanged() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
+  TEAMS_DIR="$SKILL_DIR/teams"
+  IDENTITY_CACHE=""; IDENTITY_CACHE_COUNT=-1; IDENTITY_CACHE_FRESH=0; IDENTITY_CACHE_VALID=0
+  IDENTITY_CACHE_MARKER="$RUN_DIR/.identity-cache-test"
+  ROLE_BINDING_CACHE_MARKER="$RUN_DIR/.role-binding-cache-test"
+  ROLE_BINDING_CACHE_VALID=0; ROLE_BINDING_CACHE_VALUE=""
+  ROLE_BINDING_CACHE_SESSION=""; ROLE_BINDING_CACHE_PROJECT=""
+  ROLE_BINDING_CACHE_HOME=""; ROLE_BINDING_CACHE_OWNER=""
+  POLL_STEPS=(0.3 0.6 1.2 2); poll_index=0
+  poll_reset() { poll_index=0; }
+  eval "$(sed -n '/^resolve_identity() {/,/^}/p;/^identity_cache_is_fresh() {/,/^}/p;/^refresh_identity_cache() {/,/^}/p;/^_role_binding_read() {/,/^}/p;/^_role_binding_spawn_unchanged() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
   put_record team alice original "$PROJ" codex
   _role_binding_read
   ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
@@ -1778,6 +1787,27 @@ _load_role_binding_functions() {
   # 成功した空の登録結果と、コマンドの失敗を区別する。
   printf '#!/usr/bin/env bash\nexit 1\n' > "$SCRIPTS/identities.sh"
   refute _windows_role_change_confirmed
+}
+
+@test "launcher: role binding cache reuses stable reads and notices a same-second update" {
+  _load_role_binding_functions
+  _role_binding_read
+  local original="$ROLE_BINDING_CURRENT" record old_identity_script="$RUN_DIR/identities.sh.original"
+  _agmsg_role_session_path_into team alice
+  record="$_AGMSG_ROLE_SESSION_PATH"
+  sleep 1.1
+  _role_binding_read
+  cp "$SCRIPTS/identities.sh" "$old_identity_script"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$SCRIPTS/identities.sh"
+  _role_binding_read
+  [ "$ROLE_BINDING_CURRENT" = "$original" ]
+  # cacheを意図的に無効化する検査の前にhelperを戻す。
+  cp "$old_identity_script" "$SCRIPTS/identities.sh"
+  put_record team alice changed-thread "$PROJ" codex
+  touch -r "$ROLE_BINDING_CACHE_MARKER" "$record"
+  _role_binding_read
+  [ "$ROLE_BINDING_SESSION" = changed-thread ]
+  [ "$ROLE_BINDING_CURRENT" != "$original" ]
 }
 
 @test "launcher: native teardown failure preserves fixture instead of claiming cleanup" {

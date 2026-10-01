@@ -109,6 +109,7 @@ HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
   rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
+  rm -f "$ROLE_BINDING_CACHE_MARKER" 2>/dev/null || true
   [ -n "$HELD_LOCK_RESOURCE" ] || return 0
   agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
 }
@@ -193,6 +194,12 @@ IDENTITY_CACHE=""
 IDENTITY_CACHE_COUNT=-1
 IDENTITY_CACHE_MARKER="$RUN_DIR/.identity-cache.$$"
 IDENTITY_CACHE_FRESH=0   # 1 when the last refresh served the cache unchanged
+IDENTITY_CACHE_VALID=0
+ROLE_BINDING_CACHE_MARKER="$RUN_DIR/.role-binding-cache.$$"
+ROLE_BINDING_CACHE_VALID=0
+ROLE_BINDING_CACHE_VALUE=""
+ROLE_BINDING_CACHE_SESSION=""; ROLE_BINDING_CACHE_PROJECT=""
+ROLE_BINDING_CACHE_HOME=""; ROLE_BINDING_CACHE_OWNER=""
 
 identity_cache_is_fresh() {
   local f count=0
@@ -207,11 +214,12 @@ identity_cache_is_fresh() {
 }
 
 refresh_identity_cache() {
-  if identity_cache_is_fresh; then
+  if [ "$IDENTITY_CACHE_VALID" = 1 ] && identity_cache_is_fresh; then
     IDENTITY_CACHE_FRESH=1
     return 0
   fi
   IDENTITY_CACHE_FRESH=0
+  IDENTITY_CACHE_VALID=0
   : > "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
   local f count=0
   for f in "$TEAMS_DIR"/*/config.json; do
@@ -219,7 +227,8 @@ refresh_identity_cache() {
     count=$((count + 1))
   done
   IDENTITY_CACHE_COUNT=$count
-  IDENTITY_CACHE="$(resolve_identity || true)"
+  IDENTITY_CACHE="$(resolve_identity)" || return 0
+  IDENTITY_CACHE_VALID=1
 }
 
 # Poll fast while something is happening, then stand down. The startup race the
@@ -760,22 +769,41 @@ _windows_current_bridge_valid() {
 # SessionStartやresumeが共有requestだけを書いた場合、このroleのbindingは
 # 意図的に変えない。ROLE_PAIRのrole-session recordが更新された時点で再bindする。
 _role_binding_read() {
-  local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
+  local row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
   local nsession=0 nproject=0 nhome=0 nowner=0
   ROLE_BINDING_CURRENT=""
   ROLE_BINDING_SESSION=""; ROLE_BINDING_PROJECT=""; ROLE_BINDING_HOME=""; ROLE_BINDING_OWNER=""
-  rows="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null)" || return 1
+  refresh_identity_cache
+  [ "$IDENTITY_CACHE_VALID" = 1 ] || return 1
+  if [ "$IDENTITY_CACHE_FRESH" != 1 ]; then
+    ROLE_BINDING_CACHE_VALID=0
+    poll_reset
+  fi
   while IFS="$TAB" read -r row_team row_name extra; do
     [ "$row_team$TAB$row_name" != "$ROLE_PAIR" ] || found=1
   done <<EOF
-$rows
+$IDENTITY_CACHE
 EOF
-  if [ "$found" = 0 ]; then ROLE_BINDING_CURRENT=ABSENT; return 0; fi
+  if [ "$found" = 0 ]; then
+    ROLE_BINDING_CURRENT=ABSENT
+    ROLE_BINDING_CACHE_VALUE=ABSENT
+    if [ "$IDENTITY_CACHE_FRESH" = 1 ]; then ROLE_BINDING_CACHE_VALID=1; : > "$ROLE_BINDING_CACHE_MARKER" 2>/dev/null || true; fi
+    return 0
+  fi
   IFS="$TAB" read -r team name <<EOF
 $ROLE_PAIR
 EOF
   _agmsg_role_session_path_into "$team" "$name" || return 1
   [ -f "$_AGMSG_ROLE_SESSION_PATH" ] && [ -r "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  if [ "$ROLE_BINDING_CACHE_VALID" = 1 ] && [ "$IDENTITY_CACHE_FRESH" = 1 ] \
+    && [ -f "$ROLE_BINDING_CACHE_MARKER" ] && [ "$ROLE_BINDING_CACHE_MARKER" -nt "$_AGMSG_ROLE_SESSION_PATH" ]; then
+    ROLE_BINDING_CURRENT="$ROLE_BINDING_CACHE_VALUE"
+    ROLE_BINDING_SESSION="$ROLE_BINDING_CACHE_SESSION"; ROLE_BINDING_PROJECT="$ROLE_BINDING_CACHE_PROJECT"
+    ROLE_BINDING_HOME="$ROLE_BINDING_CACHE_HOME"; ROLE_BINDING_OWNER="$ROLE_BINDING_CACHE_OWNER"
+    return 0
+  fi
+  ROLE_BINDING_CACHE_VALID=0
+  : > "$ROLE_BINDING_CACHE_MARKER" 2>/dev/null || true
   text="$(cat "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     case "$line" in
@@ -793,13 +821,21 @@ EOF
   ROLE_BINDING_SESSION="$session"; ROLE_BINDING_PROJECT="$project"
   ROLE_BINDING_HOME="$home"; ROLE_BINDING_OWNER="$owner"
   ROLE_BINDING_CURRENT="$(printf '%s\0' "$session" "$project" "$home" "$owner" | agmsg_sha1)" || return 1
-  [ -n "$ROLE_BINDING_CURRENT" ]
+  [ -n "$ROLE_BINDING_CURRENT" ] || return 1
+  ROLE_BINDING_CACHE_VALUE="$ROLE_BINDING_CURRENT"
+  ROLE_BINDING_CACHE_SESSION="$ROLE_BINDING_SESSION"; ROLE_BINDING_CACHE_PROJECT="$ROLE_BINDING_PROJECT"
+  ROLE_BINDING_CACHE_HOME="$ROLE_BINDING_HOME"; ROLE_BINDING_CACHE_OWNER="$ROLE_BINDING_OWNER"
+  ROLE_BINDING_CACHE_VALID=1
+  return 0
 }
 
 # argvを採取したdescriptorと直前読取が一致する場合だけspawnを許す。
 # 不一致やUNKNOWNでは既存metadataを変更せず、次tickで再評価する。
 _role_binding_spawn_unchanged() {
   local candidate="$1"
+  # argv公開直前の安全ゲートでは両方のcacheを無効化し、候補と新規読取結果を比較する。
+  IDENTITY_CACHE_VALID=0
+  ROLE_BINDING_CACHE_VALID=0
   _role_binding_read || return 1
   [ "$ROLE_BINDING_CURRENT" != ABSENT ] && [ "$ROLE_BINDING_CURRENT" = "$candidate" ]
 }
@@ -892,12 +928,12 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
       if ! retire_recorded_bridge; then
-        sleep 0.3
+        poll_sleep
         continue
       fi
       exit 0
     fi
-    sleep 0.3
+    poll_sleep
     continue
   fi
   deregistered_ticks=0
@@ -1081,7 +1117,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
       if _windows_role_change_confirmed; then
         retire_recorded_bridge || true
       fi
-      sleep 0.2
+      poll_sleep
     done
     wait "$launched_pid" 2>/dev/null || true
     recorded_pid=""
