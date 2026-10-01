@@ -33,7 +33,9 @@ echo "bundle-core: fetching tag $REF..."
 # there leaves the whole local repo shallow: git log/merge-base/rebase
 # against origin/main silently stop at the new shallow boundary. CI
 # checkouts are disposable, so this is a non-issue there either way.
-git fetch origin tag "$REF" --no-tags
+# pinはupstream releaseの版を指定する。fork同期はtagをコピーしないため、
+# originの所有者に依存せず正本から取得する。既存tagの上書きは許可しない。
+git fetch https://github.com/fujibee/agmsg.git tag "$REF" --no-tags
 
 # Everything install.sh / uninstall.sh / scripts/lib read relative to the
 # installer's own directory ($SCRIPT_DIR/...). SKILL.md is not optional for a
