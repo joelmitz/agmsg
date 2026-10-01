@@ -2490,11 +2490,16 @@ const hash = (p) => crypto.createHash("sha1").update(p).digest("hex");
 function leaseHash(project) {
   mod.exports.CodexBridge.prototype.writeLease.call({
     opts: { project }, identities: [{ team: "team", name: "alice" }], leasefile,
+    // fork ではコンストラクタが projectHash / pairsHash を計算する（同じ式を再現）。
+    projectHash: hash(mod.exports.projectIdentityPath(project)),
+    pairsHash: hash(hash("team\talice")),
     startToken: () => ({ src: "pwsh", token: "123456" }),
   });
   return fs.readFileSync(leasefile, "utf8").match(/^project=(.*)$/m)[1];
 }
-const expected = hash("/c/TEMP/project with spaces");
+// fork の launcher は agmsg_normalize_project_path で "C:/..." 形に正規化して hash するため、
+// 同一性は projectIdentityPath() の "C:/..." 形で比較する（上流テストは "/c/..." 形を期待していた）。
+const expected = hash("C:/TEMP/project with spaces");
 assert.equal(leaseHash(String.raw`C:\TEMP\project with spaces`), expected);
 assert.equal(leaseHash("C:/TEMP/project with spaces"), expected);
 assert.equal(leaseHash("/c/TEMP/project with spaces"), expected);
@@ -2502,7 +2507,7 @@ assert.notEqual(leaseHash("C:/TEMP/other project"), expected);
 assert.notEqual(leaseHash("C:/TEMP/Project with spaces"), expected);
 assert.equal(leaseHash(String.raw`\\host\share\project`), hash("//host/share/project"));
 assert.equal(leaseHash("/home/me/project"), hash("/home/me/project"));
-assert.equal(leaseHash(String.raw`/home/me/project\literal`), hash(String.raw`/home/me/project\literal`));
+assert.equal(leaseHash(String.raw`/home/me/project\literal`), hash("/home/me/project/literal"));
 fs.unlinkSync(leasefile);
 NODE
   [ "$status" -eq 0 ]
