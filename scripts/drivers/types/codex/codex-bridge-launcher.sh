@@ -108,7 +108,7 @@ LIFETIME_PID="$PARENT_PID"
 HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
-  rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
+  rm -f "$IDENTITY_CACHE_MARKER" "${ROLE_CACHE_MARKER:-}" 2>/dev/null || true
   [ -n "$HELD_LOCK_RESOURCE" ] || return 0
   agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
 }
@@ -759,7 +759,7 @@ _windows_current_bridge_valid() {
 # SessionStartでも更新されるため、退役の根拠にしない。
 # SessionStartやresumeが共有requestだけを書いた場合、このroleのbindingは
 # 意図的に変えない。ROLE_PAIRのrole-session recordが更新された時点で再bindする。
-_role_binding_read() {
+_role_binding_read_uncached() {
   local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
   local nsession=0 nproject=0 nhome=0 nowner=0
   ROLE_BINDING_CURRENT=""
@@ -796,25 +796,64 @@ EOF
   [ -n "$ROLE_BINDING_CURRENT" ]
 }
 
+# 安定時は成功した同一bindingを最大5秒だけ再利用する。mtimeが同秒なら
+# 再読取する（Bash 3.2の秒精度）。登録/record変更・削除、読取失敗はhitにしない。
+# 強制読取はspawn直前と変更の二重確認で使い、cacheを解除証明に流用しない。
+ROLE_CACHE_MARKER="$RUN_DIR/.role-binding-cache.$$"
+ROLE_CACHE_COUNT=-1
+ROLE_CACHE_AT=-5
+_role_binding_cache_fresh() {
+  local f count=0
+  [ -n "${ROLE_BINDING_CURRENT:-}" ] && [ "$ROLE_BINDING_CURRENT" != ABSENT ] || return 1
+  [ $((SECONDS - ROLE_CACHE_AT)) -lt 5 ] || return 1
+  [ -f "$ROLE_CACHE_MARKER" ] || return 1
+  [ -f "${_AGMSG_ROLE_SESSION_PATH:-}" ] && [ -r "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  [ "$ROLE_CACHE_MARKER" -nt "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  for f in "$TEAMS_DIR"/*/config.json; do
+    [ -f "$f" ] || continue
+    count=$((count + 1))
+    [ -r "$f" ] && [ "$ROLE_CACHE_MARKER" -nt "$f" ] || return 1
+  done
+  [ "$count" = "$ROLE_CACHE_COUNT" ]
+}
+_role_binding_read() {
+  local f count=0
+  if [ "${1:-}" != force ] && _role_binding_cache_fresh; then return 0; fi
+  # markerは実読取前に更新する。読取中の更新は次回も再読取になる。
+  : > "$ROLE_CACHE_MARKER" 2>/dev/null || true
+  for f in "$TEAMS_DIR"/*/config.json; do
+    [ -f "$f" ] || continue
+    count=$((count + 1))
+  done
+  if ! _role_binding_read_uncached; then
+    rm -f "$ROLE_CACHE_MARKER" 2>/dev/null || true
+    return 1
+  fi
+  ROLE_CACHE_COUNT=$count
+  ROLE_CACHE_AT=$SECONDS
+  return 0
+}
+
 # argvを採取したdescriptorと直前読取が一致する場合だけspawnを許す。
 # 不一致やUNKNOWNでは既存metadataを変更せず、次tickで再評価する。
 _role_binding_spawn_unchanged() {
   local candidate="$1"
-  _role_binding_read || return 1
+  _role_binding_read force || return 1
   [ "$ROLE_BINDING_CURRENT" != ABSENT ] && [ "$ROLE_BINDING_CURRENT" = "$candidate" ]
 }
 
 _windows_role_changed_once() {
-  _role_binding_read || return 1
+  _role_binding_read "${1:-}" || return 1
   [ "$ROLE_BINDING_CURRENT" != "$ROLE_BINDING_SNAPSHOT" ]
 }
 
 _windows_role_change_confirmed() {
   local first
   _windows_role_changed_once || return 1
+  _windows_role_changed_once force || return 1
   first="$ROLE_BINDING_CURRENT"
   sleep 0.3
-  _windows_role_changed_once || return 1
+  _windows_role_changed_once force || return 1
   [ "$ROLE_BINDING_CURRENT" = "$first" ]
 }
 
@@ -1081,7 +1120,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
       if _windows_role_change_confirmed; then
         retire_recorded_bridge || true
       fi
-      sleep 0.2
+      poll_sleep
     done
     wait "$launched_pid" 2>/dev/null || true
     recorded_pid=""

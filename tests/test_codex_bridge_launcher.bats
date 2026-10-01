@@ -1729,7 +1729,8 @@ _load_role_binding_functions() {
   source "$SCRIPTS/lib/role-session.sh"
   source "$SCRIPTS/lib/resolve-project.sh"
   SCRIPT_DIR="$(dirname "$LAUNCHER")"; PROJECT="$PROJ"; TYPE=codex; TAB=$'\t'; ROLE_PAIR=$'team\talice'
-  eval "$(sed -n '/^_role_binding_read() {/,/^}/p;/^_role_binding_spawn_unchanged() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
+  TEAMS_DIR="$SKILL_DIR/teams"; ROLE_CACHE_MARKER="$RUN_DIR/.role-binding-cache.fixture"; ROLE_CACHE_COUNT=-1; ROLE_CACHE_AT=-5
+  eval "$(sed -n '/^_role_binding_read_uncached() {/,/^}/p;/^_role_binding_cache_fresh() {/,/^}/p;/^_role_binding_read() {/,/^}/p;/^_role_binding_spawn_unchanged() {/,/^}/p;/^_windows_role_changed_once() {/,/^}/p;/^_windows_role_change_confirmed() {/,/^}/p' "$LAUNCHER")"
   put_record team alice original "$PROJ" codex
   _role_binding_read
   ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
@@ -1916,4 +1917,27 @@ _load_role_binding_functions() {
   run assert_native_publication_accepted "$pid"
   [ "$status" -ne 0 ]
   [[ "$output" == *"native lease project mismatch"* ]]
+}
+
+@test "launcher: stable binding cache refreshes on expiry force and registration removal" {
+  _load_role_binding_functions
+  eval "$(declare -f _role_binding_read_uncached | sed '1s/_role_binding_read_uncached/_role_binding_original/')"
+  local reads=0
+  _role_binding_read_uncached() { reads=$((reads + 1)); _role_binding_original; }
+  # 秒精度のFSでも確実にcache hit条件を作る。実readと未知状態の拒否は維持。
+  touch -t 200001010000 "$TEAMS_DIR/team/config.json" "$_AGMSG_ROLE_SESSION_PATH"
+  _role_binding_read force
+  local i
+  for i in {1..20}; do _role_binding_read; done
+  [ "$reads" -eq 1 ]
+  _role_binding_read force
+  [ "$reads" -eq 2 ]
+  ROLE_CACHE_AT=$((SECONDS - 5))
+  _role_binding_read
+  [ "$reads" -eq 3 ]
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  _role_binding_read
+  [ "$ROLE_BINDING_CURRENT" = ABSENT ]
+  _role_binding_read
+  [ "$reads" -eq 5 ]
 }
