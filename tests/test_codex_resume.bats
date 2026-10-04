@@ -121,11 +121,16 @@ recorded_uuid() {
     [ "$(recorded_uuid team alice)" = still-recorded ]
     [ -z "$(agmsg_role_session_get team alice codex_home)" ]
   done
+  # fork: rollout discovery is scoped to the effective Codex home
+  # (agmsg_codex_sessions_dir), so a rollout under the default home is not
+  # found while CODEX_HOME points at a missing directory. Upstream's version of
+  # this test expected the default-home rollout to be found; the isolated-home
+  # feature is why fork differs. The record is simply skipped (exit 0).
   make_rollout legacy-profile-thread "$proj"
   run env -u CODEX_THREAD_ID CODEX_HOME="$TEST_SKILL_DIR/missing" \
     bash "$TYPES/codex/codex-record-session.sh" team bob "$proj"
   [ "$status" -eq 0 ]
-  [ "$(recorded_uuid team bob)" = legacy-profile-thread ]
+  [ -z "$(recorded_uuid team bob)" ]
   [ -z "$(agmsg_role_session_get team bob codex_home)" ]
 }
 

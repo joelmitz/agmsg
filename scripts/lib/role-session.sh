@@ -161,7 +161,10 @@ agmsg_role_session_record() {
   mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  if [ "$type" = "codex" ] && [ -z "$codex_home" ]; then
+  # Fall back to the effective home only when the caller passed no 7th argument
+  # at all. An explicit empty value (codex-record-session.sh when the profile
+  # directory could not be resolved) means "omit the field" and is kept as is.
+  if [ "$type" = "codex" ] && [ -z "$codex_home" ] && [ "$#" -lt 7 ]; then
     codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
   fi
   {
