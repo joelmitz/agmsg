@@ -155,7 +155,14 @@ recorded_uuid() {
   AGMSG_CODEX_HOME="$isolated" env -u CODEX_THREAD_ID \
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "isolated-thread" ]
-  [ "$(agmsg_role_session_get team alice codex_home)" = "$isolated" ]
+  # The recorder stores the canonical (physical) profile path. On macOS the
+  # temp dir sits behind a /var -> /private/var symlink, so compare against the
+  # canonical form rather than the spelling the test used.
+  source "$SKILL_DIR/scripts/lib/resolve-project.sh"
+  local expected
+  expected="$(cd "$isolated" && pwd -P)"
+  expected="$(agmsg_normalize_project_path "$expected")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected" ]
 }
 
 @test "codex record: records NOTHING when two recent rollouts share the cwd (ambiguous)" {
