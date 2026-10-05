@@ -13,7 +13,8 @@ set -euo pipefail
 exec 3>&- 4>&-
 
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
-# dispatcher starts one bridge per recorded Codex role in this project.
+# dispatcher starts a bridge only for the Codex role this seat's own request
+# names (#1280); other seats in the same project dispatch their own roles.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -170,6 +171,41 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | sort -u
 }
 
+# Read the seat's own request record. SessionStart writes the already-narrowed
+# role pair after the TUI claims it; a missing or ambiguous pair is not a
+# reason to consult the project-wide identity list.
+read_seat_request() {
+  REQUEST_THREAD=""
+  REQUEST_APP_SERVER="$APP_SERVER"
+  REQUEST_PAIR=""
+  local request_line="" request_type="" request_team="" request_name=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$request_line" || return 1
+  request_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
+  REQUEST_THREAD="${AGMSG_CODEX_REQUEST_THREAD:-}"
+  REQUEST_APP_SERVER="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+  request_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
+  request_name="${AGMSG_CODEX_REQUEST_NAME:-}"
+  [ "$request_type" = "$TYPE" ] || return 1
+  [ -n "$REQUEST_THREAD" ] || return 1
+  [ -n "$request_team" ] && [ -n "$request_name" ] || return 1
+  REQUEST_PAIR="$request_team$TAB$request_name"
+  return 0
+}
+
+request_pair_matches_record() {
+  local pair="$1" team name record_project record_project_phys
+  IFS="$TAB" read -r team name <<EOF
+$pair
+EOF
+  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+  [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$REQUEST_THREAD" ] || return 1
+  record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
+  record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+  [ "$record_project_phys" = "$PROJECT_PHYS" ]
+}
+
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
 # sqlite3 processes per team file, ~57 processes and ~145 ms total on an
 # eight-team install, and a poll loop was paying that several times a second.
@@ -254,18 +290,43 @@ poll_sleep() {
 if [ -z "$ROLE_PAIR" ]; then
   acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
+  seat_wait_noted=0
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
+    # #1280: dispatch ONLY the role this seat's own request names, and only
+    # while that role's record still proves this seat's thread and project.
+    # Never fall back to the project-wide identity list: another seat in the
+    # same project (and effective home) owns the other roles, and starting a
+    # child for them here makes each seat's dispatcher fight the other's
+    # bridge over the role-keyed state files.
+    seat_pairs=""
+    if read_seat_request && request_pair_matches_record "$REQUEST_PAIR" \
+      && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
+      seat_pairs="$REQUEST_PAIR"
+    fi
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
-    # Forget pairs that are no longer registered. A child now exits by itself
-    # once its own registration is gone, so a stale known_pairs entry would
-    # suppress the respawn if that same pair were registered again later.
+    if [ -z "$seat_pairs" ]; then
+      if [ "$seat_wait_noted" != "1" ]; then
+        echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+        seat_wait_noted=1
+      fi
+      # No owned pair is authoritative: forget any children this seat used to
+      # own so a later re-registration can be dispatched again.
+      known_pairs=""
+      poll_sleep
+      continue
+    fi
+    seat_wait_noted=0
+    # Forget pairs that are no longer this seat's selected pair. A child exits
+    # by itself once its own registration is gone, so a stale known_pairs entry
+    # would suppress the respawn if that pair were selected again later (the
+    # child lock turns a redundant respawn into an immediate exit).
     retained=""
     while IFS= read -r seen_pair; do
       [ -n "$seen_pair" ] || continue
-      pair_registered "$seen_pair" "$current_pairs" || continue
+      pair_registered "$seen_pair" "$seat_pairs" || continue
       retained="${retained:+$retained$'\n'}$seen_pair"
     done <<< "$known_pairs"
     known_pairs="$retained"
@@ -278,7 +339,7 @@ if [ -z "$ROLE_PAIR" ]; then
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
-    done <<< "$current_pairs"
+    done <<< "$seat_pairs"
     poll_sleep
   done
   # #1254: this seat's TUI (LIFETIME_PID) is gone. Stop the seat's own
