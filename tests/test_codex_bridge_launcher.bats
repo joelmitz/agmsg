@@ -2003,7 +2003,7 @@ _wait_pid_gone() { # <pid> [tries]
 }
 
 @test "launcher: native multi-role request for bob retires alice and starts bob (#1280)" {
-  skip_unless_windows "requires Git Bash native leases"
+  _emulate_windows_native_path
   setup_native_bridge_fixture
   put_record team alice thread-alice "$PROJ" codex
   start_native_launcher
@@ -2023,6 +2023,78 @@ _wait_pid_gone() { # <pid> [tries]
   done
   [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 1 ]
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
+}
+
+# Run the Windows (Git Bash) code path of the launcher on any host: MSYSTEM
+# selects it, and a stub powershell.exe answers the StartTime queries the
+# launcher and the native bridge fixture make, from /proc. A real Windows host
+# already has both, so this is a no-op there.
+_emulate_windows_native_path() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+  [ -r /proc/self/stat ] || skip "needs /proc to emulate the Windows process queries"
+  local stubdir="$TEST_SKILL_DIR/ps-stub"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/powershell.exe" <<'STUB'
+#!/usr/bin/env bash
+cmd="${*: -1}"
+pid="$(printf '%s' "$cmd" | grep -o -- '-Id [0-9]*' | head -n 1 | cut -d' ' -f2)"
+live=0; ticks=""
+if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
+  s="$(cat "/proc/$pid/stat" 2>/dev/null)"; r="${s##*)}"; read -ra a <<< "$r"
+  ticks="${a[19]:-}"; [ -n "$ticks" ] && live=1
+fi
+case "$cmd" in
+  *LIVE*) if [ "$live" = 1 ]; then printf 'LIVE\t%s\n' "$ticks"; else printf 'ABSENT\n'; fi ;;
+  *) [ "$live" = 1 ] || exit 1; printf '%s\n' "$ticks" ;;
+esac
+STUB
+  chmod +x "$stubdir/powershell.exe"
+  # The launcher's live-pid probe asks tasklist, which cannot see this shell's pids.
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+  export PATH="$stubdir:$PATH" MSYSTEM=MINGW64
+}
+
+# alice's native bridge is slow to publish its lease (longer than the child's
+# 30-second publication wait), so her child parks in the not-published fallback.
+# The seat then selects bob (or publishes an empty pair); once her lease finally
+# publishes she must be retired through the verified stop path, never killed
+# blind while unpublished.
+_native_switch_during_failed_publication() { # <request line, printf format>
+  _emulate_windows_native_path
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=36000
+  put_record team alice thread-alice "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local alice_native i
+  alice_native="$(head -n 1 "$RUN_DIR/native-spawns")"
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  printf "$1" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  # Nothing may be stopped while the lease is still unpublished.
+  sleep 3
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  [ ! -e "$RUN_DIR/codex-bridge-stop.$alice_native" ]
+  # After publication alice's bridge is retired through a stop request.
+  for i in {1..900}; do
+    [ -f "$RUN_DIR/codex-bridge-stop.$alice_native.ack" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-stop.$alice_native.ack" ]
+  for i in {1..100}; do
+    grep -Fxq "$alice_native" "$RUN_DIR/native-exits" && break
+    sleep 0.1
+  done
+  grep -Fxq "$alice_native" "$RUN_DIR/native-exits"
+}
+
+@test "launcher: native request switch during a failed publication retires alice once her lease publishes (#1280)" {
+  _native_switch_during_failed_publication 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n'
+}
+
+@test "launcher: native empty-pair request during a failed publication retires alice once her lease publishes (#1280)" {
+  _native_switch_during_failed_publication 'codex\tthread-alice\tws://127.0.0.1:1\t\n'
 }
 
 @test "launcher: binding update between argv capture and spawn rejects stale descriptor" {

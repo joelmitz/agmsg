@@ -1262,9 +1262,13 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     else
       # A local child can outlive a failed status probe, and may publish late.
       # Park with the child lock held instead of creating a second native Node.
-      # On role removal, retire only a later, fully verified native lease.
+      # On role removal -- or when this seat selects another role (#1280) --
+      # retire only a later, fully verified native lease. Both signals are
+      # re-observed every tick, so a switch seen while the lease is still
+      # unpublished is acted on as soon as it can be proved, never by
+      # signaling the unproven pid.
       while _agmsg_pid_alive_local "$PARENT_PID"; do
-        if _windows_role_change_confirmed; then
+        if _windows_role_change_confirmed || _seat_request_selects_other_pair; then
           published_pid=""
           if [ -f "$pidfile" ]; then
             IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
