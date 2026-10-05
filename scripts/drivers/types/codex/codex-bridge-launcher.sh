@@ -15,6 +15,8 @@ exec 3>&- 4>&-
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
 # dispatcher starts a bridge only for the Codex role this seat's own request
 # names (#1280); other seats in the same project dispatch their own roles.
+# One role held by several seats at once is NOT supported (upstream #1280 does
+# not define it): bridge state files are keyed by role, not by seat.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -816,10 +818,13 @@ _windows_current_bridge_valid() {
   [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
 }
 
-# このchild自身の登録とbindingだけを観測する。共有requestは別roleの
-# SessionStartでも更新されるため、退役の根拠にしない。
-# SessionStartやresumeが共有requestだけを書いた場合、このroleのbindingは
-# 意図的に変えない。ROLE_PAIRのrole-session recordが更新された時点で再bindする。
+# このchild自身の登録とbinding（thread/project/home/owner）は、ROLE_PAIR自身の
+# 登録とrole-session recordだけから観測する。requestのthreadや他roleのrecordは
+# bindingの根拠にしない。SessionStartやresumeがrequestだけを書いた場合、この
+# roleのbindingは意図的に変えない。ROLE_PAIRのrecordが更新された時点で再bindする。
+# requestが使われるのは「このseatがどのroleを選んでいるか」(pair)の判定だけで、
+# requestはseat固有のため、別pairを選んだ場合のみ退役する
+# （_seat_request_selects_other_pair、#1280）。
 _role_binding_read_uncached() {
   local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
   local nsession=0 nproject=0 nhome=0 nowner=0
@@ -974,6 +979,26 @@ retire_recorded_bridge() {
   kill "$old_pid" 2>/dev/null || true
 }
 
+# #1280: this seat's request names a DIFFERENT role than this child's (an actas
+# switched the seat to another role, or published an empty-pair tombstone for an
+# ambiguous claim). The request file is this SEAT's own (REQUEST_FILE is keyed by
+# SEAT_KEY, written only by this seat's SessionStart / actas / resume), so unlike
+# a project-wide file it cannot be changed by another seat's activity: a pair
+# that is not ours means this seat no longer serves our role, and the child
+# retires -- the dispatcher starts the child for the newly selected pair.
+# Only a well-formed request of this launcher's type counts. A missing,
+# unreadable or malformed file (a transient read, a request being replaced)
+# proves nothing and never retires: the writers publish by atomic rename, so a
+# complete read is either the old or the new request, never a torn one.
+_seat_request_selects_other_pair() {
+  local line=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS= read -r line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$line" || return 1
+  [ "${AGMSG_CODEX_REQUEST_TYPE:-}" = "$TYPE" ] || return 1
+  [ "${AGMSG_CODEX_REQUEST_TEAM:-}$TAB${AGMSG_CODEX_REQUEST_NAME:-}" != "$ROLE_PAIR" ]
+}
+
 ROLE_BINDING_SNAPSHOT=""
 _role_binding_read && ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
 deregistered_ticks=0
@@ -1001,6 +1026,17 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     continue
   fi
   deregistered_ticks=0
+
+  # #1280: the seat now selects another role. Retire this role's bridge and
+  # exit; a failed retire (Windows exit proof pending) is retried next tick
+  # rather than abandoning a bridge that may still be alive.
+  if _seat_request_selects_other_pair; then
+    if ! retire_recorded_bridge; then
+      sleep 0.3
+      continue
+    fi
+    exit 0
+  fi
 
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
@@ -1176,9 +1212,10 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     printf '%s\n' "$launched_pid" > "$pidfile"
   fi
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
-    # 同じroleのbinding変更だけを確認する。別pairや不正requestは退役理由にしない。
+    # 同じroleのbinding変更に加え、このseat自身のrequestが別pairを選んだ場合（#1280）だけを退役理由にする。不正・欠落requestは退役理由にしない。
+    # The seat selecting another role (#1280) retires this role's bridge too.
     while _agmsg_pid_alive_local "$launched_pid"; do
-      if _windows_role_change_confirmed; then
+      if _windows_role_change_confirmed || _seat_request_selects_other_pair; then
         retire_recorded_bridge || true
       fi
       poll_sleep
