@@ -170,6 +170,7 @@ teardown() {
       sleep 0.1
     done
     [ -z "${NATIVE_PARENT:-}" ] || kill "$NATIVE_PARENT" 2>/dev/null || true
+    for pid in ${NATIVE_EXTRA_PIDS:-}; do kill "$pid" 2>/dev/null || true; done
     local native_failed=0
     if [ "$finished" -lt "$started" ]; then
       native_failed=1
@@ -672,7 +673,7 @@ run_launcher() {
 }
 
 @test "launcher: seats sharing one project and home do not retire each other's bridge (#1280)" {
-  skip_on_windows "the Windows launcher writes no pidfile for a non-native bridge and a mock lease's start token is not a pwsh one, so it can be neither seen nor retired there; the native fixture tests carry the equivalent guarantee"
+  skip_on_windows "mock bridge, default path: the Windows launcher writes no pidfile for a non-native bridge, and a mock lease's start token is not a pwsh one; the equivalent guarantee is carried by the windows-native two-seat test"
   # Two seats, each with its OWN request file (seat-keyed), serving different
   # roles. Another seat's request is never evidence about this seat's role, so
   # nothing here may retire the other seat's bridge.
@@ -1958,7 +1959,7 @@ _wait_pid_gone() { # <pid> [tries]
 }
 
 @test "launcher: custom multi-role request for bob retires alice and starts bob (#1280)" {
-  skip_on_windows "the Windows launcher writes no pidfile for a non-native bridge and a mock lease's start token is not a pwsh one, so it can be neither seen nor retired there; the native fixture tests carry the equivalent guarantee"
+  skip_on_windows "a mock lease's start token is not a Windows native pwsh token, so the mock bridge can be neither verified nor retired there; single-seat role switching on Windows is covered by the native multi-role test"
   # One seat claims alice first; a later actas publishes bob as THIS seat's
   # request. The seat no longer serves alice, so her child and bridge retire
   # and bob's are started (upstream #1285 behavior).
@@ -2002,6 +2003,43 @@ _wait_pid_gone() { # <pid> [tries]
   kill -0 "$ALICE_PID"
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$ALICE_PID" ]
   kill "$LAUNCH_DISPATCHER" "$LAUNCH_PARENT" 2>/dev/null || true
+}
+
+@test "launcher: windows-native two seats sharing one project and home do not retire each other's bridge (#1280)" {
+  # Two seats, each with its own seat key, app-server URL and request, serve
+  # alice and bob in the SAME project and effective home. Each dispatcher may
+  # start only its own role: a dispatcher that also started the other seat's
+  # role would see that bridge bound to a foreign URL, retire it and respawn
+  # it, and the seats would replace each other's bridge indefinitely.
+  _emulate_windows_native_path
+  setup_native_bridge_fixture
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  local key_b
+  key_b="$(_agmsg_codex_seat_key_new)"
+  write_seat_request "$key_b" thread-bob team bob ws://127.0.0.1:2
+  start_native_launcher
+  sleep 300 3>&- & NATIVE_PARENT_B=$!
+  NATIVE_EXTRA_PIDS="$NATIVE_PARENT_B"
+  AGMSG_CODEX_SEAT_KEY="$key_b" bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:2' "$NATIVE_PARENT_B" \
+    >"$LAUNCHER_STDOUT.b" 2>"$LAUNCHER_STDERR.b" 3>&- &
+  NATIVE_DISPATCHER_B=$!
+  NATIVE_EXTRA_PIDS="$NATIVE_EXTRA_PIDS $NATIVE_DISPATCHER_B"
+
+  wait_for_native_spawns 2
+  local pid alice_pid bob_pid i
+  while IFS= read -r pid; do assert_native_publication_accepted "$pid"; done < "$RUN_DIR/native-spawns"
+  alice_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  bob_pid="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+
+  # Long enough for a retire/respawn cycle to have shown up several times.
+  sleep 10
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$alice_pid" ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.bob.pid")" = "$bob_pid" ]
+  ! ls "$RUN_DIR"/codex-bridge-stop.* >/dev/null 2>&1
 }
 
 @test "launcher: native multi-role request for bob retires alice and starts bob (#1280)" {
@@ -2051,8 +2089,18 @@ case "$cmd" in
 esac
 STUB
   chmod +x "$stubdir/powershell.exe"
-  # The launcher's live-pid probe asks tasklist, which cannot see this shell's pids.
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  # The launcher's live-pid probe asks tasklist. Answer it from /proc like the
+  # real one does: a native bridge pid that is alive must read as alive, or
+  # the launcher would respawn it every tick.
+  cat > "$stubdir/tasklist" <<'STUB'
+#!/usr/bin/env bash
+pid="$(printf '%s ' "$@" | grep -o 'PID eq [0-9]*' | head -n 1 | cut -d' ' -f3)"
+if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
+  printf 'bash.exe %s Console 1 1 K\n' "$pid"
+else
+  echo "INFO: No tasks are running which match the specified criteria."
+fi
+STUB
   chmod +x "$stubdir/tasklist"
   export PATH="$stubdir:$PATH" MSYSTEM=MINGW64
 }
