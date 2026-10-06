@@ -3405,7 +3405,11 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     // The storage cursor is the transport checkpoint. Apply the idempotent
     // roster side first so a registry failure cannot advance past an event it
     // did not durably record; a later storage failure simply replays roster.
-    const applied = await driverCall("apply", config, messageRecords);
+    // [experiment] Idle page: no messages and the cursor does not move, so the
+    // apply would only rewrite the cursor with its current value. Skip the
+    // driver process for it.
+    const idlePage = page.messages.length === 0 && page.next_after === cursor;
+    const applied = idlePage ? [] : await driverCall("apply", config, messageRecords);
     await logApplyCall(config, messageRecords, applied);
     await eventCall("pull.applied", {
       result: applied[0] ?? null,
