@@ -170,7 +170,8 @@ teardown() {
       sleep 0.1
     done
     [ -z "${NATIVE_PARENT:-}" ] || kill "$NATIVE_PARENT" 2>/dev/null || true
-    local native_failed=0
+    local pid native_failed=0
+    for pid in ${NATIVE_EXTRA_PIDS:-}; do kill "$pid" 2>/dev/null || true; done
     if [ "$finished" -lt "$started" ]; then
       native_failed=1
       _report_launcher_failure "native fixture exit remains unproved after 45 seconds"
@@ -179,6 +180,15 @@ teardown() {
       native_failed=1
       _report_launcher_failure "native dispatcher exit remains unproved"
     fi
+    # Every extra pid a test added (a second seat's lifetime and dispatcher)
+    # gets the same bounded wait as the first dispatcher: it still reads this
+    # test's RUN_DIR until it exits, so teardown_test_env must not run first.
+    for pid in ${NATIVE_EXTRA_PIDS:-}; do
+      if ! _wait_launcher_pid_bounded "$pid" 100; then
+        native_failed=1
+        _report_launcher_failure "native extra pid $pid exit remains unproved"
+      fi
+    done
     if [ "$native_failed" = 1 ] || [ "${LAUNCHER_FAILURE:-0}" = 1 ]; then
       printf 'native fixture artifacts preserved at %s\n' "$TEST_SKILL_DIR" >&2
       return 1
@@ -401,18 +411,42 @@ wait_for_native_spawns() {
 }
 
 # Write a role-session record (team, agent) -> thread for a project.
+#
+# #1280: the dispatcher now starts a child only for the role this seat's own
+# request names, so a record alone no longer makes a role dispatchable. Like
+# SessionStart does for the role a seat claims, also publish the seat request
+# for this pair -- but never overwrite a request that already names another
+# pair, so the first role recorded is the one this seat owns.
 put_record() {
+  local request_file request_pair="" _rt _rthread _rapp _rteam _rname
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
     'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
     _ "$SCRIPTS" "$@"
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  if [ -f "$request_file" ]; then
+    IFS=$'\t' read -r _rt _rthread _rapp _rteam _rname < "$request_file" || true
+    [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ] && request_pair="$_rteam"$'\t'"$_rname"
+  fi
+  if [ -z "$request_pair" ] || [ "$request_pair" = "$1"$'\t'"$2" ]; then
+    printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$3" "$1" "$2" \
+      > "$request_file"
+  fi
 }
 
 write_request() {
-  local thread="$1" app_server="${2:-ws://127.0.0.1:1}"
+  local thread="$1"
+  local pair_team="${2:-}" pair_name="${3:-}"
   # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
   # project hash -- this file's setup() exports one fixed key for the whole
   # suite, which every launcher invocation below inherits.
-  printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$thread" "$pair_team" "$pair_name" \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+}
+
+# Publish a request for ANOTHER seat (its own AGMSG_CODEX_SEAT_KEY and app-server).
+write_seat_request() { # <seat-key> <thread> <team> <name> [app-server]
+  printf 'codex\t%s\t%s\t%s\t%s\n' "$2" "${5:-ws://127.0.0.1:1}" "$3" "$4" \
+    > "$RUN_DIR/codex-bridge-request.$1"
 }
 
 # The launcher dispatcher owns the seat app-server and therefore attempts to
@@ -510,6 +544,8 @@ run_launcher() {
 
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
+  # actas publishes this seat's request itself, using the seat's app-server URL.
+  export AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1"
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
   run_launcher
   assert_capture
@@ -544,13 +580,13 @@ run_launcher() {
 
 @test "launcher: ignores a stale request app-server URL and binds to its live server" {
   put_record team alice rec-thread-1 "$PROJ" codex
-  write_request old-request-thread ws://127.0.0.1:2
+  printf 'codex\trec-thread-1\tws://127.0.0.1:2\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   run_launcher
 
   assert_capture
   grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
   refute grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
-  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
@@ -572,23 +608,133 @@ run_launcher() {
   wait_launcher_or_report "$driver_pid" driver || return 1
 }
 
-@test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
+@test "launcher: dispatches only the role recorded for this seat (#1280)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
   run_launcher
 
+  assert_capture
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  ! grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: dispatches nothing for a role with no request from this seat (#1280)" {
+  # A recorded, registered role is not enough: without this seat's own request
+  # the dispatcher must not fall back to the project-wide identity list.
+  put_record team alice thread-alice "$PROJ" codex
+  rm -f "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  run_launcher
+  [ ! -f "$CAPTURE" ]
+}
+
+@test "launcher: preserves team and name when request app-server is empty" {
+  put_record team alice thread-empty-app-server "$PROJ" codex
+  printf 'codex\tthread-empty-app-server\t\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  run_launcher
+
+  assert_capture
+  grep -q -- $'--pair team\talice --thread thread-empty-app-server' "$CAPTURE"
+}
+
+@test "launcher: a request whose thread differs from the role record dispatches nothing (#1280)" {
+  put_record team alice thread-alice "$PROJ" codex
+  write_request thread-other team alice
+  run_launcher
+  [ ! -f "$CAPTURE" ]
+}
+
+@test "launcher: two seats in one project each start only their own role (#150 phase 2, #1280)" {
+  # Replaces "one bridge per recorded role": roles are now spread across seats,
+  # one request per seat. Each seat's dispatcher serves exactly its own role.
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  local key_b
+  key_b="$(_agmsg_codex_seat_key_new)"
+  write_seat_request "$key_b" thread-bob team bob
+  export MOCK_BRIDGE_SLEEP=20
+  sleep 30 3>&- & local parent_a=$!
+  sleep 30 3>&- & local parent_b=$!
+  TEST_LIFETIME_PIDS="$parent_a $parent_b"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
+  local dispatcher_a=$!
+  AGMSG_CODEX_SEAT_KEY="$key_b" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2" "$parent_b" >/dev/null 2>&1 3>&- &
+  local dispatcher_b=$!
+
   local i lines=0
-  for i in {1..30}; do
-    if [ -f "$CAPTURE" ]; then
-      lines=$(wc -l < "$CAPTURE" | tr -d ' ')
-    fi
+  for i in {1..100}; do
+    [ -f "$CAPTURE" ] && lines=$(wc -l < "$CAPTURE" | tr -d ' ')
     [ "$lines" -ge 2 ] && break
     sleep 0.1
   done
   [ "$lines" -ge 2 ]
-  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
-  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+  sleep 1
+  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 2 ]
+  grep -q -- $'--pair team\talice --thread thread-alice --app-server ws://127.0.0.1:1' "$CAPTURE"
+  grep -q -- $'--pair team\tbob --thread thread-bob --app-server ws://127.0.0.1:2' "$CAPTURE"
+
+  kill "$dispatcher_a" "$dispatcher_b" 2>/dev/null || true
+  kill "$parent_a" "$parent_b" 2>/dev/null || true
+  local p
+  for p in "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b"; do
+    _wait_launcher_pid_bounded "$p" 100 || _report_launcher_failure "teardown timeout waiting for pid $p"
+  done
+  TEST_LIFETIME_PIDS=""
+}
+
+@test "launcher: seats sharing one project and home do not retire each other's bridge (#1280)" {
+  skip_on_windows "mock bridge, default path: the Windows launcher writes no pidfile for a non-native bridge, and a mock lease's start token is not a pwsh one; the equivalent guarantee is carried by the windows-native two-seat test"
+  # Two seats, each with its OWN request file (seat-keyed), serving different
+  # roles. Another seat's request is never evidence about this seat's role, so
+  # nothing here may retire the other seat's bridge.
+  # Regression for the flapping the bridge's role-keyed state files caused:
+  # each seat has its own app-server URL, so a dispatcher that also started a
+  # child for the OTHER seat's role saw that bridge as bound to a foreign URL,
+  # killed and respawned it, and the other seat did the same back. Scoped
+  # dispatch must settle at exactly one spawn per role and no termination.
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  local key_b
+  key_b="$(_agmsg_codex_seat_key_new)"
+  write_seat_request "$key_b" thread-bob team bob ws://127.0.0.1:2
+  export MOCK_BRIDGE_SLEEP=120
+  sleep 60 3>&- & local parent_a=$!
+  sleep 60 3>&- & local parent_b=$!
+  TEST_LIFETIME_PIDS="$parent_a $parent_b"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
+  local dispatcher_a=$!
+  AGMSG_CODEX_SEAT_KEY="$key_b" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2" "$parent_b" >/dev/null 2>&1 3>&- &
+  local dispatcher_b=$!
+
+  local i
+  for i in {1..100}; do
+    [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ] && [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ] && break
+    sleep 0.1
+  done
+  [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ]
+  [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ]
+  local alice_pid bob_pid
+  alice_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  bob_pid="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+
+  # Long enough for the old behavior to have replaced a bridge several times.
+  sleep 10
+  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 2 ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$alice_pid" ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.bob.pid")" = "$bob_pid" ]
+  kill -0 "$alice_pid"
+  kill -0 "$bob_pid"
+
+  kill "$dispatcher_a" "$dispatcher_b" 2>/dev/null || true
+  kill "$parent_a" "$parent_b" 2>/dev/null || true
+  local p
+  for p in "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b"; do
+    _wait_launcher_pid_bounded "$p" 100 || _report_launcher_failure "teardown timeout waiting for pid $p"
+  done
+  TEST_LIFETIME_PIDS=""
 }
 
 @test "launcher: only one dispatcher runs per project" {
@@ -652,16 +798,16 @@ run_launcher() {
   wait "$parent_b" 2>/dev/null || true
 }
 
-@test "launcher: project request thread never overrides per-role recorded threads (#150 phase 2)" {
+@test "launcher: request pair selects the matching recorded thread (#150 phase 2)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
-  write_request thread-bob
+  write_request thread-bob team bob
   run_launcher
 
-  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  assert_capture
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
-  ! grep -q -- $'--pair team\talice --thread thread-bob' "$CAPTURE"
+  ! grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
 }
 
 @test "launcher: role record update keeps child scoped to the same pair" {
@@ -864,11 +1010,10 @@ EOF
   wait "$parent" 2>/dev/null || true
 }
 
-@test "launcher: the identity cache still sees a role added mid-loop (#466)" {
+@test "launcher: a role added mid-loop is used only after its request arrives (#466)" {
   # The poll no longer re-runs identities.sh every tick; it serves a cache
-  # guarded on the team configs' mtimes. This is the test that fails if that
-  # guard never invalidates: a role joined while the dispatcher is already
-  # looping has to be picked up anyway.
+  # guarded on the team configs' mtimes. A role joined while the dispatcher is
+  # already looping is eligible only when this seat's request names it.
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=20
   sleep 65 3>&- & local parent=$!
@@ -887,6 +1032,9 @@ EOF
   sleep 3
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team bob thread-bob "$PROJ" codex
+  # SessionStart/actas publish the seat's narrowed pair. Until that request is
+  # written, the project-wide identity is deliberately ignored.
+  write_request thread-bob team bob
   for i in {1..100}; do
     grep -q -- $'--pair team\tbob' "$CAPTURE" 2>/dev/null && break
     sleep 0.1
@@ -1130,7 +1278,7 @@ cleanup_native_pid_probe() {
   setup_native_bridge_fixture
   export NATIVE_PUBLISH_DELAY_MS=2500
   put_record team alice thread-transient "$PROJ" codex
-  write_request thread-transient
+  write_request thread-transient team alice
   start_native_launcher
   wait_for_native_spawns 1
   local native_pid i request_file
@@ -1797,47 +1945,221 @@ _load_role_binding_functions() {
   [[ "$output" != *"unexpected-cleanup"* ]]
 }
 
-@test "launcher: custom multi-role request for bob does not retire alice" {
+# Start a custom-bridge launcher whose seat serves alice, and wait for her bridge.
+# Sets LAUNCH_PARENT / LAUNCH_DISPATCHER / ALICE_PID.
+_start_alice_seat_custom() {
   put_record team alice thread-alice "$PROJ" codex
-  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
-  put_record team bob thread-bob "$PROJ" codex
   export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
   export MOCK_BRIDGE_SLEEP=60
-  sleep 65 3>&- & local parent=$!
-  bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$parent" >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- & local dispatcher=$!
+  sleep 65 3>&- & LAUNCH_PARENT=$!
+  TEST_LIFETIME_PIDS="$LAUNCH_PARENT"
+  bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$LAUNCH_PARENT" >"$LAUNCHER_STDOUT" 2>"$LAUNCHER_STDERR" 3>&- & LAUNCH_DISPATCHER=$!
   local attempts=0
   while [ "$attempts" -lt 100 ]; do
-    [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ] && [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ] && break
+    [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ] && break
     sleep 0.1
     attempts=$((attempts + 1))
   done
   [ -s "$RUN_DIR/codex-bridge.team.alice.pid" ]
-  [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ]
-  local alice_pid bob_pid
-  alice_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
-  bob_pid="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
-  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
-  sleep 1
-  kill -0 "$alice_pid"
-  kill -0 "$bob_pid"
-  kill "$dispatcher" "$parent" 2>/dev/null || true
+  ALICE_PID="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
 }
 
-@test "launcher: native multi-role request for bob does not retire alice" {
-  skip_unless_windows "requires Git Bash native leases"
+_wait_pid_gone() { # <pid> [tries]
+  local i
+  for i in $(seq 1 "${2:-100}"); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+@test "launcher: custom multi-role request for bob retires alice and starts bob (#1280)" {
+  skip_on_windows "a mock lease's start token is not a Windows native pwsh token, so the mock bridge can be neither verified nor retired there; single-seat role switching on Windows is covered by the native multi-role test"
+  # One seat claims alice first; a later actas publishes bob as THIS seat's
+  # request. The seat no longer serves alice, so her child and bridge retire
+  # and bob's are started (upstream #1285 behavior).
+  _start_alice_seat_custom
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  local attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ] && break
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  [ -s "$RUN_DIR/codex-bridge.team.bob.pid" ]
+  kill -0 "$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+  _wait_pid_gone "$ALICE_PID"
+  # count_child_launchers counts alice's child: it must be gone.
+  [ "$(wait_for_child_count 0)" -eq 0 ]
+  kill "$LAUNCH_DISPATCHER" "$LAUNCH_PARENT" 2>/dev/null || true
+}
+
+@test "launcher: an empty-pair request (ambiguous actas) retires this seat's role (#1280)" {
+  _start_alice_seat_custom
+  printf 'codex\tthread-alice\tws://127.0.0.1:1\t\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  _wait_pid_gone "$ALICE_PID"
+  [ "$(wait_for_child_count 0)" -eq 0 ]
+  kill "$LAUNCH_DISPATCHER" "$LAUNCH_PARENT" 2>/dev/null || true
+}
+
+@test "launcher: a missing or malformed request never retires this seat's role (#1280, PR1348)" {
+  _start_alice_seat_custom
+  local request="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  mv "$request" "$request.hold"
+  sleep 1
+  kill -0 "$ALICE_PID"
+  printf 'garbage without tabs\n' > "$request"
+  sleep 1
+  kill -0 "$ALICE_PID"
+  mv "$request.hold" "$request"
+  sleep 1
+  kill -0 "$ALICE_PID"
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$ALICE_PID" ]
+  kill "$LAUNCH_DISPATCHER" "$LAUNCH_PARENT" 2>/dev/null || true
+}
+
+@test "launcher: windows-native two seats sharing one project and home do not retire each other's bridge (#1280)" {
+  # Two seats, each with its own seat key, app-server URL and request, serve
+  # alice and bob in the SAME project and effective home. Each dispatcher may
+  # start only its own role: a dispatcher that also started the other seat's
+  # role would see that bridge bound to a foreign URL, retire it and respawn
+  # it, and the seats would replace each other's bridge indefinitely.
+  _emulate_windows_native_path
   setup_native_bridge_fixture
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
+  local key_b
+  key_b="$(_agmsg_codex_seat_key_new)"
+  write_seat_request "$key_b" thread-bob team bob ws://127.0.0.1:2
   start_native_launcher
+  sleep 300 3>&- & NATIVE_PARENT_B=$!
+  NATIVE_EXTRA_PIDS="$NATIVE_PARENT_B"
+  AGMSG_CODEX_SEAT_KEY="$key_b" bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:2' "$NATIVE_PARENT_B" \
+    >"$LAUNCHER_STDOUT.b" 2>"$LAUNCHER_STDERR.b" 3>&- &
+  NATIVE_DISPATCHER_B=$!
+  NATIVE_EXTRA_PIDS="$NATIVE_EXTRA_PIDS $NATIVE_DISPATCHER_B"
+
   wait_for_native_spawns 2
-  local pid
+  local pid alice_pid bob_pid i
   while IFS= read -r pid; do assert_native_publication_accepted "$pid"; done < "$RUN_DIR/native-spawns"
-  sleep 3
-  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
-  sleep 1
-  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  alice_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  bob_pid="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+
+  # Long enough for a retire/respawn cycle to have shown up several times.
+  sleep 10
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$alice_pid" ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.bob.pid")" = "$bob_pid" ]
+  ! ls "$RUN_DIR"/codex-bridge-stop.* >/dev/null 2>&1
+}
+
+@test "launcher: native multi-role request for bob retires alice and starts bob (#1280)" {
+  _emulate_windows_native_path
+  setup_native_bridge_fixture
+  put_record team alice thread-alice "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  assert_native_publication_accepted "$(head -n 1 "$RUN_DIR/native-spawns")"
+  sleep 3
+  # A later actas publishes bob as this seat's request: alice's native bridge
+  # is retired (verified stop) and bob's is started.
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  printf 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n' > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  wait_for_native_spawns 2
+  local i
+  for i in {1..200}; do
+    [ "$(wc -l < "$RUN_DIR/native-exits")" -ge 1 ] && break
+    sleep 0.1
+  done
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 1 ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 2 ]
+}
+
+# Run the Windows (Git Bash) code path of the launcher on any host: MSYSTEM
+# selects it, and a stub powershell.exe answers the StartTime queries the
+# launcher and the native bridge fixture make, from /proc. A real Windows host
+# already has both, so this is a no-op there.
+_emulate_windows_native_path() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+  [ -r /proc/self/stat ] || skip "needs /proc to emulate the Windows process queries"
+  local stubdir="$TEST_SKILL_DIR/ps-stub"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/powershell.exe" <<'STUB'
+#!/usr/bin/env bash
+cmd="${*: -1}"
+pid="$(printf '%s' "$cmd" | grep -o -- '-Id [0-9]*' | head -n 1 | cut -d' ' -f2)"
+live=0; ticks=""
+if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
+  s="$(cat "/proc/$pid/stat" 2>/dev/null)"; r="${s##*)}"; read -ra a <<< "$r"
+  ticks="${a[19]:-}"; [ -n "$ticks" ] && live=1
+fi
+case "$cmd" in
+  *LIVE*) if [ "$live" = 1 ]; then printf 'LIVE\t%s\n' "$ticks"; else printf 'ABSENT\n'; fi ;;
+  *) [ "$live" = 1 ] || exit 1; printf '%s\n' "$ticks" ;;
+esac
+STUB
+  chmod +x "$stubdir/powershell.exe"
+  # The launcher's live-pid probe asks tasklist. Answer it from /proc like the
+  # real one does: a native bridge pid that is alive must read as alive, or
+  # the launcher would respawn it every tick.
+  cat > "$stubdir/tasklist" <<'STUB'
+#!/usr/bin/env bash
+pid="$(printf '%s ' "$@" | grep -o 'PID eq [0-9]*' | head -n 1 | cut -d' ' -f3)"
+if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
+  printf 'bash.exe %s Console 1 1 K\n' "$pid"
+else
+  echo "INFO: No tasks are running which match the specified criteria."
+fi
+STUB
+  chmod +x "$stubdir/tasklist"
+  export PATH="$stubdir:$PATH" MSYSTEM=MINGW64
+}
+
+# alice's native bridge is slow to publish its lease (longer than the child's
+# 30-second publication wait), so her child parks in the not-published fallback.
+# The seat then selects bob (or publishes an empty pair); once her lease finally
+# publishes she must be retired through the verified stop path, never killed
+# blind while unpublished.
+_native_switch_during_failed_publication() { # <request line, printf format>
+  _emulate_windows_native_path
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=36000
+  put_record team alice thread-alice "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local alice_native i
+  alice_native="$(head -n 1 "$RUN_DIR/native-spawns")"
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  printf "$1" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  # Nothing may be stopped while the lease is still unpublished.
+  sleep 3
+  [ "$(wc -l < "$RUN_DIR/native-exits")" -eq 0 ]
+  [ ! -e "$RUN_DIR/codex-bridge-stop.$alice_native" ]
+  # After publication alice's bridge is retired through a stop request.
+  for i in {1..900}; do
+    [ -f "$RUN_DIR/codex-bridge-stop.$alice_native.ack" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-stop.$alice_native.ack" ]
+  for i in {1..100}; do
+    grep -Fxq "$alice_native" "$RUN_DIR/native-exits" && break
+    sleep 0.1
+  done
+  grep -Fxq "$alice_native" "$RUN_DIR/native-exits"
+}
+
+@test "launcher: native request switch during a failed publication retires alice once her lease publishes (#1280)" {
+  _native_switch_during_failed_publication 'codex\tthread-bob\tws://127.0.0.1:1\tteam\tbob\n'
+}
+
+@test "launcher: native empty-pair request during a failed publication retires alice once her lease publishes (#1280)" {
+  _native_switch_during_failed_publication 'codex\tthread-alice\tws://127.0.0.1:1\t\n'
 }
 
 @test "launcher: binding update between argv capture and spawn rejects stale descriptor" {
