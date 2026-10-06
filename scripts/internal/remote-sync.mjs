@@ -2936,13 +2936,27 @@ export async function rosterSequencesFor(config, dependencies = {}) {
   return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
 }
 
+// [experiment] The storage driver's capabilities are fixed for the lifetime of
+// an installation, and an engine stands down when the installation is updated,
+// so the answer is kept in this process instead of spawning the driver every
+// cycle. Only the default driver is cached (injected test drivers are not).
+const driverCapabilitiesCache = new Map();
+async function cachedDriverCapabilities(config) {
+  const key = `${process.env.AGMSG_SYNC_DRIVER}\0${config.local_team}`;
+  if (!driverCapabilitiesCache.has(key)) {
+    driverCapabilitiesCache.set(key, await driver("capabilities", config, []));
+  }
+  return driverCapabilitiesCache.get(key);
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
   const eventCall = dependencies.eventCall ?? event;
   const localAgentsCall = dependencies.localAgentsCall ?? localAgentRoster;
   const rosterSequencesCall = dependencies.rosterSequencesCall ?? rosterSequencesFor;
-  const driverCapabilities = await driverCall("capabilities", config, []);
+  const driverCapabilities = dependencies.driverCall ?
+    await driverCall("capabilities", config, []) : await cachedDriverCapabilities(config);
   if (!stage2ReadStateSupported(driverCapabilities)) {
     await eventCall("read-state.skipped", { reason: "driver-capability-not-advertised" });
     return;
