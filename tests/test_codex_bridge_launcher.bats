@@ -170,8 +170,8 @@ teardown() {
       sleep 0.1
     done
     [ -z "${NATIVE_PARENT:-}" ] || kill "$NATIVE_PARENT" 2>/dev/null || true
+    local pid native_failed=0
     for pid in ${NATIVE_EXTRA_PIDS:-}; do kill "$pid" 2>/dev/null || true; done
-    local native_failed=0
     if [ "$finished" -lt "$started" ]; then
       native_failed=1
       _report_launcher_failure "native fixture exit remains unproved after 45 seconds"
@@ -180,6 +180,15 @@ teardown() {
       native_failed=1
       _report_launcher_failure "native dispatcher exit remains unproved"
     fi
+    # Every extra pid a test added (a second seat's lifetime and dispatcher)
+    # gets the same bounded wait as the first dispatcher: it still reads this
+    # test's RUN_DIR until it exits, so teardown_test_env must not run first.
+    for pid in ${NATIVE_EXTRA_PIDS:-}; do
+      if ! _wait_launcher_pid_bounded "$pid" 100; then
+        native_failed=1
+        _report_launcher_failure "native extra pid $pid exit remains unproved"
+      fi
+    done
     if [ "$native_failed" = 1 ] || [ "${LAUNCHER_FAILURE:-0}" = 1 ]; then
       printf 'native fixture artifacts preserved at %s\n' "$TEST_SKILL_DIR" >&2
       return 1
@@ -668,7 +677,10 @@ run_launcher() {
 
   kill "$dispatcher_a" "$dispatcher_b" 2>/dev/null || true
   kill "$parent_a" "$parent_b" 2>/dev/null || true
-  wait "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b" 2>/dev/null || true
+  local p
+  for p in "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b"; do
+    _wait_launcher_pid_bounded "$p" 100 || _report_launcher_failure "teardown timeout waiting for pid $p"
+  done
   TEST_LIFETIME_PIDS=""
 }
 
@@ -718,7 +730,10 @@ run_launcher() {
 
   kill "$dispatcher_a" "$dispatcher_b" 2>/dev/null || true
   kill "$parent_a" "$parent_b" 2>/dev/null || true
-  wait "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b" 2>/dev/null || true
+  local p
+  for p in "$dispatcher_a" "$dispatcher_b" "$parent_a" "$parent_b"; do
+    _wait_launcher_pid_bounded "$p" 100 || _report_launcher_failure "teardown timeout waiting for pid $p"
+  done
   TEST_LIFETIME_PIDS=""
 }
 
