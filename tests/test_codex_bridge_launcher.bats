@@ -672,6 +672,7 @@ run_launcher() {
 }
 
 @test "launcher: seats sharing one project and home do not retire each other's bridge (#1280)" {
+  skip_on_windows "the Windows launcher writes no pidfile for a non-native bridge and a mock lease's start token is not a pwsh one, so it can be neither seen nor retired there; the native fixture tests carry the equivalent guarantee"
   # Two seats, each with its OWN request file (seat-keyed), serving different
   # roles. Another seat's request is never evidence about this seat's role, so
   # nothing here may retire the other seat's bridge.
@@ -1261,7 +1262,7 @@ cleanup_native_pid_probe() {
   setup_native_bridge_fixture
   export NATIVE_PUBLISH_DELAY_MS=2500
   put_record team alice thread-transient "$PROJ" codex
-  write_request thread-transient
+  write_request thread-transient team alice
   start_native_launcher
   wait_for_native_spawns 1
   local native_pid i request_file
@@ -1957,6 +1958,7 @@ _wait_pid_gone() { # <pid> [tries]
 }
 
 @test "launcher: custom multi-role request for bob retires alice and starts bob (#1280)" {
+  skip_on_windows "the Windows launcher writes no pidfile for a non-native bridge and a mock lease's start token is not a pwsh one, so it can be neither seen nor retired there; the native fixture tests carry the equivalent guarantee"
   # One seat claims alice first; a later actas publishes bob as THIS seat's
   # request. The seat no longer serves alice, so her child and bridge retire
   # and bob's are started (upstream #1285 behavior).
