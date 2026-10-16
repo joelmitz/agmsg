@@ -100,6 +100,7 @@ agmsg_daemon_seat_report() {
       case "$cached" in
         thread_archived*) record_status='conversation archived; resume an active conversation and run actas again' ;;
         codex_home_mismatch*) record_status='incorrect CODEX_HOME record; run actas from the correct Codex profile' ;;
+        thread_rollout_missing*) record_status="the recorded Codex profile has no rollout for this conversation; check for a profile mismatch or a moved/deleted rollout, then run actas from the session's profile" ;;
       esac
       label="Codex $team/$agent"
       if [ "${REDACTED:-0}" = 1 ]; then label='Codex seat (redacted)'; cached=""; fi

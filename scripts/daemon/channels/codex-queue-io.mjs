@@ -348,5 +348,6 @@ export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {
   if (rolloutState === "valid") return { state: "addressable", reason: "" };
   if (rolloutState === "archived") return { state: "blocked", reason: "thread_archived" };
   if (rolloutState === "no_rollout") return { state: "blocked", reason: "codex_home_mismatch" };
+  if (rolloutState === "rollout_missing") return { state: "blocked", reason: "thread_rollout_missing" };
   return { state: "blocked", reason: "thread_observation_failed" };
 }

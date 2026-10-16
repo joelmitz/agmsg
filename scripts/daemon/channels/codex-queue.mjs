@@ -436,13 +436,13 @@ export function createCodexQueueChannel({
 
     const nonce = newNonce();
     const rollout = await readRolloutNonce(record.codex_home, record.thread, nonce);
-    // A recorded home whose sessions tree has no rollout for this thread is a
-    // home mismatch (2026-10-16: a tool shell without CODEX_HOME recorded
-    // $HOME/.codex), and `daemon status` says so instead of the generic
-    // "could not be verified".
+    // A recorded home whose sessions tree has no rollout for this thread is
+    // reported as exactly that observation, not as a proven home mismatch:
+    // the profile may be wrong (2026-10-16: a tool shell without CODEX_HOME
+    // recorded $HOME/.codex), or the rollout may have been moved or deleted.
     const rolloutState = rollout.state === "absent" || rollout.state === "present"
       ? "valid"
-      : rollout.reason === "thread_rollout_missing" ? "no_rollout" : "invalid";
+      : rollout.reason === "thread_rollout_missing" ? "rollout_missing" : "invalid";
     const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState });
     if (classification.state !== "addressable") {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason }, now);

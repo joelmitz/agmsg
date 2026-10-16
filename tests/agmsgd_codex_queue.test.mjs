@@ -296,6 +296,7 @@ test('seat classification never treats an uncertain destination or bridge as add
   assert.deepEqual(classifyCodexSeat({ roleSession: null }), { state: 'unaddressable', reason: 'role_session_missing' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'archived' }), { state: 'blocked', reason: 'thread_archived' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'no_rollout' }), { state: 'blocked', reason: 'codex_home_mismatch' });
+  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'rollout_missing' }), { state: 'blocked', reason: 'thread_rollout_missing' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'unknown' }), { state: 'blocked', reason: 'bridge_state_unknown' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record }), { state: 'blocked', reason: 'bridge_state_unknown' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped' }), { state: 'blocked', reason: 'thread_observation_failed' });
@@ -629,8 +630,10 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
 
 // 2026-10-16: a seat recorded with a profile whose sessions tree has no
 // rollout for its thread (a tool shell without CODEX_HOME recorded
-// $HOME/.codex) reads as a home mismatch, not "could not be verified".
-test('a recorded home without the thread rollout is reported as codex_home_mismatch', async (t) => {
+// $HOME/.codex) is reported as that observation -- not "could not be
+// verified", and not a proven home mismatch either (the rollout may have been
+// moved or deleted).
+test('a recorded home without the thread rollout is reported as thread_rollout_missing', async (t) => {
   const { root, db, options } = executableFixture(t);
   const wrongHome = path.join(root, 'default-profile');
   mkdirSync(path.join(wrongHome, 'sessions'), { recursive: true });
@@ -643,6 +646,6 @@ test('a recorded home without the thread rollout is reported as codex_home_misma
     readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'codex', project: root, thread, codex_home: wrongHome } }),
   });
   await channel.pollOnce();
-  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_codex_seat').get() }, { state: 'blocked', reason: 'codex_home_mismatch' });
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_codex_seat').get() }, { state: 'blocked', reason: 'thread_rollout_missing' });
   await channel.stop();
 });
