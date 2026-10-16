@@ -56,11 +56,26 @@ agmsg_codex_apply_home() {
       *$'\n'*|*$'\r'*) echo "$label: AGMSG_CODEX_HOME must not contain newlines" >&2; return 1 ;;
     esac
     [ "$AGMSG_CODEX_HOME" != "/" ] || { echo "$label: AGMSG_CODEX_HOME must not be /" >&2; return 1; }
+    # Every step is checked explicitly: callers invoke this as `... || exit 1`,
+    # which disables errexit inside the function, so nothing here may rely on
+    # set -e to stop a failed step.
     if [ ! -e "$AGMSG_CODEX_HOME" ]; then
-      (umask 077; mkdir -p "$AGMSG_CODEX_HOME")
+      if ! (umask 077 && mkdir -p "$AGMSG_CODEX_HOME"); then
+        echo "$label: cannot create AGMSG_CODEX_HOME" >&2
+        return 1
+      fi
     fi
     [ -d "$AGMSG_CODEX_HOME" ] || { echo "$label: AGMSG_CODEX_HOME is not a directory" >&2; return 1; }
-    AGMSG_CODEX_HOME="$(cd "$AGMSG_CODEX_HOME" 2>/dev/null && pwd)"
+    # Normalize into a local first; AGMSG_CODEX_HOME is only replaced once the
+    # directory is known to be enterable, so a failure never empties it and
+    # silently falls back to an inherited CODEX_HOME or the default profile.
+    local normalized
+    if ! normalized="$(cd "$AGMSG_CODEX_HOME" && pwd)" || [ -z "$normalized" ]; then
+      echo "$label: AGMSG_CODEX_HOME is not accessible" >&2
+      return 1
+    fi
+    [ "$normalized" != "/" ] || { echo "$label: AGMSG_CODEX_HOME must not be /" >&2; return 1; }
+    AGMSG_CODEX_HOME="$normalized"
     export AGMSG_CODEX_HOME
   fi
   resolved="$(agmsg_codex_effective_home)"

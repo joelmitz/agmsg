@@ -87,6 +87,38 @@ write_home_logging_codex() {
   refute grep -q '^plain' "$CALL_LOG"
 }
 
+@test "an inaccessible or uncreatable AGMSG_CODEX_HOME stops shim and monitor before any Codex starts (fork)" {
+  [ "$(id -u)" != 0 ] || skip "root can enter a mode-000 directory"
+  write_home_logging_codex
+  local locked="$TEST_SKILL_DIR/locked-home" ro_parent="$TEST_SKILL_DIR/ro-parent"
+  mkdir -p "$locked" "$ro_parent"
+  chmod 000 "$locked"
+  chmod 555 "$ro_parent"
+  local home msg via
+  for home in "$locked" "$ro_parent/new-home"; do
+    case "$home" in
+      "$locked") msg='AGMSG_CODEX_HOME is not accessible' ;;
+      *) msg='cannot create AGMSG_CODEX_HOME' ;;
+    esac
+    for via in shim monitor; do
+      : > "$CALL_LOG"
+      if [ "$via" = shim ]; then
+        CODEX_HOME="$TEST_SKILL_DIR/codex-profile" AGMSG_CODEX_HOME="$home" \
+          run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project"
+      else
+        CODEX_HOME="$TEST_SKILL_DIR/codex-profile" AGMSG_CODEX_HOME="$home" \
+          run bash "$SCRIPTS/drivers/types/codex/codex-monitor.sh" --project "$TEST_SKILL_DIR" --codex-command resume -- --last
+      fi
+      chmod 755 "$locked" "$ro_parent"
+      [ "$status" -ne 0 ] || { echo "$via $home: rc=0" >&2; return 1; }
+      assert_contains "$msg"
+      [ ! -s "$CALL_LOG" ] || { echo "$via $home started: $(cat "$CALL_LOG")" >&2; return 1; }
+      chmod 000 "$locked"; chmod 555 "$ro_parent"
+    done
+  done
+  chmod 755 "$locked" "$ro_parent"
+}
+
 @test "direct monitor wrapper also exports AGMSG_CODEX_HOME while enabled (fork)" {
   write_home_logging_codex
   local isolated="$TEST_SKILL_DIR/isolated-home"
