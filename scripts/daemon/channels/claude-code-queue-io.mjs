@@ -165,7 +165,10 @@ function readTail(path, maxBytes) {
 //   - delivered: a `type:"user"` line with `origin.body` containing the
 //     nonce verbatim — proof of delivery (with the mid-turn shape below).
 //   - held/declined: a `type:"system"`, `subtype:"informational"` line whose
-//     `content` (a possibly-truncated preview) contains the nonce.
+//     `content` (a possibly-truncated preview) contains the nonce. Measured
+//     again 2026-10-16 (2.1.301): the preview shows `agmsg:<nonce>` without
+//     the surrounding brackets, and a seat whose permission mode class differs
+//     from the sender's `from-mode` holds every nudge this way.
 //   - absorbed mid-turn (measured 2026-10-15): a `type:"attachment"` line
 //     whose `attachment.type` is `queued_command` and whose
 //     `attachment.prompt` contains the nonce; the model read it in that turn.
@@ -182,9 +185,14 @@ export function observeTranscript(transcriptPath, nonce) {
     return { state: "unreadable", reason: "transcript_read_failed" };
   }
   const marker = `[agmsg:${nonce}]`;
+  // The held notice's preview drops the brackets (measured 2026-10-16 on
+  // Claude Code 2.1.301: `preview: «agmsg:<nonce> New messages are
+  // waiting...»`), so a hold is matched on the bare tag. The nonce is a fresh
+  // random id per nudge, so the bare tag is still unique to this nudge.
+  const bareMarker = `agmsg:${nonce}`;
   let heldSeen = false;
   for (const line of text.split("\n")) {
-    if (!line || !line.includes(marker)) continue;
+    if (!line || !line.includes(bareMarker)) continue;
     let row;
     try {
       row = JSON.parse(line);
@@ -202,7 +210,7 @@ export function observeTranscript(transcriptPath, nonce) {
       && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
       return { state: "delivered" };
     }
-    if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(marker)) {
+    if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(bareMarker)) {
       heldSeen = true;
     }
   }

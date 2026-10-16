@@ -85,6 +85,19 @@ function saveSeat(db, { seat, messagingSocket = null, state, reason = "" }, now)
   });
 }
 
+function seatReason(db, seat) {
+  return db.prepare("SELECT reason FROM beta_claude_seat WHERE seat = ?").get(seat)?.reason ?? "";
+}
+
+// A held nudge reached the seat's socket but the receiving session parked it
+// (permission mode class mismatch) instead of showing it to the model, so the
+// seat is not reachable through this channel until someone approves it there.
+// The seat table's CHECK allows only addressable/unaddressable/blocked, and
+// "blocked (peer_held)" is what `daemon status` should show for it.
+function pendingSeatState(reason) {
+  return reason === "peer_held" ? "blocked" : "addressable";
+}
+
 function setQueueState(db, id, state) {
   withImmediateTransaction(db, () => {
     db.prepare("UPDATE beta_claude_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
@@ -152,6 +165,7 @@ export function createClaudeCodeQueueChannel({
     if (pending) {
       const observation = pendingObservation(pending, observe);
       if (observation.state === "confirmed") {
+        log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} confirmed`);
         setQueueState(db, pending.id, "confirmed");
         saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable" }, now);
         return;
@@ -178,9 +192,14 @@ export function createClaudeCodeQueueChannel({
         record.messaging_socket !== pending.messaging_socket ||
         (transcriptNow && transcriptNow !== pending.transcript_path));
       if (!socketGone && !recordMoved) {
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable", reason: socketCheck.state === "ok" ? observation.reason : socketCheck.reason }, now);
+        const reason = socketCheck.state === "ok" ? observation.reason : socketCheck.reason;
+        if (reason === "peer_held" && seatReason(db, seat) !== "peer_held") {
+          log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} held by the receiving session (not shown to the model until approved there)`);
+        }
+        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: pendingSeatState(reason), reason }, now);
         return;
       }
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} expired (${socketGone ? "messaging socket gone" : "seat record moved"})`);
       setQueueState(db, pending.id, "expired");
     }
     if (!registered) return;
@@ -270,17 +289,23 @@ export function createClaudeCodeQueueChannel({
 
     const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), timeoutMs });
     if (result.state !== "sent") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} send failed (${result.reason})`);
       setQueueState(db, id, "expired");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
       return;
     }
+    log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} sent`);
     const firstCheck = pendingObservation(readPending(db, seat), observe);
     if (firstCheck.state === "confirmed") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} confirmed`);
       setQueueState(db, id, "confirmed");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
       return;
     }
-    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable", reason: firstCheck.reason }, now);
+    if (firstCheck.reason === "peer_held") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} held by the receiving session (not shown to the model until approved there)`);
+    }
+    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: pendingSeatState(firstCheck.reason), reason: firstCheck.reason }, now);
   }
 
   async function pollOnce() {

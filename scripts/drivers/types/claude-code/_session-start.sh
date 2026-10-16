@@ -141,10 +141,19 @@ EOF
       "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" "${TYPE:-}" "$my_instance"
   fi
   if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"; then
-    cat <<EOF
+    # Published is not delivered: a session whose permission mode class
+    # differs from the sender's holds every nudge (measured 2026-10-16). The
+    # Monitor is skipped only once the daemon has confirmed a nudge reached
+    # this socket; otherwise it stays, and watch.sh steps aside by itself once
+    # a delivery is confirmed.
+    if agmsg_claude_code_native_confirmed "$pair_team" "$pair_agent" "$socket"; then
+      cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF
-    exit 0
+      exit 0
+    fi
+    echo "AGMSG delivery: agmsgd is running and will also try this session directly, but no delivery to it is confirmed yet, so the native channel is not relied on. Next: arm the Monitor below."
+    return 0
   fi
   echo "AGMSG delivery: agmsgd is running, but the delivery record for $pair_agent@$pair_team did not take, so the native channel is not used. Next: arm the Monitor below, then run agmsg doctor."
 }

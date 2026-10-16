@@ -66,6 +66,15 @@ setup_test_env() {
   # real profile (measured 2026-10-16: 52 launcher/record failures). Tests that
   # want them set them explicitly.
   unset AGMSG_CODEX_HOME ORCA_CODEX_HOME
+  # The same profile also reaches a fixture through its ancestors: the codex
+  # recorder reads the nearest ancestor process's CODEX_HOME from /proc, and
+  # the ancestors here are the developer's own shell. Tests that exercise that
+  # lookup point this at a fake /proc of their own.
+  export AGMSG_CODEX_PROC_ROOT="/nonexistent-agmsg-test-proc"
+  # A Claude Code developer shell's own delivery settings (measured
+  # 2026-10-17: AGMSG_CC_MONITOR_KEEP_ALIVE turned watch.bats's quiet-run
+  # "stopping" case into a re-arm).
+  unset AGMSG_CC_MONITOR_KEEP_ALIVE CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in

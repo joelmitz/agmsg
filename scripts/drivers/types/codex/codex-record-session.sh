@@ -174,25 +174,39 @@ fi
 # $HOME/.codex as before.
 # Fork: agmsg_codex_effective_home also honors the opt-in AGMSG_CODEX_HOME
 # (and the ORCA_CODEX_HOME hint) ahead of CODEX_HOME / $HOME/.codex.
-codex_home="$(agmsg_codex_effective_home)"
-case "$codex_home" in
-  *[[:cntrl:]]*) codex_home="" ;;
-  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-  *) codex_home="" ;;
-esac
-if [ -n "$codex_home" ] && [ -d "$codex_home" ]; then
-  codex_home="$(agmsg_canonical_path "$codex_home")" || codex_home=""
+#
+# This script runs as a Codex tool command, and a tool shell does not
+# necessarily carry the session's environment (shell_environment_policy can
+# drop CODEX_HOME), so "no variable set" here does not mean $HOME/.codex.
+# With no explicit variable, the Codex process's own home (an ancestor's
+# environment) is the better answer; with a known thread, the home that holds
+# its rollout overrides both below.
+_normalize_codex_home() {
+  local h="$1"
+  case "$h" in
+    *[[:cntrl:]]*) return 1 ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$h" ] || return 1
+  h="$(agmsg_canonical_path "$h")" || return 1
   # Keep the absolute path in the cross-platform form used by Node consumers;
   # Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
-  codex_home="$(agmsg_normalize_project_path "$codex_home")" || codex_home=""
-  case "$codex_home" in
-    *[[:cntrl:]]*) codex_home="" ;;
+  h="$(agmsg_normalize_project_path "$h")" || return 1
+  case "$h" in
+    *[[:cntrl:]]*) return 1 ;;
     /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-    *) codex_home="" ;;
+    *) return 1 ;;
   esac
+  printf '%s' "$h"
+}
+if [ -z "${AGMSG_CODEX_HOME:-}${CODEX_HOME:-}${ORCA_CODEX_HOME:-}" ] \
+   && codex_home="$(agmsg_codex_ancestor_home)" && [ -n "$codex_home" ]; then
+  :
 else
-  codex_home=""
+  codex_home="$(agmsg_codex_effective_home)"
 fi
+codex_home="$(_normalize_codex_home "$codex_home")" || codex_home=""
 
 if [ -z "$thread" ]; then
   # No app-server to ask, or it could not be reached -- a codex session outside
@@ -244,6 +258,18 @@ if [ -z "$thread" ]; then
 fi
 
 [ -n "$thread" ] || exit 0
+
+# The daemon finds this conversation by its rollout under codex_home, so the
+# recorded home is the one that actually holds this thread's rollout. Without
+# this, a tool shell missing CODEX_HOME recorded $HOME/.codex and the daemon
+# reported thread_rollout_missing for a seat that was running fine elsewhere.
+if thread_home="$(agmsg_codex_home_for_thread "$thread")" \
+   && thread_home="$(_normalize_codex_home "$thread_home")"; then
+  codex_home="$thread_home"
+else
+  echo "codex-record-session: no rollout of thread $thread was found under any known Codex home; recording ${codex_home:-no profile} (agmsgd may not find this conversation; start Codex with CODEX_HOME or AGMSG_CODEX_HOME set to its profile)" >&2
+fi
+
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.

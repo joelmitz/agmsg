@@ -130,6 +130,83 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
+# 2026-10-16: codex-record-session.sh runs as a Codex tool command, and the
+# tool shell need not carry the session's CODEX_HOME (shell_environment_policy).
+# It then recorded $HOME/.codex for a seat whose rollout lives in another
+# profile, and agmsgd reported thread_rollout_missing. The recorded home must
+# be the one that holds the thread's rollout.
+_alt_rollout() {   # <home> <uuid> <cwd>
+  mkdir -p "$1/sessions/2026/10/16"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$2" "$3" \
+    > "$1/sessions/2026/10/16/rollout-2026-10-16T10-00-00-$2.jsonl"
+}
+
+# Runs the recorder under a parent whose (fake /proc) environment carries
+# CODEX_HOME=<home>, the way a Codex process does for its tool shell.
+_record_under_codex_parent() {   # <home> <team> <agent> <project>
+  local fake="$BATS_TEST_TMPDIR/proc"
+  bash -c '
+    mkdir -p "$1/$$"
+    printf "CODEX_HOME=%s\0" "$2" > "$1/$$/environ"
+    printf "PPid:\t1\n" > "$1/$$/status"
+    AGMSG_CODEX_PROC_ROOT="$1" bash "$3" "$4" "$5" "$6"
+  ' _ "$fake" "$1" "$TYPES/codex/codex-record-session.sh" "$2" "$3" "$4"
+}
+
+_phys_home() {
+  source "$SCRIPTS/lib/resolve-project.sh"
+  agmsg_normalize_project_path "$(cd "$1" && pwd -P)"
+}
+
+@test "codex record: a tool shell without CODEX_HOME records the profile that holds the thread's rollout" {
+  local proj alt thread="01a1453a-9a40-79a0-9133-0a3d26b495e5"
+  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
+  mkdir -p "$HOME/.codex/sessions"
+  _alt_rollout "$alt" "$thread" "$proj"
+  unset CODEX_HOME
+  CODEX_THREAD_ID="$thread" _record_under_codex_parent "$alt" team alice "$proj"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
+}
+
+@test "codex record: with no usable ancestor, a home another codex seat uses is searched for the rollout" {
+  local proj alt thread="01a1453f-e42a-7923-9747-15b09b120fc3"
+  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
+  mkdir -p "$HOME/.codex/sessions"
+  _alt_rollout "$alt" "$thread" "$proj"
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team other "11111111-2222-4333-8444-555555555555" "$proj" codex "" "$(_phys_home "$alt")"
+  run env -u CODEX_HOME CODEX_THREAD_ID="$thread" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$status" -eq 0 ]
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
+}
+
+@test "codex record: no rollout under any known home falls back to the effective profile and says so" {
+  local proj thread="22222222-3333-4444-8555-666666666666"
+  proj="$(mktemp -d)"
+  mkdir -p "$HOME/.codex/sessions"
+  run env -u CODEX_HOME CODEX_THREAD_ID="$thread" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$status" -eq 0 ]
+  grep -qF "no rollout of thread $thread was found" <<<"$output"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$HOME/.codex")" ]
+}
+
+@test "codex record: without a thread id, the Codex parent's home is where the rollout scan looks" {
+  local proj alt thread="33333333-4444-4555-8666-777777777777"
+  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
+  mkdir -p "$HOME/.codex/sessions"
+  _alt_rollout "$alt" "$thread" "$(cd "$proj" && pwd -P)"
+  unset CODEX_HOME CODEX_THREAD_ID
+  _record_under_codex_parent "$alt" team alice "$proj"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
+}
+
 @test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {
   local proj invalid_home
   proj="$(mktemp -d)"

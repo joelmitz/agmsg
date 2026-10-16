@@ -45,7 +45,7 @@ function codexStartupFixture(t, names) {
   const env = { ...process.env, CODEX_HOME: profile, AGMSG_SELF_NAME: 'off', AGMSG_AGENT_PID: String(process.pid),
     AGMSG_CONFIG: join(root, 'config.json'), AGMSG_STORAGE_PATH: root,
     AGMSG_CODEX_BRIDGE_LAUNCHER: '1', AGMSG_CODEX_SEAT_KEY: 'invalid!', AGMSG_CODEX_BRIDGE_APP_SERVER: '' };
-  for (const key of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'HERDR_ENV', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH', 'TMUX', 'TMUX_PANE', 'TERM_PROGRAM', 'ORCA_TERMINAL_HANDLE', 'AGMSG_TERMINAL_DRIVER']) delete env[key];
+  for (const key of ['AGMSG_CODEX_HOME', 'ORCA_CODEX_HOME', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'HERDR_ENV', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH', 'TMUX', 'TMUX_PANE', 'TERM_PROGRAM', 'ORCA_TERMINAL_HANDLE', 'AGMSG_TERMINAL_DRIVER']) delete env[key];
   const start = (id, extra = {}) => execFileSync(process.platform === 'darwin' ? '/bin/bash' : 'bash', [join(root, 'scripts/session-start.sh'), 'codex', root], {
     encoding: 'utf8', input: JSON.stringify({ session_id: id }), env: { ...env, ...extra },
   });

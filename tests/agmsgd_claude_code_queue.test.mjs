@@ -81,6 +81,31 @@ test('observeTranscript: a queue-operation enqueue line is not delivery evidence
   assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
 });
 
+// Measured 2026-10-16 (Claude Code 2.1.301, a permissionMode:auto session
+// receiving agmsgd's from-mode="bypass" nudge): the held notice's preview
+// carries the nonce WITHOUT the brackets, so matching only `[agmsg:<nonce>]`
+// read a held nudge as plain "awaiting_confirmation".
+test('observeTranscript: the measured held notice (bracketless preview) reads as held -> peer_held', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'b64a2112-01b1-4a45-92d0-1c74352e1c2c';
+  writeFileSync(transcriptPath, `${JSON.stringify({
+    type: 'queue-operation',
+    operation: 'enqueue',
+    content: `<cross-session-message from="agmsgd">[agmsg:${nonce}] New messages are waiting. Check your agmsg inbox.</cross-session-message>`,
+  })}\n${JSON.stringify({
+    type: 'system',
+    subtype: 'informational',
+    content: `Held peer message — from an unidentified session [verified pid 2499080] (peer claims name: agmsgd); preview: «agmsg:${nonce} New messages are waiting. Check your agmsg inbox.» …[1 line, 94 chars total — expand to review before approving] — not delivered to Claude (1 held). The sending session's permission mode class doesn't match this session's.`,
+    level: 'warning',
+  })}\n`);
+  const observation = observeTranscript(transcriptPath, nonce);
+  assert.equal(observation.state, 'held');
+  assert.deepEqual(resolvePendingDelivery({ observation }), { state: 'pending', reason: 'peer_held' });
+  // Another nudge's held notice is not this one's.
+  assert.equal(observeTranscript(transcriptPath, 'some-other-nonce').state, 'absent');
+});
+
 // No clock decides a pending nudge: whatever the transcript shows (or fails to
 // show), it stays pending until the channel itself sees the socket or the
 // seat's record change.
@@ -103,18 +128,18 @@ function channelFixture(t) {
   ensureClaudeCodeChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
   t.after(() => db.close());
-  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
+  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' }, observation: { state: 'absent' }, logs: [] };
   const channel = createClaudeCodeQueueChannel({
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
-    log: () => {},
+    log: (message) => { state.logs.push(message); },
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'alice', teamConfig: { agents: { alice: { registrations: [{ type: 'claude-code', project: root }] } } } }] }),
     readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: state.session } }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     send: async () => { state.sent += 1; return { state: 'sent' }; },
-    observe: () => ({ state: 'absent' }),
+    observe: () => state.observation,
     socketAlive: () => state.alive,
     hostPlatform: 'linux',
   });
@@ -161,4 +186,26 @@ test('a conversation stored under another project directory is found by its sess
   mkdirSync(path.dirname(expected), { recursive: true });
   writeFileSync(expected, '');
   assert.equal(resolveTranscriptPath(config, '/proj/recorded', session), expected, 'the recorded project wins when it has the file');
+});
+
+// A held nudge must show as not deliverable (the seat table allows only
+// addressable/unaddressable/blocked), and the send and the hold must both be
+// in agmsgd.log -- once, not on every poll -- since nothing else records them.
+test('a held nudge marks the seat blocked (peer_held) and logs the send and the hold once', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  state.observation = { state: 'held' };
+  await channel.pollOnce();
+  await channel.pollOnce();
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'blocked', reason: 'peer_held' });
+  assert.equal(state.logs.filter((line) => / sent$/.test(line)).length, 1);
+  assert.equal(state.logs.filter((line) => line.includes('held by the receiving session')).length, 1);
+  // Approved in the session: the transcript then shows the delivery.
+  state.observation = { state: 'delivered' };
+  await channel.pollOnce();
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'addressable', reason: '' });
+  assert.equal(db.prepare("SELECT state FROM beta_claude_queue").get().state, 'confirmed');
+  assert.equal(state.logs.filter((line) => / confirmed$/.test(line)).length, 1);
+  await channel.stop();
 });

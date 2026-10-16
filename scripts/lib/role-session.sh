@@ -475,6 +475,23 @@ agmsg_role_session_recorded_uuids() {
   return 0
 }
 
+# Print the codex_home of every codex record, one per line (unordered, may
+# repeat). These are profiles a Codex seat on this install has really used, so
+# codex-record-session.sh can look for a thread's rollout there when the tool
+# shell it runs in was not given the session's CODEX_HOME.
+agmsg_role_session_recorded_codex_homes() {
+  local dir f v
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    [ "$(_agmsg_role_session_field "$f" type)" = codex ] || continue
+    v="$(_agmsg_role_session_field "$f" codex_home)"
+    [ -n "$v" ] && printf '%s\n' "$v"
+  done
+  return 0
+}
+
 # Scan run/role-session.* for the record whose session= field equals <sid> and
 # print its full body (all key=value lines). Empty if none. Used by role-aware
 # SessionStart (PR-E) to map a resumed session id back to its (team, agent).
@@ -564,6 +581,24 @@ agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir
   [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
     && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
+}
+
+# rc 0 only when agmsgd has already seen one of its nudges reach THIS socket:
+# the seat's most recent beta_claude_queue row is `confirmed` and names
+# <socket>. A record the daemon can address is not yet proof the session shows
+# what it is sent: a receiving session whose permission mode class differs from
+# the sender's holds every nudge (measured 2026-10-16, Claude Code 2.1.301), and
+# a held, still-pending, expired or absent row all leave this rc 1. Callers keep
+# the Monitor until this holds, so a seat is never left with neither path.
+agmsg_claude_code_native_confirmed() {   # <team> <agent> <socket>
+  local team="$1" agent="$2" socket="$3" row
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$socket" ] || return 1
+  # The seat key is claude-code-queue.mjs's JSON.stringify([team, agent]);
+  # a name that would need JSON or SQL escaping is never matched here.
+  case "$team$agent" in *[\"\\\']*|*[[:cntrl:]]*) return 1 ;; esac
+  row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "${SKILL_DIR:-}/run/install.db" \
+    "SELECT state, messaging_socket FROM beta_claude_queue WHERE seat = '[\"$team\",\"$agent\"]' ORDER BY id DESC LIMIT 1;" 2>/dev/null)" || return 1
+  [ "${row%%$'\t'*}" = confirmed ] && [ "${row#*$'\t'}" = "$socket" ]
 }
 
 # rc 0 only when agmsgd's Claude channel will accept this install's storage.

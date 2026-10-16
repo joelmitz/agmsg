@@ -626,3 +626,23 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   unlinkSync(path.join(runDir, `codex-bridge-lease.${bridgePid}`));
   installDb.close();
 });
+
+// 2026-10-16: a seat recorded with a profile whose sessions tree has no
+// rollout for its thread (a tool shell without CODEX_HOME recorded
+// $HOME/.codex) reads as a home mismatch, not "could not be verified".
+test('a recorded home without the thread rollout is reported as codex_home_mismatch', async (t) => {
+  const { root, db, options } = executableFixture(t);
+  const wrongHome = path.join(root, 'default-profile');
+  mkdirSync(path.join(wrongHome, 'sessions'), { recursive: true });
+  const binary = path.join(root, 'codex');
+  writeFileSync(binary, '#!/bin/sh\nexit 1\n');
+  chmodSync(binary, 0o755);
+  db.prepare('UPDATE meta SET codex_path=?, node_path=?').run(binary, process.execPath);
+  const channel = createCodexQueueChannel({
+    ...options,
+    readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'codex', project: root, thread, codex_home: wrongHome } }),
+  });
+  await channel.pollOnce();
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_codex_seat').get() }, { state: 'blocked', reason: 'codex_home_mismatch' });
+  await channel.stop();
+});

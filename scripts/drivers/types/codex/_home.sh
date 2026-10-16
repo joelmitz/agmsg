@@ -16,6 +16,68 @@ agmsg_codex_effective_home() {
   fi
 }
 
+# Print the CODEX_HOME (else AGMSG_CODEX_HOME) of the nearest ancestor process
+# that carries one. A Codex tool shell does not necessarily inherit the TUI's
+# environment (shell_environment_policy can drop CODEX_HOME), but the Codex
+# process it runs under still has it, and CODEX_HOME is what that process
+# itself uses. Linux /proc only (AGMSG_CODEX_PROC_ROOT replaces /proc for
+# tests); rc 1 elsewhere or when no readable ancestor has either variable.
+agmsg_codex_ancestor_home() {
+  local proc="${AGMSG_CODEX_PROC_ROOT:-/proc}" pid="${PPID:-}" depth=0 envs value
+  [ -d "$proc" ] || return 1
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ "$depth" -lt 32 ]; do
+    if [ -r "$proc/$pid/environ" ]; then
+      envs="$(tr '\0' '\n' < "$proc/$pid/environ" 2>/dev/null)"
+      value="$(printf '%s\n' "$envs" | sed -n 's/^CODEX_HOME=//p' | head -1)"
+      [ -n "$value" ] || value="$(printf '%s\n' "$envs" | sed -n 's/^AGMSG_CODEX_HOME=//p' | head -1)"
+      if [ -n "$value" ]; then
+        printf '%s' "$value"
+        return 0
+      fi
+    fi
+    pid="$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/$pid/status" 2>/dev/null)"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# Print, in order of preference and without repeats, every Codex home this
+# session could belong to: the explicit variables, the Codex process's own
+# home (agmsg_codex_ancestor_home), every home a recorded codex seat uses, and
+# the default $HOME/.codex. Nothing is assumed about how a profile is named.
+agmsg_codex_home_candidates() {
+  {
+    [ -n "${AGMSG_CODEX_HOME:-}" ] && printf '%s\n' "$AGMSG_CODEX_HOME"
+    [ -n "${CODEX_HOME:-}" ] && printf '%s\n' "$CODEX_HOME"
+    [ -n "${ORCA_CODEX_HOME:-}" ] && printf '%s\n' "$ORCA_CODEX_HOME"
+    agmsg_codex_ancestor_home && printf '\n'
+    if declare -F agmsg_role_session_recorded_codex_homes >/dev/null 2>&1; then
+      agmsg_role_session_recorded_codex_homes
+    fi
+    [ -n "${HOME:-}" ] && printf '%s/.codex\n' "$HOME"
+  } 2>/dev/null | sed 's#/*$##' | awk 'NF && !seen[$0]++'
+}
+
+# Print the first candidate home whose sessions/ holds <thread>'s rollout:
+# that is where the daemon will look for it, whatever the calling shell's
+# environment says. rc 1 when no candidate has it.
+agmsg_codex_home_for_thread() {
+  local thread="$1" home hit
+  [[ "$thread" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
+  while IFS= read -r home; do
+    case "$home" in /* | [A-Za-z]:/*) ;; *) continue ;; esac
+    [ -d "$home/sessions" ] || continue
+    hit="$(find "$home/sessions" -type f -name "rollout-*-$thread.jsonl" -print 2>/dev/null | head -1)"
+    if [ -n "$hit" ]; then
+      printf '%s' "$home"
+      return 0
+    fi
+  done <<EOF
+$(agmsg_codex_home_candidates)
+EOF
+  return 1
+}
+
 agmsg_codex_default_home() {
   [ -n "${HOME:-}" ] && printf '%s/.codex' "$HOME"
 }

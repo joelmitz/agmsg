@@ -147,7 +147,11 @@ agmsg_codex_refresh_destination() {
     [ "$matches" = 1 ] || return 1
   fi
   [ -n "$chosen_team" ] && [ -n "$chosen_name" ] || return 1
-  local profile="${CODEX_HOME:-${HOME:+$HOME/.codex}}" owner
+  # Same resolution as codex-record-session.sh: the home that holds this
+  # thread's rollout, else the fork's effective home (AGMSG_CODEX_HOME first),
+  # never a bare CODEX_HOME read that skips the opt-in variable.
+  local profile owner
+  profile="$(agmsg_codex_home_for_thread "$thread" 2>/dev/null || agmsg_codex_effective_home)"
   case "$profile" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) return 1 ;; esac
   [ -d "$profile" ] || return 1
   profile="$(agmsg_canonical_path "$profile")" || return 1
