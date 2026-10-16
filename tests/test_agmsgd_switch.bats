@@ -23,6 +23,7 @@ setup() {
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
   unset AGMSG_CODEX_SEAT_KEY AGMSG_CODEX_BRIDGE_APP_SERVER AGMSG_CODEX_SHIM_DISABLE AGMSG_CODEX_BRIDGE
   unset AGMSG_DAEMON_NOTICE_SKIP
+  unset AGMSG_CODEX_HOME ORCA_CODEX_HOME
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id='switch-test'; UPDATE daemon_intent SET desired='on';"
   printf '{"install_id":"switch-test","gen":1}\n' > "$TEST_SKILL_DIR/run/install-manifest.json"
@@ -46,6 +47,52 @@ setup() {
   assert_contains "$SCRIPTS/agmsg"
   grep -Fq "plain -C $TEST_SKILL_DIR/project resume --last" "$CALL_LOG"
   refute grep -q '^monitor' "$CALL_LOG"
+}
+
+# Fork: AGMSG_CODEX_HOME must reach the plain seat the shim starts while agmsgd
+# is on, exactly as it does through codex-monitor.sh.
+write_home_logging_codex() {
+  printf '#!/usr/bin/env bash\nprintf "plain-home %%s\\n" "${CODEX_HOME-<unset>}" >> "$CALL_LOG"\nprintf "plain %%s\\n" "$*" >> "$CALL_LOG"\n' > "$AGMSG_REAL_CODEX"
+  chmod +x "$AGMSG_REAL_CODEX"
+}
+
+@test "enabled shim exports AGMSG_CODEX_HOME as CODEX_HOME for the plain seat (fork)" {
+  write_home_logging_codex
+  local isolated="$TEST_SKILL_DIR/isolated-home"
+  for launch in "" resume; do
+    : > "$CALL_LOG"
+    # Only AGMSG_CODEX_HOME set: the plain seat gets it (created 0700 if absent).
+    env -u CODEX_HOME AGMSG_CODEX_HOME="$isolated" \
+      bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" $launch >/dev/null 2>&1
+    grep -Fxq "plain-home $isolated" "$CALL_LOG"
+    [ -d "$isolated" ]
+    # Conflicting inherited CODEX_HOME: AGMSG_CODEX_HOME wins, as in codex-monitor.sh.
+    : > "$CALL_LOG"
+    CODEX_HOME="$TEST_SKILL_DIR/codex-profile" AGMSG_CODEX_HOME="$isolated" \
+      bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" $launch >/dev/null 2>&1
+    grep -Fxq "plain-home $isolated" "$CALL_LOG"
+    refute grep -q '^monitor' "$CALL_LOG"
+  done
+  # Without AGMSG_CODEX_HOME an existing CODEX_HOME is kept.
+  : > "$CALL_LOG"
+  bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" >/dev/null 2>&1
+  grep -Fxq "plain-home $TEST_SKILL_DIR/codex-profile" "$CALL_LOG"
+}
+
+@test "enabled shim refuses a relative AGMSG_CODEX_HOME and starts nothing (fork)" {
+  write_home_logging_codex
+  AGMSG_CODEX_HOME="relative/home" run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project"
+  [ "$status" -ne 0 ]
+  assert_contains 'AGMSG_CODEX_HOME must be an absolute path'
+  refute grep -q '^plain' "$CALL_LOG"
+}
+
+@test "direct monitor wrapper also exports AGMSG_CODEX_HOME while enabled (fork)" {
+  write_home_logging_codex
+  local isolated="$TEST_SKILL_DIR/isolated-home"
+  AGMSG_CODEX_HOME="$isolated" \
+    bash "$SCRIPTS/drivers/types/codex/codex-monitor.sh" --project "$TEST_SKILL_DIR" --codex-command resume -- --last >/dev/null 2>&1
+  grep -Fxq "plain-home $isolated" "$CALL_LOG"
 }
 
 @test "off, missing and unreadable install records retain the existing monitor route" {

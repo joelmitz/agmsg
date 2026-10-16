@@ -61,6 +61,11 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   agmsg_clear_session_detect_env
   unset CLAUDE_CONFIG_DIR
+  # Fork: the opt-in Codex profile vars select the Codex state root. A
+  # developer shell that exports one would redirect every codex fixture to the
+  # real profile (measured 2026-10-16: 52 launcher/record failures). Tests that
+  # want them set them explicitly.
+  unset AGMSG_CODEX_HOME ORCA_CODEX_HOME
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in

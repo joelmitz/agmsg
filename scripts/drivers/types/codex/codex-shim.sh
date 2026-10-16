@@ -191,6 +191,11 @@ if [ -f "$daemon_state_lib" ]; then
         exec "$real_codex" "$@"
         ;;
       *)
+        # Fork: resolve the opt-in AGMSG_CODEX_HOME exactly as codex-monitor.sh
+        # does, so the plain seat runs in the profile the recorder reports.
+        # shellcheck source=./_home.sh
+        source "$SCRIPT_DIR/_home.sh"
+        agmsg_codex_apply_home codex-shim || exit 1
         echo 'agmsgd handles Codex notices; starting plain Codex without a bridge.' >&2
         agmsg_daemon_warn_if_stopped always
         exec_plain_launch "$@"
