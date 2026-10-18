@@ -36,6 +36,58 @@ unset CLAUDE_CONFIG_DIR
 unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 export AGMSG_SELF_NAME=off
 
+# Fork: pin the two process-wide inputs CI runners never vary but a developer
+# shell does. TOP-LEVEL for the same reason as above (test_install.bats never
+# calls setup_test_env).
+# - umask: fixtures written with a plain redirect inherit it, and the product
+#   rejects a group/others-writable sync config. Under a umask 0002 shell
+#   (measured 2026-10-19) that turned test_remote.bats's set-endpoint repair
+#   fixture into a rejected 0664 file. CI runs with 022.
+# - message locale: tests match errno text from coreutils ("File exists").
+#   Under LANG=ja_JP.UTF-8 mkdir localizes it (test_registry_lock.bats).
+#   Only LC_MESSAGES is pinned, so character handling keeps the caller's
+#   UTF-8 locale; LC_ALL would override it, so it is folded into LC_CTYPE.
+umask 022
+if [ -n "${LC_ALL:-}" ]; then
+  export LC_CTYPE="$LC_ALL"
+  unset LC_ALL
+fi
+export LC_MESSAGES=C
+
+# Fork: hide a host `orca` that is not the Orca IDE CLI. On a Linux desktop
+# /usr/bin/orca is GNOME's screen reader; the terminal-driver sweep and
+# where.sh's probes call `orca terminal list/show`, and the screen reader does
+# not exit on those arguments (measured 2026-10-19: test_capability_docs.bats
+# and test_sweep_enumeration.bats hung there). CI runners have no `orca`, so
+# every test is written against "command not found" -- reproduce exactly
+# that, rather than a stub that exists (which would flip `command -v orca`).
+# Each PATH dir holding an `orca` is replaced by a once-per-run mirror of
+# symlinks without it. Tests that want an Orca still prepend their own fake
+# and win. A host without `orca` (CI) is untouched. Tests that hard-code
+# PATH=/usr/bin:/bin bypass this; none of them reach the orca driver.
+agmsg_test_hide_host_orca() {
+  command -v orca >/dev/null 2>&1 || return 0
+  local root="${BATS_RUN_TMPDIR:-${TMPDIR:-/tmp}}/agmsg-path-no-orca"
+  local d shadow tmp new="" IFS=:
+  mkdir -p "$root" || return 0
+  for d in $PATH; do
+    if [ -n "$d" ] && [ -f "$d/orca" ] && [ -x "$d/orca" ]; then
+      shadow="$root/${d//\//_}"
+      if [ ! -d "$shadow" ]; then
+        tmp="$(mktemp -d "$root/.tmp.XXXXXX")" || return 0
+        ln -s "$d"/* "$tmp"/ 2>/dev/null
+        rm -f "$tmp/orca"
+        # Parallel loaders race here; the loser's rename fails, drop its copy.
+        mv -T "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
+      fi
+      d="$shadow"
+    fi
+    new="${new:+$new:}$d"
+  done
+  export PATH="$new"
+}
+agmsg_test_hide_host_orca
+
 # Strip host CLI session-identity env. inbox.sh infers caller type from
 # per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
 # would fail-closed (or falsely pass) against a fixture dest. Called at load
