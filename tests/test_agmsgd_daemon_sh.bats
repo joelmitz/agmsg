@@ -105,8 +105,21 @@ _write_completion_record() {
 
 @test "daemon.sh status: falls back to a minimal read when Node is not on PATH" {
   _seed_install_db
-  local no_node_path
-  no_node_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -E '/(node|nodejs)([^/]*)?$' | while read -r d; do [ -x "$d/node" ] || printf '%s\n' "$d"; done | paste -sd: -)"
+  # Fork: dropping every PATH dir that holds a node also drops /usr/bin (and
+  # bash with it) on a host that ships /usr/bin/node (measured 2026-10-19:
+  # exit 127). Keep each such dir as a symlink mirror without node instead.
+  local no_node_path="" d mirror i=0
+  while IFS= read -r d; do
+    if [ -n "$d" ] && { [ -e "$d/node" ] || [ -e "$d/nodejs" ]; }; then
+      i=$((i + 1))
+      mirror="$BATS_TEST_TMPDIR/no-node-$i"
+      mkdir -p "$mirror"
+      ln -s "$d"/* "$mirror"/ 2>/dev/null
+      rm -f "$mirror/node" "$mirror/nodejs"
+      d="$mirror"
+    fi
+    no_node_path="${no_node_path:+$no_node_path:}$d"
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
   PATH="$no_node_path" run bash "$DAEMON" status
   [ "$status" -eq 0 ]
   [[ "$output" == *"no usable Node"* ]]
