@@ -65,20 +65,32 @@ export LC_MESSAGES=C
 # symlinks without it. Tests that want an Orca still prepend their own fake
 # and win. A host without `orca` (CI) is untouched. Tests that hard-code
 # PATH=/usr/bin:/bin bypass this; none of them reach the orca driver.
+#
+# Publishing: the mirror is built in a private temp dir and published by one
+# `ln -sn` (portable, atomic, refuses an existing name), so a parallel loader
+# either wins or finds the winner's already-complete mirror. Anything that
+# cannot be confirmed as a mirror without orca is an error: the helper then
+# fails to load (loudly) rather than putting a missing dir on PATH or
+# re-exposing the host orca.
 agmsg_test_hide_host_orca() {
   command -v orca >/dev/null 2>&1 || return 0
   local root="${BATS_RUN_TMPDIR:-${TMPDIR:-/tmp}}/agmsg-path-no-orca"
   local d shadow tmp new="" IFS=:
-  mkdir -p "$root" || return 0
+  mkdir -p "$root" || { echo "test_helper: cannot create $root" >&2; return 1; }
   for d in $PATH; do
     if [ -n "$d" ] && [ -f "$d/orca" ] && [ -x "$d/orca" ]; then
       shadow="$root/${d//\//_}"
-      if [ ! -d "$shadow" ]; then
-        tmp="$(mktemp -d "$root/.tmp.XXXXXX")" || return 0
+      if [ ! -e "$shadow" ]; then
+        tmp="$(mktemp -d "$root/.tmp.XXXXXX")" \
+          || { echo "test_helper: cannot create a mirror of $d" >&2; return 1; }
         ln -s "$d"/* "$tmp"/ 2>/dev/null
         rm -f "$tmp/orca"
-        # Parallel loaders race here; the loser's rename fails, drop its copy.
-        mv -T "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
+        # A loser of the publish race keeps nothing of its own.
+        ln -sn "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
+      fi
+      if [ ! -d "$shadow" ] || [ -e "$shadow/orca" ] || [ -L "$shadow/orca" ]; then
+        echo "test_helper: could not publish an orca-free mirror of $d at $shadow; refusing to run with the host orca on PATH" >&2
+        return 1
       fi
       d="$shadow"
     fi
@@ -86,7 +98,7 @@ agmsg_test_hide_host_orca() {
   done
   export PATH="$new"
 }
-agmsg_test_hide_host_orca
+agmsg_test_hide_host_orca || return 1
 
 # Strip host CLI session-identity env. inbox.sh infers caller type from
 # per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
@@ -116,8 +128,10 @@ setup_test_env() {
   # Fork: the opt-in Codex profile vars select the Codex state root. A
   # developer shell that exports one would redirect every codex fixture to the
   # real profile (measured 2026-10-19: test_spawn.bats's codex resume case).
+  # CODEX_HOME itself is inherited by any suite run from inside Codex, and
+  # the codex role-home check compares it with the fixture's default home.
   # Tests that want them set them explicitly.
-  unset AGMSG_CODEX_HOME ORCA_CODEX_HOME
+  unset CODEX_HOME AGMSG_CODEX_HOME ORCA_CODEX_HOME
   # A Claude Code developer shell's own delivery settings (measured
   # 2026-10-17 on beta: AGMSG_CC_MONITOR_KEEP_ALIVE turned watch.bats's
   # quiet-run "stopping" case into a re-arm).
