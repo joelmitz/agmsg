@@ -36,6 +36,58 @@ unset CLAUDE_CONFIG_DIR
 unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 export AGMSG_SELF_NAME=off
 
+# Fork: pin the two process-wide inputs CI runners never vary but a developer
+# shell does. TOP-LEVEL for the same reason as above (test_install.bats never
+# calls setup_test_env).
+# - umask: fixtures written with a plain redirect inherit it, and the product
+#   rejects a group/others-writable sync config. Under a umask 0002 shell
+#   (measured 2026-10-19) that turned test_remote.bats's set-endpoint repair
+#   fixture into a rejected 0664 file. CI runs with 022.
+# - message locale: tests match errno text from coreutils ("File exists").
+#   Under LANG=ja_JP.UTF-8 mkdir localizes it (test_registry_lock.bats).
+#   Only LC_MESSAGES is pinned, so character handling keeps the caller's
+#   UTF-8 locale; LC_ALL would override it, so it is folded into LC_CTYPE.
+umask 022
+if [ -n "${LC_ALL:-}" ]; then
+  export LC_CTYPE="$LC_ALL"
+  unset LC_ALL
+fi
+export LC_MESSAGES=C
+
+# Fork: hide a host `orca` that is not the Orca IDE CLI. On a Linux desktop
+# /usr/bin/orca is GNOME's screen reader; the terminal-driver sweep and
+# where.sh's probes call `orca terminal list/show`, and the screen reader does
+# not exit on those arguments (measured 2026-10-19: test_capability_docs.bats
+# and test_sweep_enumeration.bats hung there). CI runners have no `orca`, so
+# every test is written against "command not found" -- reproduce exactly
+# that, rather than a stub that exists (which would flip `command -v orca`).
+# Each PATH dir holding an `orca` is replaced by a once-per-run mirror of
+# symlinks without it. Tests that want an Orca still prepend their own fake
+# and win. A host without `orca` (CI) is untouched. Tests that hard-code
+# PATH=/usr/bin:/bin bypass this; none of them reach the orca driver.
+agmsg_test_hide_host_orca() {
+  command -v orca >/dev/null 2>&1 || return 0
+  local root="${BATS_RUN_TMPDIR:-${TMPDIR:-/tmp}}/agmsg-path-no-orca"
+  local d shadow tmp new="" IFS=:
+  mkdir -p "$root" || return 0
+  for d in $PATH; do
+    if [ -n "$d" ] && [ -f "$d/orca" ] && [ -x "$d/orca" ]; then
+      shadow="$root/${d//\//_}"
+      if [ ! -d "$shadow" ]; then
+        tmp="$(mktemp -d "$root/.tmp.XXXXXX")" || return 0
+        ln -s "$d"/* "$tmp"/ 2>/dev/null
+        rm -f "$tmp/orca"
+        # Parallel loaders race here; the loser's rename fails, drop its copy.
+        mv -T "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
+      fi
+      d="$shadow"
+    fi
+    new="${new:+$new:}$d"
+  done
+  export PATH="$new"
+}
+agmsg_test_hide_host_orca
+
 # Strip host CLI session-identity env. inbox.sh infers caller type from
 # per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
 # would fail-closed (or falsely pass) against a fixture dest. Called at load
@@ -61,6 +113,15 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   agmsg_clear_session_detect_env
   unset CLAUDE_CONFIG_DIR
+  # Fork: the opt-in Codex profile vars select the Codex state root. A
+  # developer shell that exports one would redirect every codex fixture to the
+  # real profile (measured 2026-10-19: test_spawn.bats's codex resume case).
+  # Tests that want them set them explicitly.
+  unset AGMSG_CODEX_HOME ORCA_CODEX_HOME
+  # A Claude Code developer shell's own delivery settings (measured
+  # 2026-10-17 on beta: AGMSG_CC_MONITOR_KEEP_ALIVE turned watch.bats's
+  # quiet-run "stopping" case into a re-arm).
+  unset AGMSG_CC_MONITOR_KEEP_ALIVE CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in
