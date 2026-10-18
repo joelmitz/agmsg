@@ -56,6 +56,33 @@ _probe() {
   [ -z "$(find "$MIRROR_ROOT" -mindepth 1 -maxdepth 1 2>/dev/null)" ]
 }
 
+_assert_build_refused() {
+  [ "$status" -eq 0 ] || return 1
+  grep -qx 'load_rc=1' <<<"$output" || return 1
+  grep -q 'could not build a complete orca-free mirror' <<<"$output" || return 1
+  grep -qx "$FAKE_HOST/agmsg-sentinel" <<<"$output" || return 1
+  grep -qx 'bash=ok' <<<"$output" || return 1
+  [ -z "$(find "$MIRROR_ROOT" -mindepth 1 -maxdepth 1 2>/dev/null)" ]
+}
+
+@test "host orca: a mirror whose links all fail is not published" {
+  run _probe 'ln() { if [ "$1" = -s ]; then return 1; fi; command ln "$@"; }
+'
+  _assert_build_refused
+}
+
+@test "host orca: a mirror whose links partly fail is not published" {
+  run _probe 'ln() { if [ "$1" = -s ]; then local last="${@: -1}"; command ln "$@"; rm -f "$last/agmsg-sentinel"; return 1; fi; command ln "$@"; }
+'
+  _assert_build_refused
+}
+
+@test "host orca: a mirror missing an entry is not published even when ln reports success" {
+  run _probe 'ln() { if [ "$1" = -s ]; then local last="${@: -1}"; command ln "$@"; rm -f "$last/agmsg-sentinel"; return 0; fi; command ln "$@"; }
+'
+  _assert_build_refused
+}
+
 @test "host orca: a pre-existing mirror that still holds orca is refused, not trusted" {
   local key="${FAKE_HOST//\//_}"
   mkdir -p "$MIRROR_ROOT/$key"
