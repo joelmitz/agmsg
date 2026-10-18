@@ -68,7 +68,8 @@ export LC_MESSAGES=C
 #
 # Publishing: the mirror is built in a private temp dir and published by one
 # `ln -sn` (portable, atomic, refuses an existing name), so a parallel loader
-# either wins or finds the winner's already-complete mirror. Anything that
+# either wins or finds the winner's already-complete mirror. A mirror whose
+# links could not all be made is never published. Anything that
 # cannot be confirmed as a mirror without orca is an error: the helper then
 # fails to load (loudly) rather than putting a missing dir on PATH or
 # re-exposing the host orca.
@@ -83,8 +84,17 @@ agmsg_test_hide_host_orca() {
       if [ ! -e "$shadow" ]; then
         tmp="$(mktemp -d "$root/.tmp.XXXXXX")" \
           || { echo "test_helper: cannot create a mirror of $d" >&2; return 1; }
-        ln -s "$d"/* "$tmp"/ 2>/dev/null
-        rm -f "$tmp/orca"
+        # The mirror must be complete before it is published: every entry of
+        # $d but orca, checked both by ln's status and by count.
+        local -a src
+        src=("$d"/*)
+        if ! ln -s "${src[@]}" "$tmp"/ 2>/dev/null \
+          || ! rm -f "$tmp/orca" \
+          || [ "$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ne $(( ${#src[@]} - 1 )) ]; then
+          rm -rf "$tmp"
+          echo "test_helper: could not build a complete orca-free mirror of $d; refusing to run with the host orca on PATH" >&2
+          return 1
+        fi
         # A loser of the publish race keeps nothing of its own.
         ln -sn "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
       fi
