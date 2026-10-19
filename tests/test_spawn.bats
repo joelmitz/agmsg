@@ -38,7 +38,26 @@ EOF
 }
 
 teardown() {
+  _stop_fake_app_servers
   teardown_test_env
+}
+
+# Stop every fake app-server a bridged launch brought up in this test. Runs from
+# teardown so a failed assertion cannot skip it. The shim records each seat's
+# server in run/codex-app-server.<seat>.record (#1254), not a .pid file, so read
+# it with the production reader rather than re-parsing the format here.
+_stop_fake_app_servers() {
+  local rec
+  for rec in "$TEST_SKILL_DIR"/run/codex-app-server.*.record; do
+    [ -f "$rec" ] || continue
+    (
+      # shellcheck disable=SC1091
+      . "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+      _agmsg_codex_seat_record_read "$rec" || exit 0
+      kill "$SEAT_REC_PID" 2>/dev/null || true
+      wait_for_pid_exit "$SEAT_REC_PID" || kill -KILL "$SEAT_REC_PID" 2>/dev/null || true
+    )
+  done
 }
 
 # --- argument validation ---
@@ -1775,8 +1794,19 @@ s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
 print("codex app-server (WebSockets)")
 print("  listening on: ws://127.0.0.1:%d" % s.getsockname()[1]); sys.stdout.flush()
 ppid = os.getppid()
-while True:
+def parent_gone():
+    # Reparented (to init or a subreaper) or the parent pid no longer exists.
     if os.getppid() != ppid:
+        return True
+    try:
+        os.kill(ppid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+while True:
+    if parent_gone():
         break
     try:
         c, _ = s.accept(); c.close()
@@ -1802,7 +1832,7 @@ FAKE
 }
 
 # The evidence both end-to-end tests read: the real binary was reached exactly
-# once, bridged, with the actas prompt. Then the fake app-server is put down.
+# once, bridged, with the actas prompt. Teardown puts the fake app-server down.
 _assert_bridged_argv() {
   [ -f "$CALL_LOG" ]
   # The real binary was reached exactly once, with the bridge flag and the actas prompt.
@@ -1810,13 +1840,6 @@ _assert_bridged_argv() {
   grep -q '^real-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   grep -q 'actas' "$CALL_LOG"
   grep -q 'reviewer' "$CALL_LOG"
-  # Clean up the fake app-server the shim brought up.
-  local pf pid
-  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
-    [ -f "$pf" ] || continue
-    pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
-    kill "$pid" 2>/dev/null || true
-  done
 }
 
 @test "spawn: an inherited PATH-wrapper install (AGMSG_CODEX_SHIM_WRAPPER/SCRIPT_DIR) cannot repoint the bundled shim" {
