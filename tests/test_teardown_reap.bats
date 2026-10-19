@@ -65,8 +65,10 @@ _wait_for_holder_ready() {
 
 @test "teardown reaper leaves a process that does NOT reference TEST_SKILL_DIR alone (scope safety)" {
   # The reaper must never reach a developer's live bridge or another test's process.
-  # A plain `sleep` whose argv does not contain this test's mktemp dir must survive.
-  sleep 30 &
+  # A `sleep` that names this test's mktemp dir in neither argv nor environment must
+  # survive. `env -i`: started from this shell it would otherwise inherit HOME etc.
+  # under TEST_SKILL_DIR, which is exactly what marks a process as this test's own.
+  env -i PATH="$PATH" sleep 30 &
   local other=$!
   _reap_test_skill_dir_procs
   kill -0 "$other"                   # untouched
@@ -87,10 +89,15 @@ _wait_for_holder_ready() {
 @test "teardown reaper fails when its bounded wait expires" {
   # Keep the process list non-empty while replacing the side effects with no-ops. The
   # 60-tick ceiling then runs quickly and this test proves timeout is not reported green.
-  _pids_referencing_dir() { printf '%s\n' 999999; }
-  kill() { :; }
-  sleep() { :; }
-  run _reap_test_skill_dir_procs
+  # The stubs live in a subshell so this test's own teardown runs the real reaper.
+  _reap_with_stubs() (
+    _pids_referencing_dir() { printf '%s\n' 999999; }
+    _pid_references_dir() { return 0; }
+    kill() { :; }
+    sleep() { :; }
+    _reap_test_skill_dir_procs
+  )
+  run _reap_with_stubs
   [ "$status" -ne 0 ]
 }
 
@@ -131,4 +138,40 @@ _wait_for_holder_ready() {
   _spawn_probe; ( unset TMPDIR; TEST_SKILL_DIR="$marker" _reap_test_skill_dir_procs ); kill -0 "$pp"; kill "$pp" 2>/dev/null || true
   _spawn_probe; TMPDIR=""  TEST_SKILL_DIR="$marker" _reap_test_skill_dir_procs;         kill -0 "$pp"; kill "$pp" 2>/dev/null || true
   _spawn_probe; TMPDIR="/" TEST_SKILL_DIR="$marker" _reap_test_skill_dir_procs;         kill -0 "$pp"; kill "$pp" 2>/dev/null || true
+}
+
+# Start an orphan (reparented away from this shell, like a nohup+disown'd engine)
+# running <cmd...>, and echo its pid. Its stdio and bats' fd 3 are closed so neither the
+# caller nor bats waits on it.
+_start_orphan() {
+  ( "$@" </dev/null >/dev/null 2>&1 3>&- & printf '%s\n' "$!" > "$TEST_SKILL_DIR/orphan.pid" )
+  cat "$TEST_SKILL_DIR/orphan.pid"
+}
+
+@test "teardown reaps an orphan that names TEST_SKILL_DIR only in its environment, even when the rm would succeed" {
+  # The leak this exists for: a detached `while :; do sleep 1; done` engine (or its
+  # `sleep`, or a fake app-server's python) whose argv does not name the test dir and
+  # which does not stop `rm -rf` on Linux. It inherits HOME=$TEST_SKILL_DIR/home.
+  [ -r /proc/self/environ ] || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
+  local orphan; orphan="$(_start_orphan sleep 300)"
+  kill -0 "$orphan"
+  refute grep -qaF -- "$TEST_SKILL_DIR" "/proc/$orphan/cmdline"   # argv does not name it
+  grep -qaF -- "$TEST_SKILL_DIR" "/proc/$orphan/environ"          # only the env does
+  teardown_test_env                  # nothing holds the tree open, so the rm alone succeeds
+  wait_for_pid_exit "$orphan"        # ...and the orphan was reaped anyway (mutation: rm-gated reaper)
+  [ ! -d "$TEST_SKILL_DIR" ]
+}
+
+@test "teardown reaper does not touch a process whose environment names only a SIBLING of TEST_SKILL_DIR" {
+  # Another test's mktemp dir can share TEST_SKILL_DIR as a string prefix only if its
+  # name is longer; the match is path-bounded (<dir> or <dir>/...), so that process
+  # survives. env -i so nothing of THIS test's environment comes along.
+  [ -r /proc/self/environ ] || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
+  local sibling="${TEST_SKILL_DIR}x" other
+  other="$(_start_orphan env -i PATH="$PATH" HOME="$sibling/home" AGMSG_PROBE="$sibling" sleep 300)"
+  kill -0 "$other"
+  grep -qaF -- "$sibling" "/proc/$other/environ"
+  _reap_test_skill_dir_procs
+  kill -0 "$other"                   # untouched
+  kill "$other" 2>/dev/null || true
 }

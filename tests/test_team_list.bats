@@ -16,6 +16,17 @@ teardown() {
   # reap it here too. bats runs each test in its own subshell, so MOCK_PID is
   # unset for a case that never started one.
   [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null || true
+  # `remote.sh connect` starts the real sync engine detached (nohup + disown), so
+  # nothing in the test body stops it. Kill each engine this test's own run/ recorded,
+  # as test_remote.bats's cleanup_sync_engines does.
+  local pidfile pid
+  for pidfile in "$TEST_SKILL_DIR"/run/remote-sync.*.pid; do
+    [ -f "$pidfile" ] || continue
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill "$pid" 2>/dev/null || true
+    wait_for_pid_exit "$pid" || kill -KILL "$pid" 2>/dev/null || true
+  done
   teardown_test_env
 }
 

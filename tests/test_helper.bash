@@ -272,27 +272,52 @@ agmsg_inbox() {
   esac
 }
 
-# PIDs (one per line, this shell excluded) whose command line references <dir>.
-# The detached codex children — codex-bridge-launcher.sh and the codex-bridge.js it
-# starts (codex-monitor.sh spawns the launcher with `… &`, "outlives this script") —
-# resolve their SKILL_DIR from their own script path, so their argv carries
-# TEST_SKILL_DIR. The launcher records no pidfile of its own, so a pidfile sweep cannot
-# reach it; the command line is what names it. Unix uses ps; on Git Bash ps enumerates
-# MSYS processes, which the launcher/bridge are, so it reaches them there too.
+# PIDs (one per line, this shell excluded) whose command line OR environment
+# references <dir> as a path: <dir> itself or <dir>/..., never a longer sibling name.
 #
-# LIMIT (named deliberately, not a defect): this matches only processes that carry
-# $dir IN THEIR ARGV. A process whose CWD is inside $dir but whose argv does not name
-# it would NOT be found. The two known holders are argv-visible today — the launcher
-# resolves SKILL_DIR from its own script path (argv[0]), and the bridge receives
-# --workspace-root <dir> — so they are caught; but that is a property of THOSE two, not
-# a guarantee about any future holder. A cwd/open-fd sweep (lsof) would close the gap;
-# it is deliberately NOT used because lsof is slow and this runs in EVERY test's
-# teardown — too heavy for the ~all tests that hold nothing. If a future detached child
-# holds $dir without naming it in argv, revisit (add an lsof pass gated on the rm
-# actually failing, so the cost is paid only when it is needed).
+# Why environ as well as argv: a test exports HOME (and SCRIPTS, TMPDIR, ...) under
+# TEST_SKILL_DIR, so every process the test started inherits it -- including the
+# ones whose argv never names the dir: the `sleep 1` of a detached fake engine's
+# `while :; do sleep 1; done`, or a fake app-server's python. Those are exactly the
+# orphans that outlive a test (#1254 records, `remote.sh` nohup+disown engines).
+# The test's OWN ancestors (bats, bats-exec-test) cannot match: /proc/<pid>/environ
+# is the environment at exec time, and they were exec'd before setup_test_env
+# exported anything; this shell and its subshells are excluded explicitly anyway.
+#
+# Linux reads /proc/<pid>/cmdline and /proc/<pid>/environ (one grep, no ps).
+# environ is readable only for the caller's own processes; another user's process
+# could only match by argv, and could not be signalled anyway. Where /proc is
+# absent (macOS) it falls back to ps argv only.
+# <dir> must be a plain mktemp-style path ([A-Za-z0-9._/-]); anything else lists
+# nothing (fail closed -- this feeds a KILL).
 _pids_referencing_dir() {   # <dir>
+  local dir="$1" re out p
+  case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
+  if [ -r /proc/self/environ ]; then
+    re="${dir//./\\.}(/|\$)"
+    # Captured first, not piped: a pipeline's other members would be alive, carry
+    # the exported dir, and list themselves. The grep itself is gone by the time
+    # the caller signals, and the caller re-checks every pid before each kill.
+    out="$(grep -lazE -- "$re" /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null)"
+    for p in $out; do
+      p="${p#/proc/}"; p="${p%%/*}"
+      case "$p" in ''|*[!0-9]*) continue ;; esac
+      [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-}" ] && continue
+      printf '%s\n' "$p"
+    done | sort -u
+    return 0
+  fi
   ps -eo pid=,args= 2>/dev/null |
-    AGMSG_REAP_DIR="$1" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+    AGMSG_REAP_DIR="$dir" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+}
+
+# 0 if <pid> still references <dir> right now (re-read fresh just before a signal,
+# so a pid that exited and was reused in between is never signalled).
+_pid_references_dir() {   # <pid> <dir>
+  local re
+  [ -r /proc/self/environ ] || return 0   # ps fallback: the scan itself is the check
+  re="${2//./\\.}(/|\$)"
+  grep -qazE -- "$re" "/proc/$1/cmdline" "/proc/$1/environ" 2>/dev/null
 }
 
 # Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the
@@ -302,7 +327,7 @@ _pids_referencing_dir() {   # <dir>
 # open messages.db). #662 == #1036 == #1049.
 #
 # Scope is $TEST_SKILL_DIR ITSELF — a unique mktemp path — so matching it in process
-# args cannot reach a developer's live bridge or another test's processes; this is never
+# args or environment cannot reach a developer's live bridge or another test's processes; this is never
 # a blanket `pkill codex-bridge.js`. Guarded to a temp path so a mis-set variable can
 # never turn the scan loose on a short/rooty prefix. A single `ps` for the ~all tests
 # that spawn nothing.
@@ -345,7 +370,10 @@ _reap_test_skill_dir_procs() {
     # that hold nothing return on the first check above), then return and let the rm
     # surface anything still there. The 6s headroom is what covers a load-3-digit host.
     sig=TERM; [ "$tries" -ge 3 ] && sig=KILL
-    for p in $pids; do kill "-$sig" "$p" 2>/dev/null || true; done
+    for p in $pids; do
+      _pid_references_dir "$p" "$dir" || continue
+      kill "-$sig" "$p" 2>/dev/null || true
+    done
     [ "$tries" -ge 60 ] && return 1
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))
@@ -378,14 +406,12 @@ teardown_test_env() {
   # it per test, a later one -- reads a TMPDIR that no longer exists.
   [ -n "${AGMSG_TEST_REAL_TMPDIR:-}" ] && export TMPDIR="$AGMSG_TEST_REAL_TMPDIR"
   [ -n "${AGMSG_TEST_TMPDIR:-}" ] && rm -rf "$AGMSG_TEST_TMPDIR" 2>/dev/null
-  # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
-  # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
-  # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
-  # that dominates the runtime and pushes CI shards over their timeout. The race it fixes
-  # is rare (only the codex tests spawn the detached launcher), and it announces itself
-  # as a non-zero rm ("Directory not empty" / "Device or resource busy"), so pay the cost
-  # exactly there: on failure, reap the TEST_SKILL_DIR-scoped holders and retry.
-  rm -rf "$TEST_SKILL_DIR" 2>/dev/null && return 0
+  # Reap EVERY time, before the rm. Gating it on the rm failing (as it once was) misses
+  # the common leak: on Linux an orphan whose cwd/argv is inside the tree does not stop
+  # the rm, so a detached engine or fake server just kept running after the suite --
+  # one per affected test per run, spinning once the run's PATH mirror was gone. The
+  # scan is one grep over /proc (about the cost of one `ps`), and for the ~all tests
+  # that hold nothing it returns on the first scan without sleeping.
   local reap_status=0 rm_status=0
   _reap_test_skill_dir_procs || reap_status=$?
   rm -rf "$TEST_SKILL_DIR" || rm_status=$?
