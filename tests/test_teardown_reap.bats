@@ -186,11 +186,19 @@ _start_orphan() {
 # leave the foreign ones (which teardown would rightly not touch) running.
 _rc() { "$@" >/dev/null 2>&1 && echo 0 || echo 1; }
 
+# Argv probes: `_start_orphan "${ARGV_PROBE[@]}" <argv0>` carries <argv0> in its argv
+# as ONE process -- bash execs `sleep` under that argv[0], so the pid that is checked
+# is the pid that is stopped, with no child left behind (a `bash -c 'sleep 300; :'`
+# probe left its sleep running -- review R3). env -i: nothing of this test's
+# environment comes along. An array, not a function: _start_orphan's $! must be the
+# probe itself, not a subshell running a function.
+ARGV_PROBE=(env -i "PATH=$PATH" bash -c 'exec -a "$0" sleep 300')
+
 @test "path match rejects a foreign path that merely CONTAINS TEST_SKILL_DIR (/not-owned<dir>/...), in scan and re-check" {
   [ -r /proc/self/environ ] || skip "environment scan needs /proc"
   local foreign="/not-owned$TEST_SKILL_DIR" envp argp listed r_env r_arg
   envp="$(_start_orphan env -i PATH="$PATH" HOME="$foreign/home" sleep 300)"
-  argp="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$foreign/x")"
+  argp="$(_start_orphan "${ARGV_PROBE[@]}" "$foreign/x")"
   local alive_env alive_arg
   alive_env="$(_rc kill -0 "$envp")"; alive_arg="$(_rc kill -0 "$argp")"
   r_env="$(_rc _pid_references_dir "$envp" "$TEST_SKILL_DIR")"
@@ -209,11 +217,17 @@ _rc() { "$@" >/dev/null 2>&1 && echo 0 || echo 1; }
   local envp argp exactp listed r
   envp="$(_start_orphan env -i PATH="$PATH" HOME="$TEST_SKILL_DIR/home" sleep 300)"
   exactp="$(_start_orphan env -i PATH="$PATH" PROBE_DIR="$TEST_SKILL_DIR" sleep 300)"
-  argp="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$TEST_SKILL_DIR/x")"
+  argp="$(_start_orphan "${ARGV_PROBE[@]}" "$TEST_SKILL_DIR/x")"
   r="$(_rc _pid_references_dir "$envp" "$TEST_SKILL_DIR")$(_rc _pid_references_dir "$exactp" "$TEST_SKILL_DIR")$(_rc _pid_references_dir "$argp" "$TEST_SKILL_DIR")"
   listed="$(_pids_referencing_dir "$TEST_SKILL_DIR")"
+  # The argv probe is the exec'd sleep itself (argv[0] = the path), not a parent of one.
+  local argv0 kids
+  argv0="$(tr '\0' '\n' < "/proc/$argp/cmdline" | head -n 1)"
+  kids="$(cat "/proc/$argp/task/$argp/children" 2>/dev/null || true)"
   kill "$envp" "$exactp" "$argp" 2>/dev/null || true
   [ "$r" = "000" ]
+  [ "$argv0" = "$TEST_SKILL_DIR/x" ]
+  [ -z "${kids// /}" ]
   grep -qx -- "$envp" <<<"$listed"
   grep -qx -- "$exactp" <<<"$listed"
   grep -qx -- "$argp" <<<"$listed"
@@ -222,9 +236,9 @@ _rc() { "$@" >/dev/null 2>&1 && echo 0 || echo 1; }
 @test "ps fallback uses the same bounded match: <dir>/... in argv yes, /not-owned<dir>/... and <dir>x no" {
   # AGMSG_TEST_REAP_PS_ONLY forces the no-/proc (macOS) path on this host.
   local own foreign sibling envonly listed r
-  own="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$TEST_SKILL_DIR/x")"
-  foreign="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "/not-owned$TEST_SKILL_DIR/x")"
-  sibling="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "${TEST_SKILL_DIR}x/y")"
+  own="$(_start_orphan "${ARGV_PROBE[@]}" "$TEST_SKILL_DIR/x")"
+  foreign="$(_start_orphan "${ARGV_PROBE[@]}" "/not-owned$TEST_SKILL_DIR/x")"
+  sibling="$(_start_orphan "${ARGV_PROBE[@]}" "${TEST_SKILL_DIR}x/y")"
   # Names the dir only in its environment, which ps cannot see: proves this run
   # really took the ps path (the /proc path would list it).
   envonly="$(_start_orphan env -i PATH="$PATH" HOME="$TEST_SKILL_DIR/home" sleep 300)"
