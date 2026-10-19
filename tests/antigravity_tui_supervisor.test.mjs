@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
+import { isolatedEnv } from './helpers/isolated-env.mjs';
 
 const supervisor = new URL('../scripts/drivers/types/antigravity/antigravity-tui-supervisor.py', import.meta.url).pathname;
 const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
@@ -13,7 +14,7 @@ const agyScreenFixture = new URL('./fixtures/agy-1.1.27-screen-transcripts.json'
 function runPython(source) {
   const result = spawnSync('python3', ['-c', source], {
     encoding: 'utf8',
-    env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' },
+    env: isolatedEnv({ PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' }),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
@@ -1018,12 +1019,11 @@ process.stdin.on('data', chunk => {
 });
 `);
   fs.writeFileSync(fake, `#!/bin/sh\nexec '${process.execPath}' '${path.join(dir, 'fake.mjs')}'\n`, { mode: 0o700 });
-  const env = {
-    ...process.env,
+  const env = isolatedEnv({
     AGMSG_STORAGE_DRIVER: 'sqlite',
     AGMSG_STORAGE_PATH: path.join(install, 'db'),
     AGMSG_CONFIG: path.join(dir, 'config.json'),
-  };
+  });
   const run = (script, args) => {
     const result = spawnSync('bash', [path.join(install, 'scripts', script), ...args], { env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr + result.stdout);
@@ -1209,8 +1209,7 @@ function supervisorInstall() {
   const dump = path.join(dir, 'child.env');
   const fake = path.join(dir, 'agy');
   fs.writeFileSync(fake, `#!/bin/sh\nexec '${process.execPath}' '${path.join(dir, 'fake.mjs')}' "$@"\n`, { mode: 0o700 });
-  const env = {
-    ...process.env,
+  const env = isolatedEnv({
     AGMSG_STORAGE_DRIVER: 'sqlite',
     AGMSG_STORAGE_PATH: path.join(install, 'db'),
     AGMSG_CONFIG: path.join(dir, 'config.json'),
@@ -1220,7 +1219,7 @@ function supervisorInstall() {
     CODEX_SANDBOX: 'parent-sandbox',
     GROK_SESSION_ID: 'parent-grok',
     GEMINI_API_KEY: 'keep-fallback',
-  };
+  });
   const run = (script, args) => {
     const result = spawnSync('bash', [path.join(install, 'scripts', script), ...args], { env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr + result.stdout);

@@ -90,14 +90,24 @@ def run_cmd(argv, timeout=20, stdin_text=None):
     either consume the operator's keystrokes or block forever. Pass `stdin_text`
     to feed one; everything else gets /dev/null, which turns "the caller forgot"
     into an immediate, visible refusal instead of a hang.
+
+    Self-naming is switched off for every helper. `history.sh <team> <role>`
+    (every run) and `send.sh` (`--self-test`) are seat ACTIONS as far as
+    lib/self-name.sh can tell, so they name the pane in the environment and
+    write the role-session mark and spawn placement under run/ -- for the
+    diagnosed role, onto the operator's own pane (measured 2026-10-19: a
+    diagnosis relabelled the operator's herdr pane). A read-only diagnosis
+    must not do that; AGMSG_SELF_NAME=off turns off the whole family
+    (self-name and self-rename) and is a no-op for the other helpers.
     """
+    env = {**os.environ, 'AGMSG_SELF_NAME': 'off'}
     try:
         if stdin_text is None:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                               stdin=subprocess.DEVNULL)
+                               stdin=subprocess.DEVNULL, env=env)
         else:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                               input=stdin_text)
+                               input=stdin_text, env=env)
         return p.returncode, p.stdout, p.stderr
     except (OSError, subprocess.SubprocessError) as exc:
         return None, '', str(exc)

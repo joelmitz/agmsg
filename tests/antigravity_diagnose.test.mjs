@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { isolatedEnv, isolatedPath } from './helpers/isolated-env.mjs';
 
 const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const supervisorSrc = path.join(repo, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py');
@@ -18,7 +19,7 @@ import importlib.util, sys
 spec = importlib.util.spec_from_file_location('sup', ${JSON.stringify(supervisorSrc)})
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(m.proc_start(int(sys.argv[1])))
-`, String(pid)], { encoding: 'utf8', env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' } });
+`, String(pid)], { encoding: 'utf8', env: isolatedEnv({ PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' }) });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
@@ -55,7 +56,7 @@ function diagnose(install, project, team, role, extra = [], env = {}) {
   return spawnSync('bash', [
     path.join(install, 'scripts/drivers/types/antigravity/antigravity-diagnose.sh'),
     project, team, role, ...extra,
-  ], { encoding: 'utf8', env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache', ...env } });
+  ], { encoding: 'utf8', env: isolatedEnv({ PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache', ...env }) });
 }
 
 // Replace a helper the diagnosis shells out to. The install is a copy, so a stub
@@ -73,7 +74,7 @@ function stubHelper(install, relPath, body) {
 function pathWithShim(dir, name, body) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, name), body, { mode: 0o755 });
-  return `${dir}:${process.env.PATH}`;
+  return `${dir}:${isolatedPath()}`;
 }
 
 // A process we can point a reservation at and then take away, so "gone" is a
@@ -82,6 +83,55 @@ function spawnHolder() {
   const child = spawn('sleep', ['120'], { stdio: 'ignore' });
   const start = procStart(child.pid);
   return { pid: child.pid, start, kill: () => { try { child.kill('SIGKILL'); } catch {} } };
+}
+
+// A fake tmux that logs every call and remembers the @agmsg_agent label it is
+// told to set -- the same fake tests/test_self_name.bats uses. With it on PATH,
+// TMUX/TMUX_PANE pointing at it and AGMSG_SELF_NAME unset, a helper that runs
+// the self-naming hook writes a `set-option ... @agmsg_agent` line to the log.
+// Never a real terminal: the 2026-10-19 incident was this hook relabelling the
+// operator's own herdr pane from inside a diagnosis.
+function fakeTmux(dir) {
+  const bin = path.join(dir, 'fake-tmux-bin');
+  const log = path.join(dir, 'tmux-argv.log');
+  const state = path.join(dir, 'tmux-labels');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(log, '');
+  fs.writeFileSync(state, '');
+  fs.writeFileSync(path.join(bin, 'tmux'), `#!/usr/bin/env bash
+{ printf 'tmux'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\\n'; } >> '${log}'
+state='${state}'
+args=("$@"); [ "\${args[0]}" = -S ] && args=("\${args[@]:2}")
+case "\${args[0]}" in
+  set-option)
+    if [ "\${args[4]}" = '@agmsg_agent' ]; then
+      grep -v "^\${args[3]}	" "$state" > "$state.n" 2>/dev/null || : > "$state.n"
+      printf '%s\\t%s\\n' "\${args[3]}" "\${args[5]}" >> "$state.n"; mv "$state.n" "$state"
+    fi ;;
+  display-message)
+    if [ "\${args[4]}" = '#{pane_id}|#{@agmsg_agent}' ]; then
+      printf '%s|%s\\n' "\${args[3]}" "$(awk -F'\\t' -v p="\${args[3]}" '$1 == p { print $2 }' "$state" 2>/dev/null)"
+    fi ;;
+esac
+exit 0
+`, { mode: 0o755 });
+  return {
+    log,
+    // Self-naming back ON, against the fake only.
+    env: { AGMSG_SELF_NAME: undefined, TMUX: `${dir}/fake-tmux-sock,4242,0`, TMUX_PANE: '%7', PATH: `${bin}:${isolatedPath()}` },
+    namingCalls: () => fs.readFileSync(log, 'utf8').split('\n').filter((l) => /\[@agmsg_agent\]/.test(l) && /set-option/.test(l)),
+  };
+}
+
+// Everything under run/ that is not ours to write in this test: name -> content.
+function runSnapshot(runDir, skip = () => false) {
+  const out = {};
+  for (const name of fs.readdirSync(runDir).sort()) {
+    if (skip(name)) continue;
+    const file = path.join(runDir, name);
+    out[name] = fs.statSync(file).isFile() ? fs.readFileSync(file, 'utf8') : '<dir>';
+  }
+  return out;
 }
 
 async function reap(holder) {
@@ -231,7 +281,7 @@ test('a self-test on a healthy seat sends the body and confirms the receipt', as
     PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache',
   };
   const join = spawnSync('bash', [path.join(install, 'scripts/join.sh'), 'demo', 'agy', 'antigravity', project],
-    { encoding: 'utf8', env: { ...process.env, ...env } });
+    { encoding: 'utf8', env: isolatedEnv(env) });
   assert.equal(join.status, 0, join.stderr + join.stdout);
 
   const { statePath } = writeSeat(install, project, {
@@ -239,11 +289,18 @@ test('a self-test on a healthy seat sends the body and confirms the receipt', as
     childPid: childProc.pid, childStart: childProc.start,
   });
   const runDir = path.join(install, 'run');
+  // The self-test sends as the diagnosed role (send.sh) and reads its history
+  // (history.sh); both are seat actions to the self-naming hook. Run it from a
+  // (fake) terminal with naming on, and require that nothing was named or
+  // recorded: the diagnosis may write only its own self-test record.
+  const tmux = fakeTmux(dir);
+  const ours = (name) => name.startsWith('antigravity-self-test.') || path.join(runDir, name) === statePath;
+  const before = runSnapshot(runDir, ours);
 
   const proc = spawn('bash', [
     path.join(install, 'scripts/drivers/types/antigravity/antigravity-diagnose.sh'),
     project, 'demo', 'agy', '--self-test',
-  ], { encoding: 'utf8', env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { encoding: 'utf8', env: isolatedEnv({ ...env, ...tmux.env }), stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   proc.stdout.on('data', (d) => { stdout += d; });
   proc.stderr.on('data', (d) => { stdout += d; });
@@ -274,11 +331,39 @@ test('a self-test on a healthy seat sends the body and confirms the receipt', as
     assert.match(stdout, /^self-test: SCREEN_CONFIRMED /m);
     assert.match(stdout, new RegExp(`message_id=${record.message_id}`));
     assert.match(stdout, /tui-visible: RENDERED_AND_OBSERVED_BY_SUPERVISOR/);
+    assert.deepEqual(tmux.namingCalls(), []);
+    assert.deepEqual(runSnapshot(runDir, ours), before);
   } finally {
     try { proc.kill('SIGKILL'); } catch {}
     holder.kill();
     childProc.kill();
   }
+});
+
+test('a diagnosis names no pane and writes no self-name record, from inside a terminal', () => {
+  const { dir, install, project } = makeInstall();
+  const env = {
+    AGMSG_STORAGE_DRIVER: 'sqlite',
+    AGMSG_STORAGE_PATH: path.join(install, 'db'),
+    AGMSG_CONFIG: path.join(dir, 'config.json'),
+  };
+  const join = spawnSync('bash', [path.join(install, 'scripts/join.sh'), 'demo', 'agy', 'antigravity', project],
+    { encoding: 'utf8', env: isolatedEnv(env) });
+  assert.equal(join.status, 0, join.stderr + join.stdout);
+  const runDir = path.join(install, 'run');
+  const tmux = fakeTmux(dir);
+  const before = runSnapshot(runDir);
+
+  const result = diagnose(install, project, 'demo', 'agy', [], { ...env, ...tmux.env });
+  assert.match(result.stdout, /^history: MATCH /m, result.stdout + result.stderr);
+  assert.deepEqual(tmux.namingCalls(), []);
+  assert.deepEqual(runSnapshot(runDir), before);
+
+  // Control: the same environment does reach the hook when a seat acts, so the
+  // two empty results above are not just a fake nobody calls.
+  spawnSync('bash', [path.join(install, 'scripts/history.sh'), 'demo', 'agy'],
+    { encoding: 'utf8', env: isolatedEnv({ ...env, ...tmux.env }) });
+  assert.notDeepEqual(tmux.namingCalls(), []);
 });
 
 test('where.sh exiting non-zero is UNKNOWN, not a clean placement', () => {
