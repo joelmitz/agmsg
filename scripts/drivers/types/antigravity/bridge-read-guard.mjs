@@ -1,6 +1,7 @@
 // POSIX process identity and advisory-lock helpers shared by the Antigravity
 // bridge and mode controller.
 import fs from 'node:fs';
+import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 
@@ -77,6 +78,12 @@ if(process.argv[2]==='check') {
   const [file,pid,team,role,...ids]=process.argv.slice(3);
   try {
     const reservation=read(file), state=read(reservation.state);
+    // Every refusal below appends to reservation.violations and the read takes
+    // `${violations}.lock`. Both real writers (antigravity-bridge.mjs and the TUI
+    // supervisor) always record an absolute path; anything else would land
+    // relative to the caller's cwd (literally `undefined` / `undefined.lock`).
+    // Refuse such a reservation without writing anything.
+    if(typeof reservation.violations!=='string'||!path.isAbsolute(reservation.violations)) throw Error('reservation names no absolute violations path');
     const cap=fs.readFileSync(0,'utf8');
     const parent=proc(Number(pid));
     const owner=proc(reservation.pid);

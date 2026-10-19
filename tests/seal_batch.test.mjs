@@ -250,7 +250,11 @@ test("a pool that cannot be spawned still seals every message", async () => {
 test("driver stderr is forwarded to the operator, not only quoted on failure", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "agmsg-driver-stderr-"));
   const script = join(scratch, "fake-driver.sh");
+  // Drain stdin like a real driver: one that exits without reading races the
+  // engine's stdin.end() and turns the run into a spurious EPIPE (the same
+  // fix upstream applied to its fake drivers in #755 / #1178).
   await writeFile(script, ["#!/usr/bin/env bash",
+    "cat >/dev/null",
     "printf 'agmsg: sealing 5/10 (50%%)\\n' >&2",
     "printf '{\"type\":\"sync_state\"}\\n'", ""].join("\n"), { mode: 0o700 });
 
