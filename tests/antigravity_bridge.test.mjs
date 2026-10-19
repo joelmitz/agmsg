@@ -6,6 +6,7 @@ import path from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
 import {once} from 'node:events';
 import {forbiddenTool,childEnvWithoutStrongDetect} from '../scripts/drivers/types/antigravity/antigravity-bridge.mjs';
+import { isolatedEnv } from './helpers/isolated-env.mjs';
 const repo=path.resolve(import.meta.dirname,'..');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // Under parallel runs each fixture spawns multiple bash/node child processes,
@@ -19,7 +20,7 @@ function fixture(driver='sqlite',mode='success',extra={}) {
   fs.cpSync(path.join(repo,'scripts'),path.join(install,'scripts'),{recursive:true});
   fs.copyFileSync(path.join(repo,'tests/fixtures/fake-antigravity.mjs'),path.join(dir,'fake.mjs'));
   const fake=path.join(dir,'agy');fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
-  const env={...process.env,AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra};
+  const env=isolatedEnv({AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra});
   const sh=(name,args=[])=>{const r=spawnSync('bash',[path.join(install,'scripts',name),...args],{env,encoding:'utf8'});assert.equal(r.status,0,r.stderr+r.stdout);return r.stdout;};
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
@@ -166,13 +167,17 @@ test('a SIGTERM exit of verify while idle is treated as a normal stop',async()=>
   const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal});
   try {
     await waitFor(()=>f.output().includes('ready'));
+    // Arm only now: verify also runs while the monitor is still initializing,
+    // and a TERM there is a different case (NEEDS_ATTENTION, no 'ready').
+    fs.writeFileSync(`${signal}.armed`,'');
+    await waitFor(()=>fs.existsSync(`${signal}.reached`));
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
     assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
-  } finally { fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
+  } finally { for(const s of ['armed','reached'])fs.rmSync(`${signal}.${s}`,{force:true}); await f.close(); }
 });
 
 test('an explicit ack recovery of a completed batch does not re-run the model',async()=>{
@@ -296,15 +301,14 @@ function helperInstall() {
   const dump=path.join(dir,'child.env');
   const fake=path.join(dir,'agy');
   fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
-  const env={
-    ...process.env,
+  const env=isolatedEnv({
     AGMSG_STORAGE_DRIVER:'sqlite',
     AGMSG_STORAGE_PATH:path.join(install,'db'),
     AGMSG_CONFIG:path.join(dir,'config.json'),
     FAKE_AGY_DUMP_ENV:dump,
     CLAUDE_CODE_SESSION_ID:'parent-claude',
     FIXTURE_INSTALL:install,
-  };
+  });
   const sh=(name,args=[])=>{const r=spawnSync('bash',[path.join(install,'scripts',name),...args],{env,encoding:'utf8'});assert.equal(r.status,0,r.stderr+r.stdout);return r.stdout;};
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);

@@ -32,10 +32,12 @@ bash "$SKILL_DIR/scripts/identities.sh" "$project" antigravity | awk -F '\t' -v 
 case "$command" in
  claim) actas_lock_claim "$team" "$role" "$owner"; exit ;;
  verify)
-   if [ -n "${AGMSG_TEST_VERIFY_SIGNAL:-}" ]; then
-     _n=0; [ -f "${AGMSG_TEST_VERIFY_SIGNAL}.count" ] && _n=$(cat "${AGMSG_TEST_VERIFY_SIGNAL}.count")
-     _n=$((_n + 1)); printf '%s\n' "$_n" > "${AGMSG_TEST_VERIFY_SIGNAL}.count"
-     if [ "$_n" -ge 3 ]; then kill -TERM $$; fi
+   # Test hook: TERM this verify once the test has armed it. Armed by a file
+   # (written after the test saw the monitor go idle) rather than by a call
+   # count, because how many verifies run before idle depends on timing.
+   if [ -n "${AGMSG_TEST_VERIFY_SIGNAL:-}" ] && rm "${AGMSG_TEST_VERIFY_SIGNAL}.armed" 2>/dev/null; then
+     : > "${AGMSG_TEST_VERIFY_SIGNAL}.reached"
+     kill -TERM $$
    fi
    # The supervisor reads this as a boolean "is it still mine". Both "no" and
    # "cannot tell" must answer non-zero -- an unverifiable lock is not a held
