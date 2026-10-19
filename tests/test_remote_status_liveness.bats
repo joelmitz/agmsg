@@ -24,9 +24,12 @@ setup() {
 }
 
 teardown() {
+  # ENGINE_PIDS come from pidfiles / child pid files the fixtures wrote, so stop
+  # them through kill_test_owned_pid (a positive single pid still referencing this
+  # test's TEST_SKILL_DIR only), then collect any that were this shell's children.
   local pid
   for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
+    kill_test_owned_pid "$pid"
     wait "$pid" 2>/dev/null || true
   done
   teardown_test_env

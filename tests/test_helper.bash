@@ -279,7 +279,11 @@ agmsg_inbox() {
 }
 
 # PIDs (one per line, this shell excluded) whose command line OR environment
-# references <dir> as a path: <dir> itself or <dir>/..., never a longer sibling name.
+# references <dir> as a path of its own: <dir> itself or <dir>/..., bounded on BOTH
+# sides. On the left it must start an argument / an environment value / a list item
+# (start of the NUL-separated record, or right after `=`, `:`, whitespace or a
+# quote); on the right it must end there or continue with `/` (or `:`, whitespace,
+# a quote). So `/not-owned<dir>/home` and `<dir>x` are NOT matches.
 #
 # Why environ as well as argv: a test exports HOME (and SCRIPTS, TMPDIR, ...) under
 # TEST_SKILL_DIR, so every process the test started inherits it -- including the
@@ -293,37 +297,95 @@ agmsg_inbox() {
 # Linux reads /proc/<pid>/cmdline and /proc/<pid>/environ (one grep, no ps).
 # environ is readable only for the caller's own processes; another user's process
 # could only match by argv, and could not be signalled anyway. Where /proc is
-# absent (macOS) it falls back to ps argv only.
-# <dir> must be a plain mktemp-style path ([A-Za-z0-9._/-]); anything else lists
-# nothing (fail closed -- this feeds a KILL).
+# absent (macOS) -- or AGMSG_TEST_REAP_PS_ONLY is set, which is how the tests
+# exercise that path on Linux -- it uses `ps` argv with the SAME bounded pattern,
+# for the scan and for the pre-signal re-check alike. <dir> must be a plain
+# mktemp-style path ([A-Za-z0-9._/-]); anything else lists nothing (fail closed --
+# this feeds a KILL).
+_dir_ref_ere() {   # <dir> -> ERE matching <dir> as a bounded path
+  local q="'\"" esc
+  esc="${1//./[.]}"
+  printf '(^|[=:[:space:]%s])%s(/|:|[[:space:]%s]|$)' "$q" "$esc" "$q"
+}
+_dir_ref_use_proc() {
+  [ -z "${AGMSG_TEST_REAP_PS_ONLY:-}" ] && [ -r /proc/self/environ ]
+}
 _pids_referencing_dir() {   # <dir>
   local dir="$1" re out p
   case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
-  if [ -r /proc/self/environ ]; then
-    re="${dir//./\\.}(/|\$)"
+  re="$(_dir_ref_ere "$dir")"
+  if _dir_ref_use_proc; then
     # Captured first, not piped: a pipeline's other members would be alive, carry
     # the exported dir, and list themselves. The grep itself is gone by the time
     # the caller signals, and the caller re-checks every pid before each kill.
     out="$(grep -lazE -- "$re" /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null)"
-    for p in $out; do
-      p="${p#/proc/}"; p="${p%%/*}"
-      case "$p" in ''|*[!0-9]*) continue ;; esac
-      [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-}" ] && continue
-      printf '%s\n' "$p"
-    done | sort -u
-    return 0
+  else
+    out="$(ps -eo pid=,args= 2>/dev/null |
+      AGMSG_REAP_RE="$re" awk '{ pid = $1; sub(/^[[:space:]]*[0-9]+[[:space:]]*/, ""); if ($0 ~ ENVIRON["AGMSG_REAP_RE"]) print pid }')"
   fi
-  ps -eo pid=,args= 2>/dev/null |
-    AGMSG_REAP_DIR="$dir" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+  for p in $out; do
+    p="${p#/proc/}"; p="${p%%/*}"
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-}" ] && continue
+    printf '%s\n' "$p"
+  done | sort -u
+  return 0
 }
 
 # 0 if <pid> still references <dir> right now (re-read fresh just before a signal,
-# so a pid that exited and was reused in between is never signalled).
+# so a pid that exited and was reused in between is never signalled). Same
+# bounded pattern and the same source (/proc, or ps argv) as the scan.
 _pid_references_dir() {   # <pid> <dir>
-  local re
-  [ -r /proc/self/environ ] || return 0   # ps fallback: the scan itself is the check
-  re="${2//./\\.}(/|\$)"
-  grep -qazE -- "$re" "/proc/$1/cmdline" "/proc/$1/environ" 2>/dev/null
+  local pid="$1" dir="$2" re
+  case "$pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
+  case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  re="$(_dir_ref_ere "$dir")"
+  if _dir_ref_use_proc; then
+    grep -qazE -- "$re" "/proc/$pid/cmdline" "/proc/$pid/environ" 2>/dev/null
+  else
+    ps -o args= -p "$pid" 2>/dev/null | grep -qE -- "$re"
+  fi
+}
+
+# 0 if <dir> is a TEST_SKILL_DIR the reaper may scan for: a real mktemp-style temp
+# path, never a short/rooty prefix.
+_test_skill_dir_reapable() {   # <dir>
+  local dir="$1"
+  case "$dir" in
+    ""|/|/tmp|/var|/private|/usr|"$HOME") return 1 ;;
+  esac
+  case "$dir" in
+    /tmp/*|/private/*|/var/folders/*|/private/var/folders/*) return 0 ;;
+  esac
+  # Outside the well-known temp roots, allow ONLY under a TMPDIR that is set AND a
+  # real path — never unset, "", or "/". Resolve and VALIDATE the prefix before using
+  # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
+  # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
+  # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
+  # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
+  # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
+  local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
+  [ -n "$_tmp" ] || return 1
+  case "$dir" in "$_tmp"/?*) return 0 ;; esac
+  return 1
+}
+
+# Stop ONE pid a test read from a file it wrote (a pidfile, a #1254 seat record):
+# a file's number is not proof of ownership. Signal only a positive single pid
+# (never 0, 1, empty or non-numeric -- `kill 0` would hit the whole process group),
+# and only while /proc (or ps) shows it still references this test's own
+# TEST_SKILL_DIR, re-checked before the TERM and again before the KILL.
+# Returns 0 whether or not it signalled; it never signals anything else.
+kill_test_owned_pid() {   # <pid>
+  local pid="$1" dir="${TEST_SKILL_DIR:-}"
+  case "$pid" in ''|0|1|*[!0-9]*) return 0 ;; esac
+  _test_skill_dir_reapable "$dir" || return 0
+  _pid_references_dir "$pid" "$dir" || return 0
+  kill "$pid" 2>/dev/null || true
+  wait_for_pid_exit "$pid" && return 0
+  _pid_references_dir "$pid" "$dir" || return 0
+  kill -KILL "$pid" 2>/dev/null || true
+  return 0
 }
 
 # Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the
@@ -346,24 +408,7 @@ _pid_references_dir() {   # <pid> <dir>
 # NOT as "measured", per the day's rule that a claim states how it was verified (#1036).
 _reap_test_skill_dir_procs() {
   local dir="${TEST_SKILL_DIR:-}"
-  case "$dir" in
-    ""|/|/tmp|/var|/private|/usr|"$HOME") return 0 ;;
-  esac
-  case "$dir" in
-    /tmp/*|/private/*|/var/folders/*|/private/var/folders/*) : ;;
-    *)
-      # Outside the well-known temp roots, allow ONLY under a TMPDIR that is set AND a
-      # real path — never unset, "", or "/". Resolve and VALIDATE the prefix before using
-      # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
-      # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
-      # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
-      # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
-      # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
-      local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
-      [ -n "$_tmp" ] || return 0
-      case "$dir" in "$_tmp"/?*) : ;; *) return 0 ;; esac
-      ;;
-  esac
+  _test_skill_dir_reapable "$dir" || return 0
   local pids tries=0 sig p
   while :; do
     pids="$(_pids_referencing_dir "$dir")"
