@@ -45,7 +45,9 @@ teardown() {
 # Stop every fake app-server a bridged launch brought up in this test. Runs from
 # teardown so a failed assertion cannot skip it. The shim records each seat's
 # server in run/codex-app-server.<seat>.record (#1254), not a .pid file, so read
-# it with the production reader rather than re-parsing the format here.
+# it with the production reader rather than re-parsing the format here. The
+# record's pid is not trusted as is: kill_test_owned_pid signals it only if it is
+# a positive single pid that /proc still shows as this test's own process.
 _stop_fake_app_servers() {
   local rec
   for rec in "$TEST_SKILL_DIR"/run/codex-app-server.*.record; do
@@ -54,8 +56,7 @@ _stop_fake_app_servers() {
       # shellcheck disable=SC1091
       . "$SCRIPTS/drivers/types/codex/_seat-key.sh"
       _agmsg_codex_seat_record_read "$rec" || exit 0
-      kill "$SEAT_REC_PID" 2>/dev/null || true
-      wait_for_pid_exit "$SEAT_REC_PID" || kill -KILL "$SEAT_REC_PID" 2>/dev/null || true
+      kill_test_owned_pid "$SEAT_REC_PID"
     )
   done
 }

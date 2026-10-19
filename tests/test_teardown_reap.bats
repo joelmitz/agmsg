@@ -175,3 +175,107 @@ _start_orphan() {
   kill -0 "$other"                   # untouched
   kill "$other" 2>/dev/null || true
 }
+
+# --- the path match is bounded on BOTH sides (review R1) ----------------------
+# A process whose environment/argv names `/not-owned<dir>/...` is somebody else's: the
+# match must not slide into the middle of another absolute path. Read-only checks on
+# the two selectors (scan and pre-signal re-check); the probes are this test's own
+# `env -i` children and are stopped by exact pid at the end.
+
+# Probes are stopped by exact pid BEFORE the assertions, so a failing assertion cannot
+# leave the foreign ones (which teardown would rightly not touch) running.
+_rc() { "$@" >/dev/null 2>&1 && echo 0 || echo 1; }
+
+@test "path match rejects a foreign path that merely CONTAINS TEST_SKILL_DIR (/not-owned<dir>/...), in scan and re-check" {
+  [ -r /proc/self/environ ] || skip "environment scan needs /proc"
+  local foreign="/not-owned$TEST_SKILL_DIR" envp argp listed r_env r_arg
+  envp="$(_start_orphan env -i PATH="$PATH" HOME="$foreign/home" sleep 300)"
+  argp="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$foreign/x")"
+  local alive_env alive_arg
+  alive_env="$(_rc kill -0 "$envp")"; alive_arg="$(_rc kill -0 "$argp")"
+  r_env="$(_rc _pid_references_dir "$envp" "$TEST_SKILL_DIR")"
+  r_arg="$(_rc _pid_references_dir "$argp" "$TEST_SKILL_DIR")"
+  listed="$(_pids_referencing_dir "$TEST_SKILL_DIR")"
+  kill "$envp" "$argp" 2>/dev/null || true
+  [ "$alive_env$alive_arg" = "00" ]     # the probes were really running
+  [ "$r_env" = 1 ]
+  [ "$r_arg" = 1 ]
+  refute grep -qx -- "$envp" <<<"$listed"
+  refute grep -qx -- "$argp" <<<"$listed"
+}
+
+@test "path match accepts <dir> itself and <dir>/... in argv and in the environment (positive control)" {
+  [ -r /proc/self/environ ] || skip "environment scan needs /proc"
+  local envp argp exactp listed r
+  envp="$(_start_orphan env -i PATH="$PATH" HOME="$TEST_SKILL_DIR/home" sleep 300)"
+  exactp="$(_start_orphan env -i PATH="$PATH" PROBE_DIR="$TEST_SKILL_DIR" sleep 300)"
+  argp="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$TEST_SKILL_DIR/x")"
+  r="$(_rc _pid_references_dir "$envp" "$TEST_SKILL_DIR")$(_rc _pid_references_dir "$exactp" "$TEST_SKILL_DIR")$(_rc _pid_references_dir "$argp" "$TEST_SKILL_DIR")"
+  listed="$(_pids_referencing_dir "$TEST_SKILL_DIR")"
+  kill "$envp" "$exactp" "$argp" 2>/dev/null || true
+  [ "$r" = "000" ]
+  grep -qx -- "$envp" <<<"$listed"
+  grep -qx -- "$exactp" <<<"$listed"
+  grep -qx -- "$argp" <<<"$listed"
+}
+
+@test "ps fallback uses the same bounded match: <dir>/... in argv yes, /not-owned<dir>/... and <dir>x no" {
+  # AGMSG_TEST_REAP_PS_ONLY forces the no-/proc (macOS) path on this host.
+  local own foreign sibling envonly listed r
+  own="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "$TEST_SKILL_DIR/x")"
+  foreign="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "/not-owned$TEST_SKILL_DIR/x")"
+  sibling="$(_start_orphan env -i PATH="$PATH" bash -c 'sleep 300; :' "${TEST_SKILL_DIR}x/y")"
+  # Names the dir only in its environment, which ps cannot see: proves this run
+  # really took the ps path (the /proc path would list it).
+  envonly="$(_start_orphan env -i PATH="$PATH" HOME="$TEST_SKILL_DIR/home" sleep 300)"
+  listed="$(AGMSG_TEST_REAP_PS_ONLY=1 _pids_referencing_dir "$TEST_SKILL_DIR")"
+  r="$(AGMSG_TEST_REAP_PS_ONLY=1 _rc _pid_references_dir "$own" "$TEST_SKILL_DIR")"
+  r="$r$(AGMSG_TEST_REAP_PS_ONLY=1 _rc _pid_references_dir "$foreign" "$TEST_SKILL_DIR")"
+  r="$r$(AGMSG_TEST_REAP_PS_ONLY=1 _rc _pid_references_dir "$sibling" "$TEST_SKILL_DIR")"
+  kill "$own" "$foreign" "$sibling" "$envonly" 2>/dev/null || true
+  [ "$r" = "011" ]
+  refute grep -qx -- "$envonly" <<<"$listed"
+  grep -qx -- "$own" <<<"$listed"
+  refute grep -qx -- "$foreign" <<<"$listed"
+  refute grep -qx -- "$sibling" <<<"$listed"
+}
+
+# --- a pid read from a file is not trusted as is (review R2) -----------------
+# kill_test_owned_pid backs the teardowns that read pidfiles / #1254 seat records.
+# `kill` is replaced by a recorder in a subshell, so the negative cases send no
+# real signal at all.
+
+_owned_kill_would_signal() {   # <pid> -> prints WOULD_SIGNAL lines, sends nothing
+  (
+    kill() { printf 'WOULD_SIGNAL %s\n' "$*"; }
+    wait_for_pid_exit() { return 0; }
+    kill_test_owned_pid "$1"
+  )
+}
+
+@test "kill_test_owned_pid never signals 0, 1, empty or a non-numeric value (kill 0 = whole process group)" {
+  local v out
+  for v in 0 1 "" abc -5 "12 34" 00; do
+    out="$(_owned_kill_would_signal "$v")"
+    [ -z "$out" ] || { echo "signalled for '$v': $out"; false; }
+  done
+}
+
+@test "kill_test_owned_pid does not signal a live process that is not this test's" {
+  local other out
+  other="$(_start_orphan env -i PATH="$PATH" sleep 300)"
+  kill -0 "$other"
+  out="$(_owned_kill_would_signal "$other")"
+  [ -z "$out" ]
+  kill -0 "$other"
+  kill "$other" 2>/dev/null || true
+}
+
+@test "kill_test_owned_pid stops a process that IS this test's (positive control)" {
+  local mine
+  mine="$(_start_orphan sleep 300)"     # inherits HOME=$TEST_SKILL_DIR/home
+  kill -0 "$mine"
+  [ "$(_owned_kill_would_signal "$mine")" = "WOULD_SIGNAL $mine" ]
+  kill_test_owned_pid "$mine"
+  wait_for_pid_exit "$mine"
+}
