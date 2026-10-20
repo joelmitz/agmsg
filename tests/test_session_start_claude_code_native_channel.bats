@@ -41,6 +41,19 @@ _mark_daemon_ready() {
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
 }
 
+# The daemon's own evidence that one of its nudges reached <socket> for
+# team/<agent> (claude-code-queue.mjs writes this row once the receiving
+# transcript shows the nudge). Without it the native channel is never relied
+# on: a session can hold every nudge (permission mode class mismatch).
+_confirm_native_delivery() {   # <agent> <socket> [state]
+  sqlite3 "$RUN_DIR/install.db" "CREATE TABLE IF NOT EXISTS beta_claude_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, seat TEXT NOT NULL, messaging_socket TEXT NOT NULL,
+      transcript_path TEXT NOT NULL, up_to TEXT NOT NULL, nonce TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'expired')), created_at TEXT NOT NULL);
+    INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, up_to, nonce, state, created_at)
+    VALUES ('[\"team\",\"$1\"]', '$2', '/tmp/t.jsonl', '1', 'n-$RANDOM', '${3:-confirmed}', strftime('%Y-%m-%dT%H:%M:%fZ','now'));"
+}
+
 # #1577 re-review repro: a conversation that actas'd alice, then
 # LATER actas'd bob, leaves BOTH role-session records carrying the same
 # session=shared (actas-claim.sh always writes the CURRENT session's bare
@@ -77,12 +90,42 @@ _mark_daemon_ready() {
   # ancestry walk happens to resolve (or degrade to bare) in this
   # environment, which left this case passing or failing by accident.
   env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-daemon-ready" >/dev/null
+  _confirm_native_delivery alice /tmp/cc-socks/sid-daemon-ready.sock
   run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-daemon-ready.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-daemon-ready"}'
   [ "$status" -eq 0 ]
   refute grep -q "AGMSG monitor mode" <<<"$output"
   refute grep -q "invoke the Monitor tool" <<<"$output"
   grep -qF "agmsgd is running and will deliver" <<<"$output"
+}
+
+# 2026-10-16: a session whose permission mode class differs from agmsgd's
+# claimed from-mode holds every nudge, so a published record alone must keep
+# the Monitor. A held nudge leaves the seat's latest row pending, and a
+# confirmed row for an OLDER socket (a previous process) proves nothing about
+# this one.
+@test "session-start: a published record with no confirmed delivery to this socket keeps the Monitor directive" {
+  _mark_daemon_ready
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-unconfirmed" >/dev/null
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-unconfirmed.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-unconfirmed"}'
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "no delivery to it is confirmed yet" <<<"$output"
+  refute grep -q "agmsgd is running and will deliver" <<<"$output"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(agmsg_role_session_get team alice messaging_socket)" = /tmp/cc-socks/sid-unconfirmed.sock ]
+
+  _confirm_native_delivery alice /tmp/cc-socks/older-process.sock
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-unconfirmed.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-unconfirmed"}'
+  grep -qF "AGMSG monitor mode" <<<"$output"
+
+  _confirm_native_delivery alice /tmp/cc-socks/sid-unconfirmed.sock
+  _confirm_native_delivery alice /tmp/cc-socks/sid-unconfirmed.sock pending
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-unconfirmed.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-unconfirmed"}'
+  grep -qF "AGMSG monitor mode" <<<"$output"
 }
 
 # actas_lock_claim is the write gate (not a raw read+compare): its own
@@ -95,6 +138,7 @@ _mark_daemon_ready() {
 @test "session-start: a genuine --resume (dead old pid, same bare sid) reclaims the lock and still skips Monitor" {
   _mark_daemon_ready
   env AGMSG_AGENT_PID=999999999 bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-resumed" >/dev/null
+  _confirm_native_delivery alice /tmp/cc-socks/sid-resumed.sock
   run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-resumed.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-resumed"}'
   [ "$status" -eq 0 ]
@@ -110,6 +154,7 @@ _mark_daemon_ready() {
   env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-stale-twin" >/dev/null
   source "$SCRIPTS/lib/role-session.sh"
   agmsg_role_session_record gone-team alice "sid-stale-twin" "$PROJ" claude-code
+  _confirm_native_delivery alice /tmp/cc-socks/sid-stale-twin.sock
   run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-stale-twin.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-stale-twin"}'
   [ "$status" -eq 0 ]
@@ -131,6 +176,7 @@ _mark_daemon_ready() {
 # shape of a seat never recorded); the switch writes the record and takes the lock.
 @test "session-start: agmsgd ready, NO record, NO lock, one registered seat -> switches to direct delivery" {
   _mark_daemon_ready
+  _confirm_native_delivery alice /tmp/cc-socks/sid-ready-no-record.sock
   run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-ready-no-record.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-ready-no-record"}'
   [ "$status" -eq 0 ]
@@ -191,17 +237,32 @@ _mark_daemon_ready() {
   [ "$status" -ne 0 ]
 }
 
-# A seat chosen by actas moves to direct delivery on the spot, even when the
+# A seat chosen by actas is published to the daemon on the spot, even when the
 # project registers several seats (session-start alone cannot pick one then).
-@test "actas-claim: daemon ready and a messaging socket -> records the socket and prints delivery=native" {
+# delivery=native (the procedure's cue to skip the Monitor) waits for the
+# daemon's confirmed delivery to this socket: a held nudge must not leave the
+# seat with no Monitor (2026-10-16).
+@test "actas-claim: daemon ready and a messaging socket -> records the socket; delivery=native only once a delivery is confirmed" {
   _mark_daemon_ready
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
   run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-actas-native.sock" \
     bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "sid-actas-native"
   [ "$status" -eq 0 ]
-  grep -qx "delivery=native" <<<"$output"
+  grep -qx "status=ok team=team" <<<"$output"
+  refute grep -qx "delivery=native" <<<"$output"
   source "$SCRIPTS/lib/role-session.sh"
   [ "$(agmsg_role_session_get team bob messaging_socket)" = /tmp/cc-socks/sid-actas-native.sock ]
+
+  _confirm_native_delivery bob /tmp/cc-socks/sid-actas-native.sock pending
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-actas-native.sock" \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "sid-actas-native"
+  refute grep -qx "delivery=native" <<<"$output"
+
+  _confirm_native_delivery bob /tmp/cc-socks/sid-actas-native.sock
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-actas-native.sock" \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "sid-actas-native"
+  [ "$status" -eq 0 ]
+  grep -qx "delivery=native" <<<"$output"
 }
 
 @test "session-start: a different live pid with the SAME bare session id never overwrites that seat's record" {

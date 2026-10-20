@@ -145,6 +145,15 @@ EOF
       echo "AGMSG delivery: agmsgd's notices are being held by this Claude Code (its crossSessionInbound setting or permission mode), so the native channel is not used. Next: arm the Monitor below."
       return 0
     fi
+    # Fork: not held is not delivered. A socket no nudge has reached yet may
+    # still hold the first one (no token, or a token the session does not
+    # accept), and once the Monitor is skipped nothing would re-arm it. The
+    # Monitor is skipped only once the daemon has confirmed a nudge reached
+    # this socket; watch.sh steps aside by itself once a delivery is confirmed.
+    if ! agmsg_claude_code_native_confirmed "$pair_team" "$pair_agent" "$socket"; then
+      echo "AGMSG delivery: agmsgd is running and will also try this session directly, but no delivery to it is confirmed yet, so the native channel is not relied on. Next: arm the Monitor below."
+      return 0
+    fi
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF

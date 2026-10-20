@@ -427,8 +427,46 @@ _wait_exit() {  # <pid> <tenths>
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
   AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/s-ms-native.sock" \
-    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code erin "s-ms-native" | grep -qx "delivery=native"
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code erin "s-ms-native" >/dev/null
 
+  # Review R1 (rc.5 merge): a socket no nudge has reached yet -- no queue row
+  # at all, no held seat, no messaging token -- must keep the watch re-arming.
+  # Stopping here would leave a seat whose first nudge is held with neither
+  # path, since a held nudge cannot itself re-arm a Monitor.
+  [ -z "${CLAUDE_CODE_MESSAGING_TOKEN:-}" ]
+  bash "$SCRIPTS/send.sh" team bob erin "untried-socket probe" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'untried-socket probe' "$out"
+  grep -qF 'agmsg watch: re-arm' "$out"
+  refute grep -qF 'agmsg watch: stopping' "$out"
+
+  # 2026-10-16: a record the daemon addresses is not a delivered nudge -- a
+  # session whose permission mode class differs from agmsgd's from-mode holds
+  # every one, leaving the seat's latest queue row pending. Until a delivery
+  # to this socket is confirmed the watch must keep re-arming.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "CREATE TABLE IF NOT EXISTS beta_claude_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, seat TEXT NOT NULL, messaging_socket TEXT NOT NULL,
+      transcript_path TEXT NOT NULL, up_to TEXT NOT NULL, nonce TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'expired')), created_at TEXT NOT NULL);
+    INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, up_to, nonce, state, created_at)
+    VALUES ('[\"team\",\"erin\"]', '/tmp/cc-socks/s-ms-native.sock', '/tmp/t.jsonl', '1', 'held-nonce', 'pending', 'now');"
+  bash "$SCRIPTS/send.sh" team bob erin "held-nudge probe" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'held-nudge probe' "$out"
+  grep -qF 'agmsg watch: re-arm' "$out"
+  refute grep -qF 'agmsg watch: stopping' "$out"
+
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE beta_claude_queue SET state='confirmed' WHERE nonce='held-nonce';"
   bash "$SCRIPTS/send.sh" team bob erin "native-delivered probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &

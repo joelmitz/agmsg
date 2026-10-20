@@ -1235,6 +1235,11 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 # built-in enforcement of that either, so it is compared explicitly, the
 # same as every other field above.
 #
+# Last, the daemon must have CONFIRMED a nudge to the recorded socket
+# (agmsg_claude_code_native_confirmed, fork): a seat no nudge has reached yet
+# is not known to show them, and a watch that stops before the first nudge is
+# held has nothing left to re-arm it.
+#
 # AGMSGD_DESIRED must also be `on`, not just HEALTH=ready (review, #1633):
 # during `daemon disable`, the intent flips to off before the still-running
 # owner finishes shutting down, so HEALTH can read `ready` for a window after
@@ -1267,7 +1272,7 @@ _agmsg_watch_native_delivery_active() {
   local _canon_project
   _canon_project="$(agmsg_canonical_path "$PROJECT_PATH")"
   [ -n "$_canon_project" ] || return 1
-  local _team _agent _any=0
+  local _team _agent _socket _any=0
   while IFS=$'\t' read -r _team _agent; do
     [ -z "$_team" ] && continue
     _any=1
@@ -1275,11 +1280,15 @@ _agmsg_watch_native_delivery_active() {
     [ "$(agmsg_role_session_get "$_team" "$_agent" team 2>/dev/null)" = "$_team" ] || return 1
     [ "$(agmsg_role_session_get "$_team" "$_agent" agent 2>/dev/null)" = "$_agent" ] || return 1
     [ "$(agmsg_role_session_get "$_team" "$_agent" type 2>/dev/null)" = claude-code ] || return 1
-    [ -n "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" ] || return 1
+    _socket="$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)"
+    [ -n "$_socket" ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" claude_config_dir 2>/dev/null)" ] || return 1
     # A Claude Code that holds agmsgd's nudges is not served by it.
     ! agmsg_daemon_claude_seat_held "$_team" "$_agent" "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" || return 1
     [ "$(agmsg_role_session_get "$_team" "$_agent" project 2>/dev/null)" = "$_canon_project" ] || return 1
+    # Fork: only a nudge the daemon saw reach this socket lets the watch step aside.
+    declare -F agmsg_claude_code_native_confirmed >/dev/null 2>&1 || return 1
+    agmsg_claude_code_native_confirmed "$_team" "$_agent" "$_socket" || return 1
   done <<< "$PAIRS"
   [ "$_any" -eq 1 ]
 }
