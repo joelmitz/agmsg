@@ -140,15 +140,12 @@ while IFS= read -r team; do
   agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" "$SESSION_ID" || true
 done <<< "$TEAMS"
 
-# Once the seat is decided, publish this Claude Code session as agmsgd's direct
-# delivery destination when the daemon is ready and the session has a usable
-# messaging socket, so a seat chosen by actas does not depend on how many seats
-# the project registers. "delivery=native" (after the status line; the actas
-# procedure then skips the Monitor) is printed only when the daemon has already
-# confirmed a nudge reached this very socket: a session can hold every nudge
-# (permission mode class mismatch), and a published record proves nothing about
-# that. Until then the Monitor stays, and watch.sh hands over on its own once a
-# delivery is confirmed.
+# Once the seat is decided, move this Claude Code session onto agmsgd's direct
+# delivery when the daemon is ready and the session has a usable messaging
+# socket, so a seat chosen by actas does not depend on how many seats the
+# project registers. Prints "delivery=native" after the status line; the actas
+# procedure then skips the Monitor. Anything short of a verified record leaves
+# the Monitor path as it was.
 NATIVE_DELIVERY=0
 if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
    && _native_target="$(agmsg_claude_code_native_target 2>/dev/null)" \
@@ -163,8 +160,9 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
     NATIVE_DELIVERY=1
     while IFS= read -r team; do
       [ -z "$team" ] && continue
-      agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" || NATIVE_DELIVERY=0
-      agmsg_claude_code_native_confirmed "$team" "$NAME" "${_native_target%%$'\t'*}" || NATIVE_DELIVERY=0
+      agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" || NATIVE_DELIVERY=0
+      # This Claude Code holds agmsgd's nudges: keep the Monitor path.
+      ! agmsg_daemon_claude_seat_held "$team" "$NAME" "${_native_target%%$'\t'*}" || NATIVE_DELIVERY=0
     done <<< "$TEAMS"
   fi
 fi

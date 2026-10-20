@@ -147,22 +147,28 @@ agmsg_codex_refresh_destination() {
     [ "$matches" = 1 ] || return 1
   fi
   [ -n "$chosen_team" ] && [ -n "$chosen_name" ] || return 1
-  # Same resolution as codex-record-session.sh: the home that holds this
-  # thread's rollout, else the fork's effective home (AGMSG_CODEX_HOME first),
-  # never a bare CODEX_HOME read that skips the opt-in variable.
   local profile owner
-  profile="$(agmsg_codex_home_for_thread "$thread" 2>/dev/null || agmsg_codex_effective_home)"
-  case "$profile" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) return 1 ;; esac
-  [ -d "$profile" ] || return 1
-  profile="$(agmsg_canonical_path "$profile")" || return 1
-  profile="$(agmsg_normalize_project_path "$profile")" || return 1
-  case "$profile" in *[[:cntrl:]]*|'') return 1 ;; esac
+  # shellcheck disable=SC1091
+  . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+  # Fork: the effective home (AGMSG_CODEX_HOME first), the same profile
+  # agmsg_codex_role_home_matches compares records against.
+  profile="$(agmsg_codex_profile_canonical "$(agmsg_codex_effective_home)")" || return 1
   owner="$(agmsg_instance_id "$thread" codex 2>/dev/null)" || return 1
   agmsg_role_session_record "$chosen_team" "$chosen_name" "$thread" "$project" codex "$owner" "$profile" inactive || return 1
   agmsg_role_session_load "$chosen_team" "$chosen_name"
   [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$thread" ] \
     && [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)" = "$profile" ] || return 1
   AGMSG_CODEX_REFRESHED_PAIR="$chosen_team"$'\t'"$chosen_name"
+}
+
+# A Codex seat holds no actas lock, so the only proof that a recorded seat is
+# this very process is its record: owner=<thread>.<pid> naming the Codex pid
+# this hook runs under (see agmsg_role_session_rebind_same_process).
+agmsg_codex_rebind_after_clear() {
+  local thread="$1" project="$2" pairs="$3" cur_pid
+  cur_pid="$(agmsg_agent_pid codex 2>/dev/null || true)"
+  case "$cur_pid" in ''|*[!0-9]*) return 1 ;; esac
+  agmsg_role_session_rebind_same_process "$thread" "$project" "$cur_pid" "$pairs"
 }
 
 agmsg_codex_unseated_notice() {
@@ -195,23 +201,17 @@ agmsg_session_start() {
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
   # #1468: /clear starts a new thread inside the same Codex process, so no
   # seat of this project is recorded on it and the old owner's pid is still
-  # alive. When nothing is bound to this thread, let the proof-gated rebind
-  # that `fix` uses move the one seat that proves it is this pane.
-  # Only an identity the session itself supplied (env or hook input) may drive
-  # it, never a rollout-inferred one.
+  # alive. Only an identity the session itself supplied (env or hook input,
+  # never a rollout guess) may drive the rebind.
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
-    clear_bound=0
-    while IFS=$'\t' read -r clear_team clear_name; do
-      [ -n "$clear_team" ] || continue
-      [ "$(agmsg_role_session_uuid "$clear_team" "$clear_name" 2>/dev/null || true)" = "$thread_id" ] && clear_bound=1
-    done <<< "$PAIRS"
-    if [ "$clear_bound" = 0 ]; then
-      ( export CODEX_THREAD_ID="$thread_id"
-        # shellcheck disable=SC1091
-        . "${SKILL_DIR:-}/scripts/lib/self-fix.sh" \
-          && cd "${PROJECT:-}" \
-          && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
-    fi
+    agmsg_codex_rebind_after_clear "$thread_id" "$project_phys" "$PAIRS" || true
+  fi
+  # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+    # Fork: publish the effective home (AGMSG_CODEX_HOME first), as recorded above.
+    CODEX_HOME="$(agmsg_codex_effective_home)" agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
   fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""

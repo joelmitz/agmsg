@@ -22,6 +22,7 @@ import {
   readQueuedItem,
   readRolloutNonce,
   resolvePendingQueue,
+  rolloutStateOf,
   runCodexQueue,
 } from "./codex-queue-io.mjs";
 import { captureProcessGroup, observeProcessGroup } from "./process-group.mjs";
@@ -436,14 +437,7 @@ export function createCodexQueueChannel({
 
     const nonce = newNonce();
     const rollout = await readRolloutNonce(record.codex_home, record.thread, nonce);
-    // A recorded home whose sessions tree has no rollout for this thread is
-    // reported as exactly that observation, not as a proven home mismatch:
-    // the profile may be wrong (2026-10-16: a tool shell without CODEX_HOME
-    // recorded $HOME/.codex), or the rollout may have been moved or deleted.
-    const rolloutState = rollout.state === "absent" || rollout.state === "present"
-      ? "valid"
-      : rollout.reason === "thread_rollout_missing" ? "rollout_missing" : "invalid";
-    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState });
+    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState: rolloutStateOf(rollout) });
     if (classification.state !== "addressable") {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason }, now);
       return;

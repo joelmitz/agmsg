@@ -19,11 +19,9 @@ import { isAbsolute } from "node:path";
 export { newNonce, inboxNudge } from "./codex-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
-// Bound the transcript read to its tail: a long-lived seat's jsonl grows
-// without limit, and the delivery record this channel looks for is always
-// recent (written within the TTL window of a message this same daemon just
-// sent). 512 KiB comfortably covers many turns' worth of lines.
-const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
+// A pending nudge is checked from the transcript position recorded before it
+// was sent (the start when none was), in chunks of this size.
+const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 
 // Measured 2026-10-05: Claude Code encodes a project's cwd into its
 // transcript directory name by replacing every "/" with "-"
@@ -101,6 +99,7 @@ export async function sendClaudeCodeMessage({
   socketPath,
   nonce,
   body,
+  token = "",
   timeoutMs = SEND_TIMEOUT_MS,
   checkOwnership = checkSocketOwnership,
   connect = createConnection,
@@ -114,12 +113,17 @@ export async function sendClaudeCodeMessage({
     type: "user",
     message: {
       role: "user",
-      content: `<cross-session-message from="agmsgd" from-name="agmsgd" from-mode="bypass">\n${body}\n</cross-session-message>`,
+      content: `<cross-session-message from="agmsgd">\n${body}\n</cross-session-message>`,
     },
     priority: "next",
     from: "agmsgd",
   };
-  const line = `${JSON.stringify(payload)}\n`;
+  // The session's own inbox token goes first, as its documentation describes
+  // ({"type":"auth","token":...} as the first line of the connection), so the
+  // message is judged as one posted to its own session. The sender claims no
+  // permission mode: it is not a session and has none.
+  const auth = token ? `${JSON.stringify({ type: "auth", token })}\n` : "";
+  const line = `${auth}${JSON.stringify(payload)}\n`;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -146,74 +150,148 @@ export async function sendClaudeCodeMessage({
   });
 }
 
-function readTail(path, maxBytes) {
-  const stat = statSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
-  if (stat.size <= maxBytes) return readFileSync(path, "utf8");
-  const buf = Buffer.alloc(maxBytes);
-  const fd = openSync(path, "r");
+// The byte length of the transcript right now, recorded just before a nudge is
+// sent so the later check reads only what was written after it. null when the
+// file cannot be measured: that nudge is checked from the start.
+export function transcriptEndPosition(transcriptPath) {
   try {
-    readSync(fd, buf, 0, maxBytes, stat.size - maxBytes);
-  } finally {
-    closeSync(fd);
+    const stat = statSync(transcriptPath);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
   }
-  return buf.toString("utf8");
 }
 
-// Reads the delivery outcome straight from the receiving session's own
-// transcript. Measured line shapes (2026-10-05 addendum):
+// Judges one transcript line: "delivered", "held", or "" when it says nothing
+// about this nonce. Measured line shapes (2026-10-05 addendum):
 //   - delivered: a `type:"user"` line with `origin.body` containing the
 //     nonce verbatim — proof of delivery (with the mid-turn shape below).
 //   - held/declined: a `type:"system"`, `subtype:"informational"` line whose
-//     `content` (a possibly-truncated preview) contains the nonce. Measured
-//     again 2026-10-16 (2.1.301): the preview shows `agmsg:<nonce>` without
-//     the surrounding brackets, and a seat whose permission mode class differs
-//     from the sender's `from-mode` holds every nudge this way.
+//     `content` (a possibly-truncated preview) contains the nonce.
 //   - absorbed mid-turn (measured 2026-10-15): a `type:"attachment"` line
 //     whose `attachment.type` is `queued_command` and whose
 //     `attachment.prompt` contains the nonce; the model read it in that turn.
 //   - a `type:"queue-operation"`, `operation:"enqueue"` line fires on mere
 //     receipt, held or not — deliberately never read as evidence here (G4:
 //     never mark a seat notified on evidence that could be a hold).
-export function observeTranscript(transcriptPath, nonce) {
-  if (typeof nonce !== "string" || !nonce) return { state: "unreadable", reason: "nonce_missing" };
-  let text;
+function judgeLine(line, marker) {
+  // A held message is shown as a preview in which Claude Code drops the
+  // brackets: «agmsg:<nonce> …». Only delivery needs the bracketed form.
+  const heldMarker = marker.slice(1, -1);
+  if (!line || !line.includes(heldMarker)) return "";
+  let row;
   try {
-    text = readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES);
+    row = JSON.parse(line);
+  } catch {
+    return "";
+  }
+  if (row?.type === "user" && typeof row?.origin?.body === "string" && row.origin.body.includes(marker)) {
+    return "delivered";
+  }
+  // A nudge that arrives while the seat is mid-turn is absorbed into that
+  // turn: the model reads it as a queued_command attachment and no user line
+  // is ever written for it. Without this the nudge stays pending forever and
+  // the seat gets no further notices.
+  if (row?.type === "attachment" && row?.attachment?.type === "queued_command"
+    && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
+    return "delivered";
+  }
+  if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(heldMarker)) {
+    return "held";
+  }
+  return "";
+}
+
+// Reads from `start` to EOF in fixed-size chunks, handing each complete line
+// its byte offset and whether a newline ended it to `onLine` (stop early by returning true). A line is
+// decoded only whole, so a multi-byte character is never split across chunks.
+// A `start` that is not at the beginning of a line (the byte before it is not a
+// newline: a row was half written when it was recorded) discards the fragment
+// up to the first newline instead of reading it as a line of its own.
+function scanFrom(path, start, onLine, io) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+    let skipping = false;
+    if (start > 0) {
+      const prior = Buffer.alloc(1);
+      skipping = io.readSync(fd, prior, 0, 1, start - 1) === 1 && prior[0] !== 10;
+    }
+    let position = start;
+    let carry = Buffer.alloc(0);
+    for (;;) {
+      const read = io.readSync(fd, buf, 0, buf.length, position);
+      if (read <= 0) break;
+      position += read;
+      const data = Buffer.concat([carry, buf.subarray(0, read)]);
+      const base = position - data.length;
+      let from = 0;
+      for (let at = data.indexOf(10, from); at !== -1; at = data.indexOf(10, from)) {
+        if (skipping) skipping = false;
+        else if (onLine(data.subarray(from, at), base + from, fd, true)) return;
+        from = at + 1;
+      }
+      carry = data.subarray(from);
+    }
+    if (!skipping && carry.length) onLine(carry, position - carry.length, fd, false);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Reads the delivery outcome straight from the receiving session's own
+// transcript. Only what was written after `fromPosition` (the transcript
+// length recorded before the nudge was sent) is read, however much the
+// conversation has grown since; a transcript shorter than that position was
+// rewritten or truncated and is read from the start, as is a nudge with no
+// recorded position. A line is accepted as delivery only after it reads back
+// byte for byte from the same place: a file rewritten during a read must not
+// be confirmed from bytes that no version of it ever held.
+export function observeTranscript(transcriptPath, nonce, fromPosition = null, io = { readSync }) {
+  if (typeof nonce !== "string" || !nonce) return { state: "unreadable", reason: "nonce_missing" };
+  const marker = `[agmsg:${nonce}]`;
+  let heldSeen = false;
+  let delivered = false;
+  // Reads exactly `length` bytes at `position` (short reads are legal), or
+  // fewer only at EOF.
+  const readFully = (fd, buffer, length, position) => {
+    let got = 0;
+    while (got < length) {
+      const read = io.readSync(fd, buffer, got, length - got, position + got);
+      if (read <= 0) break;
+      got += read;
+    }
+    return got;
+  };
+  // The line reads back unchanged with its own boundaries: the newline before
+  // it (every line but the first of the file follows one), its bytes in
+  // bounded chunks, and the newline after it when it had one.
+  const stable = (fd, bytes, offset, terminated) => {
+    const edge = Buffer.alloc(1);
+    if (offset > 0 && (readFully(fd, edge, 1, offset - 1) !== 1 || edge[0] !== 10)) return false;
+    const chunk = Buffer.alloc(Math.min(TRANSCRIPT_CHUNK_BYTES, bytes.length));
+    for (let done = 0; done < bytes.length; done += chunk.length) {
+      const size = Math.min(chunk.length, bytes.length - done);
+      if (readFully(fd, chunk, size, offset + done) !== size || !chunk.subarray(0, size).equals(bytes.subarray(done, done + size))) return false;
+    }
+    return !terminated || (readFully(fd, edge, 1, offset + bytes.length) === 1 && edge[0] === 10);
+  };
+  const onLine = (bytes, offset, fd, terminated) => {
+    const verdict = judgeLine(bytes.toString("utf8"), marker);
+    if (verdict === "delivered" && stable(fd, bytes, offset, terminated)) delivered = true;
+    else if (verdict === "held") heldSeen = true;
+    return delivered;
+  };
+  try {
+    const stat = statSync(transcriptPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
+    const start = Number.isSafeInteger(fromPosition) && fromPosition >= 0 && fromPosition <= stat.size ? fromPosition : 0;
+    scanFrom(transcriptPath, start, onLine, io);
   } catch (error) {
     if (error?.code === "ENOENT") return { state: "unreadable", reason: "transcript_missing" };
     return { state: "unreadable", reason: "transcript_read_failed" };
   }
-  const marker = `[agmsg:${nonce}]`;
-  // The held notice's preview drops the brackets (measured 2026-10-16 on
-  // Claude Code 2.1.301: `preview: «agmsg:<nonce> New messages are
-  // waiting...»`), so a hold is matched on the bare tag. The nonce is a fresh
-  // random id per nudge, so the bare tag is still unique to this nudge.
-  const bareMarker = `agmsg:${nonce}`;
-  let heldSeen = false;
-  for (const line of text.split("\n")) {
-    if (!line || !line.includes(bareMarker)) continue;
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (row?.type === "user" && typeof row?.origin?.body === "string" && row.origin.body.includes(marker)) {
-      return { state: "delivered" };
-    }
-    // A nudge that arrives while the seat is mid-turn is absorbed into that
-    // turn: the model reads it as a queued_command attachment and no user line
-    // is ever written for it. Without this the nudge stays pending forever and
-    // the seat gets no further notices.
-    if (row?.type === "attachment" && row?.attachment?.type === "queued_command"
-      && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
-      return { state: "delivered" };
-    }
-    if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(bareMarker)) {
-      heldSeen = true;
-    }
-  }
+  if (delivered) return { state: "delivered" };
   if (heldSeen) return { state: "held" };
   return { state: "absent" };
 }

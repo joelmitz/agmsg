@@ -130,81 +130,43 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
-# 2026-10-16: codex-record-session.sh runs as a Codex tool command, and the
-# tool shell need not carry the session's CODEX_HOME (shell_environment_policy).
-# It then recorded $HOME/.codex for a seat whose rollout lives in another
-# profile, and agmsgd reported thread_rollout_missing. The recorded home must
-# be the one that holds the thread's rollout.
-_alt_rollout() {   # <home> <uuid> <cwd>
-  mkdir -p "$1/sessions/2026/10/16"
-  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$2" "$3" \
-    > "$1/sessions/2026/10/16/rollout-2026-10-16T10-00-00-$2.jsonl"
-}
-
-# Runs the recorder under a parent whose (fake /proc) environment carries
-# CODEX_HOME=<home>, the way a Codex process does for its tool shell.
-_record_under_codex_parent() {   # <home> <team> <agent> <project>
-  local fake="$BATS_TEST_TMPDIR/proc"
-  bash -c '
-    mkdir -p "$1/$$"
-    printf "CODEX_HOME=%s\0" "$2" > "$1/$$/environ"
-    printf "PPid:\t1\n" > "$1/$$/status"
-    AGMSG_CODEX_PROC_ROOT="$1" bash "$3" "$4" "$5" "$6"
-  ' _ "$fake" "$1" "$TYPES/codex/codex-record-session.sh" "$2" "$3" "$4"
-}
-
-_phys_home() {
-  source "$SCRIPTS/lib/resolve-project.sh"
-  agmsg_normalize_project_path "$(cd "$1" && pwd -P)"
-}
-
-@test "codex record: a tool shell without CODEX_HOME records the profile that holds the thread's rollout" {
-  local proj alt thread="01a1453a-9a40-79a0-9133-0a3d26b495e5"
-  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
-  mkdir -p "$HOME/.codex/sessions"
-  _alt_rollout "$alt" "$thread" "$proj"
-  unset CODEX_HOME
-  CODEX_THREAD_ID="$thread" _record_under_codex_parent "$alt" team alice "$proj"
-  source "$SCRIPTS/lib/role-session.sh"
-  [ "$(recorded_uuid team alice)" = "$thread" ]
-  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
-}
-
-@test "codex record: with no usable ancestor, a home another codex seat uses is searched for the rollout" {
-  local proj alt thread="01a1453f-e42a-7923-9747-15b09b120fc3"
-  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
-  mkdir -p "$HOME/.codex/sessions"
-  _alt_rollout "$alt" "$thread" "$proj"
-  source "$SCRIPTS/lib/role-session.sh"
-  agmsg_role_session_record team other "11111111-2222-4333-8444-555555555555" "$proj" codex "" "$(_phys_home "$alt")"
-  run env -u CODEX_HOME CODEX_THREAD_ID="$thread" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
-  [ "$status" -eq 0 ]
-  [ "$(recorded_uuid team alice)" = "$thread" ]
-  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
-}
-
-@test "codex record: no rollout under any known home falls back to the effective profile and says so" {
-  local proj thread="22222222-3333-4444-8555-666666666666"
+@test "codex record: a tool shell without CODEX_HOME records the profile the SessionStart hook saw" {
+  local proj hook_home thread=11111111-2222-3333-4444-555555555555 expected_home
   proj="$(mktemp -d)"
-  mkdir -p "$HOME/.codex/sessions"
-  run env -u CODEX_HOME CODEX_THREAD_ID="$thread" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
-  [ "$status" -eq 0 ]
-  grep -qF "no rollout of thread $thread was found" <<<"$output"
+  hook_home="$TEST_SKILL_DIR/tui profile"
+  mkdir -p "$hook_home" "$HOME/.codex"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$TYPES/codex/_profile.sh"
+  # The hook runs in the TUI's environment, which carries CODEX_HOME ...
+  CODEX_HOME="$hook_home" agmsg_codex_thread_home_publish "$RUN_DIR" "$thread"
+  # ... the app-server's tool shell, where actas runs, does not.
+  env -u CODEX_HOME CODEX_THREAD_ID="$thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   source "$SCRIPTS/lib/role-session.sh"
   [ "$(recorded_uuid team alice)" = "$thread" ]
-  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$HOME/.codex")" ]
+  expected_home="$(agmsg_normalize_project_path "$(cd "$hook_home" && pwd -P)")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
-@test "codex record: without a thread id, the Codex parent's home is where the rollout scan looks" {
-  local proj alt thread="33333333-4444-4555-8666-777777777777"
-  proj="$(mktemp -d)"; alt="$TEST_SKILL_DIR/codex-alt"
-  mkdir -p "$HOME/.codex/sessions"
-  _alt_rollout "$alt" "$thread" "$(cd "$proj" && pwd -P)"
-  unset CODEX_HOME CODEX_THREAD_ID
-  _record_under_codex_parent "$alt" team alice "$proj"
+# Fork: AGMSG_CODEX_HOME (the opt-in isolated profile) and #1653's per-thread
+# record work together. The hook, run in the TUI's environment, publishes the
+# effective home; a tool shell that carries neither variable then records it.
+@test "codex record (fork): the SessionStart hook publishes the AGMSG_CODEX_HOME profile and a bare tool shell records it" {
+  local proj iso thread=66666666-7777-4888-8999-aaaaaaaaaaaa expected_home
+  proj="$(mktemp -d)"
+  iso="$TEST_SKILL_DIR/isolated profile"
+  mkdir -p "$iso" "$HOME/.codex"
+  bash "$SCRIPTS/join.sh" team alice codex "$proj" >/dev/null
+  AGMSG_CODEX_HOME="$iso" CODEX_THREAD_ID="$thread" \
+    bash "$SCRIPTS/session-start.sh" codex "$proj" <<< "{\"session_id\":\"$thread\"}" >/dev/null 2>&1 || true
+  [ -f "$RUN_DIR/codex-thread-home.$thread" ]
+  env -u CODEX_HOME -u AGMSG_CODEX_HOME CODEX_THREAD_ID="$thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  source "$SCRIPTS/lib/resolve-project.sh"
   source "$SCRIPTS/lib/role-session.sh"
   [ "$(recorded_uuid team alice)" = "$thread" ]
-  [ "$(agmsg_role_session_get team alice codex_home)" = "$(_phys_home "$alt")" ]
+  expected_home="$(agmsg_normalize_project_path "$(cd "$iso" && pwd -P)")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
 @test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {

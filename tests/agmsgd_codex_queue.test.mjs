@@ -15,6 +15,7 @@ import {
   readQueuedItem,
   readRolloutNonce,
   resolvePendingQueue,
+  rolloutStateOf,
   runCodexQueue,
   verifyPendingDelivery,
 } from '../scripts/daemon/channels/codex-queue-io.mjs';
@@ -290,13 +291,15 @@ test('immediate post-receipt check confirms a still-queued item before rollout i
 });
 
 test('seat classification never treats an uncertain destination or bridge as addressable', () => {
+  // A profile with no rollout for the thread is named as such, not as an unobservable conversation.
+  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'thread_rollout_missing' }), 'no_rollout');
+  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'rollout_read_failed' }), 'invalid');
   const record = { thread, codex_home: '/tmp/profile' };
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'valid' }), { state: 'addressable', reason: '' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'running' }), { state: 'bridged', reason: 'bridge_running' });
   assert.deepEqual(classifyCodexSeat({ roleSession: null }), { state: 'unaddressable', reason: 'role_session_missing' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'archived' }), { state: 'blocked', reason: 'thread_archived' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'no_rollout' }), { state: 'blocked', reason: 'codex_home_mismatch' });
-  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'rollout_missing' }), { state: 'blocked', reason: 'thread_rollout_missing' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'unknown' }), { state: 'blocked', reason: 'bridge_state_unknown' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record }), { state: 'blocked', reason: 'bridge_state_unknown' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped' }), { state: 'blocked', reason: 'thread_observation_failed' });
@@ -626,26 +629,4 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   unlinkSync(`${bridgeBase}.meta`);
   unlinkSync(path.join(runDir, `codex-bridge-lease.${bridgePid}`));
   installDb.close();
-});
-
-// 2026-10-16: a seat recorded with a profile whose sessions tree has no
-// rollout for its thread (a tool shell without CODEX_HOME recorded
-// $HOME/.codex) is reported as that observation -- not "could not be
-// verified", and not a proven home mismatch either (the rollout may have been
-// moved or deleted).
-test('a recorded home without the thread rollout is reported as thread_rollout_missing', async (t) => {
-  const { root, db, options } = executableFixture(t);
-  const wrongHome = path.join(root, 'default-profile');
-  mkdirSync(path.join(wrongHome, 'sessions'), { recursive: true });
-  const binary = path.join(root, 'codex');
-  writeFileSync(binary, '#!/bin/sh\nexit 1\n');
-  chmodSync(binary, 0o755);
-  db.prepare('UPDATE meta SET codex_path=?, node_path=?').run(binary, process.execPath);
-  const channel = createCodexQueueChannel({
-    ...options,
-    readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'codex', project: root, thread, codex_home: wrongHome } }),
-  });
-  await channel.pollOnce();
-  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_codex_seat').get() }, { state: 'blocked', reason: 'thread_rollout_missing' });
-  await channel.stop();
 });

@@ -143,11 +143,6 @@ setup_test_env() {
   # (measured 2026-10-19: test_spawn.bats's codex resume case). Tests that
   # want them set them explicitly.
   unset CODEX_HOME AGMSG_CODEX_HOME ORCA_CODEX_HOME
-  # The same profile also reaches a fixture through its ancestors: the codex
-  # recorder reads the nearest ancestor process's CODEX_HOME from /proc, and
-  # the ancestors here are the developer's own shell. Tests that exercise that
-  # lookup point this at a fake /proc of their own.
-  export AGMSG_CODEX_PROC_ROOT="/nonexistent-agmsg-test-proc"
   # A Claude Code developer shell's own delivery settings (measured
   # 2026-10-17: AGMSG_CC_MONITOR_KEEP_ALIVE turned watch.bats's quiet-run
   # "stopping" case into a re-arm).

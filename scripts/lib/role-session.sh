@@ -157,6 +157,65 @@ _agmsg_role_session_write() (
   "$@"
 )
 
+# Epoch at which <pid> started, empty when it cannot be read.
+_agmsg_process_start_epoch() {
+  local lstart
+  lstart="$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)" || return 0
+  [ -n "$lstart" ] || return 0
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -f '%a %b %e %T %Y' "$lstart" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -d "$lstart" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_iso_epoch() {
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -u -d "$1" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_role_session_rebind_same_process_unlocked() {
+  local thread="$1" project="$2" pid="$3" pairs="$4" team agent owner started updated rec_project
+  local match_team='' match_agent='' n=0 match_codex_home=''
+  # Select under the writer lock: a record another writer moved between a
+  # caller's look and this transaction must not be rewritten from a stale view.
+  while IFS=$'\t' read -r team agent; do
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    agmsg_role_session_load "$team" "$agent"
+    [ -n "$AGMSG_ROLE_SESSION_UUID" ] || continue
+    # A seat is already bound to this thread: nothing to rebind.
+    [ "$AGMSG_ROLE_SESSION_UUID" != "$thread" ] || return 1
+    rec_project="$(agmsg_canonical_path "$AGMSG_ROLE_SESSION_PROJECT" 2>/dev/null || printf '%s' "$AGMSG_ROLE_SESSION_PROJECT")"
+    [ "$rec_project" = "$project" ] || continue
+    owner="${AGMSG_ROLE_SESSION_OWNER:-}"
+    agmsg_instance_is_composite "$owner" && [ "${owner##*.}" = "$pid" ] || continue
+    [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" type)" = codex ] || continue
+    _agmsg_pid_alive "$pid" || continue
+    started="$(_agmsg_process_start_epoch "$pid")"
+    updated="$(_agmsg_iso_epoch "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" updated_at)")"
+    case "$started:$updated" in ''|:*|*:|*[!0-9:]*) continue ;; esac
+    [ "$started" -le "$updated" ] || continue
+    n=$((n + 1)); match_team="$team"; match_agent="$agent"
+    match_codex_home="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)"
+  done <<< "$pairs"
+  [ "$n" = 1 ] || return 1
+  _agmsg_role_session_record_unlocked "$match_team" "$match_agent" "$thread" "$project" codex "$thread.$pid" "$match_codex_home"
+  agmsg_role_session_load "$match_team" "$match_agent"
+  [ "$AGMSG_ROLE_SESSION_UUID" = "$thread" ]
+}
+
+# /clear starts a new thread inside the same live Codex process. Move the
+# one seat of <project> whose record names that very process (same pid, alive,
+# started before the record was written) onto <new-thread>. Selection, check
+# and write are one transaction with every other writer. <pairs> is the
+# candidate "team<TAB>agent" lines.
+agmsg_role_session_rebind_same_process() {   # <new-thread> <project> <pid> <pairs>
+  _agmsg_role_session_write _agmsg_role_session_rebind_same_process_unlocked "$@"
+}
+
 agmsg_role_session_record() {
   [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 0
   if _agmsg_role_session_write _agmsg_role_session_record_unlocked "$@"; then return 0; fi
@@ -264,8 +323,12 @@ agmsg_role_session_set_messaging() {
   _agmsg_role_session_write _agmsg_role_session_set_messaging_unlocked "$@" || true
 }
 
-_agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid>]
-  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}"
+_agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid> [<messaging_token>]]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}" token="${6:-}"
+  # The token is a credential for posting to this session's own inbox: kept
+  # only when it is a plain word, and the record (mktemp: owner-only) is never
+  # made readable by anyone else.
+  case "$token" in ''|*[!A-Za-z0-9._-]*) token="" ;; esac
   [ -n "$team" ] && [ -n "$agent" ] || return 0
   local path dir tmp line
   _agmsg_role_session_path_into "$team" "$agent"
@@ -276,7 +339,7 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
   {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        messaging_socket=*|claude_config_dir=*) ;;
+        messaging_socket=*|claude_config_dir=*|messaging_token=*) ;;
         session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
         *) printf '%s\n' "$line" ;;
       esac
@@ -284,7 +347,9 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
     [ -z "$bare_sid" ] || printf 'session=%s\n' "$bare_sid"
     [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
     [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
+    [ -z "$token" ] || printf 'messaging_token=%s\n' "$token"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   return 0
 }
@@ -475,23 +540,6 @@ agmsg_role_session_recorded_uuids() {
   return 0
 }
 
-# Print the codex_home of every codex record, one per line (unordered, may
-# repeat). These are profiles a Codex seat on this install has really used, so
-# codex-record-session.sh can look for a thread's rollout there when the tool
-# shell it runs in was not given the session's CODEX_HOME.
-agmsg_role_session_recorded_codex_homes() {
-  local dir f v
-  dir="$(_actas_lock_dir)"
-  [ -d "$dir" ] || return 0
-  for f in "$dir"/role-session.*; do
-    [ -f "$f" ] || continue
-    [ "$(_agmsg_role_session_field "$f" type)" = codex ] || continue
-    v="$(_agmsg_role_session_field "$f" codex_home)"
-    [ -n "$v" ] && printf '%s\n' "$v"
-  done
-  return 0
-}
-
 # Scan run/role-session.* for the record whose session= field equals <sid> and
 # print its full body (all key=value lines). Empty if none. Used by role-aware
 # SessionStart (PR-E) to map a resumed session id back to its (team, agent).
@@ -575,30 +623,12 @@ agmsg_claude_code_native_target() {
 # Publish <socket>/<config_dir> into <team>/<agent>'s record for <bare_sid>,
 # then read it back: the same check the daemon applies before it will address
 # the seat, so "the record took" is verified, not assumed. rc 0 only when it did.
-agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir> <bare_sid>
-  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5"
-  agmsg_role_session_set_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid"
+agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir> <bare_sid> [<token>]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5" token="${6:-}"
+  agmsg_role_session_set_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid" "$token"
   [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
     && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
-}
-
-# rc 0 only when agmsgd has already seen one of its nudges reach THIS socket:
-# the seat's most recent beta_claude_queue row is `confirmed` and names
-# <socket>. A record the daemon can address is not yet proof the session shows
-# what it is sent: a receiving session whose permission mode class differs from
-# the sender's holds every nudge (measured 2026-10-16, Claude Code 2.1.301), and
-# a held, still-pending, expired or absent row all leave this rc 1. Callers keep
-# the Monitor until this holds, so a seat is never left with neither path.
-agmsg_claude_code_native_confirmed() {   # <team> <agent> <socket>
-  local team="$1" agent="$2" socket="$3" row
-  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$socket" ] || return 1
-  # The seat key is claude-code-queue.mjs's JSON.stringify([team, agent]);
-  # a name that would need JSON or SQL escaping is never matched here.
-  case "$team$agent" in *[\"\\\']*|*[[:cntrl:]]*) return 1 ;; esac
-  row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "${SKILL_DIR:-}/run/install.db" \
-    "SELECT state, messaging_socket FROM beta_claude_queue WHERE seat = '[\"$team\",\"$agent\"]' ORDER BY id DESC LIMIT 1;" 2>/dev/null)" || return 1
-  [ "${row%%$'\t'*}" = confirmed ] && [ "${row#*$'\t'}" = "$socket" ]
 }
 
 # rc 0 only when agmsgd's Claude channel will accept this install's storage.

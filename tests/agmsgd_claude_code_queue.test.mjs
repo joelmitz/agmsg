@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createServer } from 'node:net';
 import {
   observeTranscript,
+  sendClaudeCodeMessage,
   resolveTranscriptPath,
   resolvePendingDelivery,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
@@ -79,31 +81,75 @@ test('observeTranscript: a queue-operation enqueue line is not delivery evidence
     attachment: { type: 'queued_command', prompt: `<cross-session-message from="agmsgd">${marker}</cross-session-message>` },
   })}\n`);
   assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
+
+  // #1644: the delivered line scrolls out of the 512 KiB tail under later
+  // output. A position recorded before the send still finds it; a transcript
+  // that has become shorter than the position is read from the start.
+  const before = statSync(transcriptPath).size;
+  const delivered = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: marker } });
+  const filler = `${JSON.stringify({ type: 'assistant', text: 'x'.repeat(1000) })}\n`.repeat(800);
+  writeFileSync(transcriptPath, `${'y'.repeat(before)}\n${delivered}\n${filler}`);
+  // No recorded position (a pending row from before positions): searched from the start, however far back.
+  assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
+  assert.equal(observeTranscript(transcriptPath, nonce, before + 1).state, 'delivered');
+  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size + 10).state, 'delivered');
+  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size).state, 'absent');
 });
 
-// Measured 2026-10-16 (Claude Code 2.1.301, a permissionMode:auto session
-// receiving agmsgd's from-mode="bypass" nudge): the held notice's preview
-// carries the nonce WITHOUT the brackets, so matching only `[agmsg:<nonce>]`
-// read a held nudge as plain "awaiting_confirmation".
-test('observeTranscript: the measured held notice (bracketless preview) reads as held -> peer_held', (t) => {
+// A position recorded while a row was half written lands mid-row: the rest of
+// that row is a fragment, not a line, so evidence inside it is never read.
+test('observeTranscript: a recorded position inside a half-written row discards that fragment', (t) => {
   const dir = temporaryDirectory(t);
   const transcriptPath = path.join(dir, 'session.jsonl');
-  const nonce = 'b64a2112-01b1-4a45-92d0-1c74352e1c2c';
-  writeFileSync(transcriptPath, `${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'enqueue',
-    content: `<cross-session-message from="agmsgd">[agmsg:${nonce}] New messages are waiting. Check your agmsg inbox.</cross-session-message>`,
-  })}\n${JSON.stringify({
-    type: 'system',
-    subtype: 'informational',
-    content: `Held peer message — from an unidentified session [verified pid 2499080] (peer claims name: agmsgd); preview: «agmsg:${nonce} New messages are waiting. Check your agmsg inbox.» …[1 line, 94 chars total — expand to review before approving] — not delivered to Claude (1 held). The sending session's permission mode class doesn't match this session's.`,
-    level: 'warning',
-  })}\n`);
-  const observation = observeTranscript(transcriptPath, nonce);
-  assert.equal(observation.state, 'held');
-  assert.deepEqual(resolvePendingDelivery({ observation }), { state: 'pending', reason: 'peer_held' });
-  // Another nudge's held notice is not this one's.
-  assert.equal(observeTranscript(transcriptPath, 'some-other-nonce').state, 'absent');
+  const nonce = 'mid-row-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}] x` } });
+  writeFileSync(transcriptPath, `unfinished-prefix${row}\n`);
+  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'absent');
+  writeFileSync(transcriptPath, `unfinished-prefix${row}\n${row}\n`);
+  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'delivered');
+});
+
+// The file is rewritten while a read is in flight: the first read sees a
+// delivery row that no complete version of the file ever held. The row must
+// read back unchanged before it counts.
+test('observeTranscript: a delivery row that changes between two reads is not confirmed', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'rewrite-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
+  writeFileSync(transcriptPath, `${row}\n`);
+  let calls = 0;
+  const io = {
+    readSync(fd, buffer, offset, length, position) {
+      const read = readSync(fd, buffer, offset, length, position);
+      if (++calls === 1) writeFileSync(transcriptPath, `${JSON.stringify({ type: 'tool', origin: { body: `[agmsg:${nonce}]` } })}\n`);
+      return read;
+    },
+  };
+  assert.equal(observeTranscript(transcriptPath, nonce, 0, io).state, 'absent');
+  assert.equal(observeTranscript(transcriptPath, nonce, 0).state, 'absent');
+});
+
+// The line boundary is part of what must read back unchanged, and a short
+// read must not make a stable row look changed.
+test('observeTranscript: a rewritten line boundary is not confirmed, and short reads still confirm a stable row', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'boundary-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  let calls = 0;
+  const rewrite = {
+    readSync(fd, buffer, offset, length, position) {
+      const read = readSync(fd, buffer, offset, length, position);
+      if (++calls === 2) writeFileSync(transcriptPath, `bad${row}\n`);
+      return read;
+    },
+  };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, rewrite).state, 'absent');
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  const short = { readSync: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 14), position) };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, short).state, 'delivered');
 });
 
 // No clock decides a pending nudge: whatever the transcript shows (or fails to
@@ -139,7 +185,7 @@ function channelFixture(t) {
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     send: async () => { state.sent += 1; return { state: 'sent' }; },
-    observe: () => state.observation,
+    observe: () => (state.hold ? { state: 'held' } : state.observation),
     socketAlive: () => state.alive,
     hostPlatform: 'linux',
   });
@@ -171,6 +217,59 @@ test('a nudge is sent again once the seat record names another session', async (
   await channel.stop();
 });
 
+test('a seat whose recorded socket is gone gets no new nudge rows until its record names a socket that exists', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  state.alive = { state: 'unreadable', reason: 'messaging_socket_missing' };
+  for (let i = 0; i < 5; i += 1) await channel.pollOnce();
+  assert.equal(state.sent, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM beta_claude_queue').get().n, 0);
+  state.alive = { state: 'ok' };
+  state.socket = '/tmp/cc-socks/2.sock';
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  await channel.stop();
+});
+
+test('a nudge opens with the session token as an auth line and claims no permission mode', async (t) => {
+  const dir = temporaryDirectory(t);
+  const socketPath = path.join(dir, 's.sock');
+  const received = new Promise((resolve) => {
+    const server = createServer((connection) => {
+      let data = '';
+      connection.on('data', (chunk) => { data += chunk; });
+      connection.on('end', () => { server.close(); resolve(data); });
+    });
+    server.listen(socketPath);
+    t.after(() => server.close());
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const result = await sendClaudeCodeMessage({ socketPath, nonce: 'n1', body: '[agmsg:n1] hello', token: 'tok-1', checkOwnership: () => ({ state: 'ok' }) });
+  assert.equal(result.state, 'sent');
+  const lines = (await received).trim().split('\n');
+  assert.deepEqual(JSON.parse(lines[0]), { type: 'auth', token: 'tok-1' });
+  assert.ok(!lines[1].includes('from-mode'));
+});
+
+test('a nudge the seat holds is seen from the preview that drops the brackets, and the seat is not called addressable', async (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  writeFileSync(transcriptPath, `${JSON.stringify({
+    type: 'system',
+    subtype: 'informational',
+    content: 'Held peer message \u2014 from an unidentified session; preview: \u00abagmsg:held-nonce New messages are waiting.\u00bb',
+  })}\n`);
+  assert.equal(observeTranscript(transcriptPath, 'held-nonce').state, 'held');
+
+  const { db, channel, state } = channelFixture(t);
+  await channel.pollOnce();
+  state.hold = true;
+  await channel.pollOnce();
+  const seat = db.prepare('SELECT state, reason FROM beta_claude_seat').get();
+  assert.equal(seat.state, 'blocked');
+  assert.match(seat.reason, /^peer_held/);
+  await channel.stop();
+});
+
 test('a conversation stored under another project directory is found by its session id, only when exactly one matches', (t) => {
   const config = temporaryDirectory(t);
   const session = '0d7c2a52-5d4c-4d0f-8c0a-6b6f5f3f9a11';
@@ -188,9 +287,8 @@ test('a conversation stored under another project directory is found by its sess
   assert.equal(resolveTranscriptPath(config, '/proj/recorded', session), expected, 'the recorded project wins when it has the file');
 });
 
-// A held nudge must show as not deliverable (the seat table allows only
-// addressable/unaddressable/blocked), and the send and the hold must both be
-// in agmsgd.log -- once, not on every poll -- since nothing else records them.
+// fork: the send and the hold must both be in agmsgd.log -- once, not on
+// every poll -- since nothing else records them.
 test('a held nudge marks the seat blocked (peer_held) and logs the send and the hold once', async (t) => {
   const { db, channel, state } = channelFixture(t);
   state.observation = { state: 'held' };
@@ -198,7 +296,9 @@ test('a held nudge marks the seat blocked (peer_held) and logs the send and the 
   await channel.pollOnce();
   await channel.pollOnce();
   assert.equal(state.sent, 1);
-  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'blocked', reason: 'peer_held' });
+  const held = db.prepare('SELECT state, reason FROM beta_claude_seat').get();
+  assert.equal(held.state, 'blocked');
+  assert.match(held.reason, /^peer_held/);
   assert.equal(state.logs.filter((line) => / sent$/.test(line)).length, 1);
   assert.equal(state.logs.filter((line) => line.includes('held by the receiving session')).length, 1);
   // Approved in the session: the transcript then shows the delivery.

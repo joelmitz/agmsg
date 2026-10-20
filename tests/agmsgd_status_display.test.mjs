@@ -156,18 +156,6 @@ test('bridge display uses every registered project and does not repeat a contrad
   assert.doesNotMatch(text, /bridge.*unknown|bridge could not be verified/);
 });
 
-// 2026-10-17 review: a recorded profile with no rollout for the thread is
-// shown as that observation with its candidate causes, never as a proven
-// "incorrect CODEX_HOME record" (the rollout may have been moved or deleted).
-test('a missing rollout in the recorded profile is reported as an observation, not a proven home mismatch', t => {
-  const { root, db, status } = fixture(t);
-  unlinkSync(join(root, 'run/codex-bridge.test.alice.pid'));
-  db.prepare('INSERT INTO beta_codex_seat VALUES (?, ?, ?, ?, ?, ?)').run(JSON.stringify(['test', 'alice']), thread, root, 'blocked', 'thread_rollout_missing', new Date().toISOString());
-  const text = status();
-  assert.match(text, /the recorded Codex profile has no rollout for this conversation; check for a profile mismatch or a moved\/deleted rollout/);
-  assert.doesNotMatch(text, /incorrect CODEX_HOME record/);
-});
-
 test('old destinations are counted by default and available with --all after current seats', t => {
   const { root, db, config, status } = fixture(t);
   config.agents.ancient = { registrations: [{ type: 'codex', project: '/old' }] };
