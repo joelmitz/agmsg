@@ -34,6 +34,9 @@ unset CLAUDE_CONFIG_DIR
 # of whatever the fixture set up, silently changing which branch a test
 # exercises. Tests that deliberately model a caller set these explicitly.
 unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+# Codex Desktop exports this; the codex-app driver (priority 1, exclusive)
+# keys off it and would win over every fake terminal a test sets up.
+unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
 # Fork: pin the two process-wide inputs CI runners never vary but a developer
@@ -147,6 +150,7 @@ setup_test_env() {
   # quiet-run "stopping" case into a re-arm).
   unset AGMSG_CC_MONITOR_KEEP_ALIVE CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in
   # test_remote.bats do, to re-enter with a different fixture) would
@@ -296,29 +300,59 @@ agmsg_inbox() {
 # for the scan and for the pre-signal re-check alike. <dir> must be a plain
 # mktemp-style path ([A-Za-z0-9._/-]); anything else lists nothing (fail closed --
 # this feeds a KILL).
-_dir_ref_ere() {   # <dir> -> ERE matching <dir> as a bounded path
-  local q="'\"" esc
+#
+# Git Bash (upstream #1626): MSYS's ps has no -o, so the ps path would list
+# nothing and the reap would "succeed" having stopped nothing. MINGW/MSYS/CYGWIN
+# therefore always read /proc (the source compat_get_cmdline uses), and a native
+# process reports the dir in its mixed `C:/...` form, so that spelling (from
+# `cygpath -m`, itself validated as a plain drive path) is matched too, under the
+# same bounds. _PIDS_PROC_ROOT forces the /proc path against a /proc-shaped tree.
+_dir_ref_is_msys() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+  return 1
+}
+_dir_ref_alt() {   # <dir> -> its mixed C:/... spelling on Git Bash, else nothing
+  local alt=""
+  _dir_ref_is_msys || return 0
+  command -v cygpath >/dev/null 2>&1 || return 0
+  alt="$(cygpath -m "$1" 2>/dev/null)" || return 0
+  case "$alt" in
+    "$1") return 0 ;;
+    [A-Za-z]:/?*) case "${alt#?:}" in *[!A-Za-z0-9._/-]*) return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$alt"
+}
+_dir_ref_ere() {   # <dir> -> ERE matching <dir> (or its Git Bash alt) as a bounded path
+  local q="'\"" esc alt
   esc="${1//./[.]}"
+  alt="$(_dir_ref_alt "$1")"
+  [ -n "$alt" ] && esc="($esc|${alt//./[.]})"
   printf '(^|[=:[:space:]%s])%s(/|:|[[:space:]%s]|$)' "$q" "$esc" "$q"
 }
+_dir_ref_proc_root() { printf '%s' "${_PIDS_PROC_ROOT:-/proc}"; }
 _dir_ref_use_proc() {
-  [ -z "${AGMSG_TEST_REAP_PS_ONLY:-}" ] && [ -r /proc/self/environ ]
+  [ -z "${AGMSG_TEST_REAP_PS_ONLY:-}" ] || return 1
+  [ -n "${_PIDS_PROC_ROOT:-}" ] && return 0
+  _dir_ref_is_msys && return 0
+  [ -r /proc/self/environ ]
 }
 _pids_referencing_dir() {   # <dir>
-  local dir="$1" re out p
+  local dir="$1" re out p root
   case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
   re="$(_dir_ref_ere "$dir")"
+  root="$(_dir_ref_proc_root)"
   if _dir_ref_use_proc; then
     # Captured first, not piped: a pipeline's other members would be alive, carry
     # the exported dir, and list themselves. The grep itself is gone by the time
     # the caller signals, and the caller re-checks every pid before each kill.
-    out="$(grep -lazE -- "$re" /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null)"
+    out="$(grep -lazE -- "$re" "$root"/[0-9]*/cmdline "$root"/[0-9]*/environ 2>/dev/null)"
   else
     out="$(ps -eo pid=,args= 2>/dev/null |
       AGMSG_REAP_RE="$re" awk '{ pid = $1; sub(/^[[:space:]]*[0-9]+[[:space:]]*/, ""); if ($0 ~ ENVIRON["AGMSG_REAP_RE"]) print pid }')"
   fi
   for p in $out; do
-    p="${p#/proc/}"; p="${p%%/*}"
+    p="${p#"$root"/}"; p="${p%%/*}"
     case "$p" in ''|*[!0-9]*) continue ;; esac
     [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-}" ] && continue
     printf '%s\n' "$p"
@@ -330,12 +364,13 @@ _pids_referencing_dir() {   # <dir>
 # so a pid that exited and was reused in between is never signalled). Same
 # bounded pattern and the same source (/proc, or ps argv) as the scan.
 _pid_references_dir() {   # <pid> <dir>
-  local pid="$1" dir="$2" re
+  local pid="$1" dir="$2" re root
   case "$pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
   case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
   re="$(_dir_ref_ere "$dir")"
+  root="$(_dir_ref_proc_root)"
   if _dir_ref_use_proc; then
-    grep -qazE -- "$re" "/proc/$pid/cmdline" "/proc/$pid/environ" 2>/dev/null
+    grep -qazE -- "$re" "$root/$pid/cmdline" "$root/$pid/environ" 2>/dev/null
   else
     ps -o args= -p "$pid" 2>/dev/null | grep -qE -- "$re"
   fi

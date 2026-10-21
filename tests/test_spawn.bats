@@ -38,7 +38,13 @@ EOF
 }
 
 teardown() {
+  # Stop the fake app-servers this test's records name (pid-checked), then
+  # sweep anything else still naming this test's own TEST_SKILL_DIR (upstream
+  # #1669: the fake's python, and whatever a test that failed early left up).
+  # teardown_test_env reaps again; this explicit pass is cheap (one /proc scan)
+  # and keeps the suite independent of that.
   _stop_fake_app_servers
+  _reap_test_skill_dir_procs || true
   teardown_test_env
 }
 
@@ -330,6 +336,32 @@ seed_resumable() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"; run cat "$boot"
   [[ "$output" != *"resume"* ]]
+}
+
+@test "spawn: forwards CODEX_HOME across a terminal environment boundary (#1436)" {
+  export CODEX_HOME="$TEST_SKILL_DIR/profile with spaces 'quoted' \$(literal)"
+  mkdir -p "$CODEX_HOME"
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  # Capture what the launched CLI actually receives without starting Codex or
+  # writing any real profile. The terminal shell has no CODEX_HOME of its own.
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${CODEX_HOME-unset}" > "$CAPTURE.profile"\n' > "$SCRIPTS/drivers/types/codex/codex-shim.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"
+  chmod +x "$STUB_BIN/noshell"
+  local expected="$CODEX_HOME" boot
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env -u CODEX_HOME SHELL="$STUB_BIN/noshell" bash "$boot"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CAPTURE.profile")" = "$expected" ]
+
+  # An unset caller must not override the terminal's existing profile/default.
+  run env -u CODEX_HOME bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(tail -1 "$CAPTURE")"
+  run env CODEX_HOME="$expected/terminal" SHELL="$STUB_BIN/noshell" bash "$boot"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CAPTURE.profile")" = "$expected/terminal" ]
 }
 
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
@@ -1408,7 +1440,8 @@ _spawn_recorded_id() {
     # contract that matters here — leaves NO placement record and renames/runs nothing.
     grep -q "placement failed" <<<"$output"
     [ ! -f "$(_spawn_record_path myteam alice)" ]
-    ! grep -q "pane run" "$HERDR_CALL_LOG"
+    ! grep -q "pane run" "$HERDR_CALL_LOG" \
+      || { echo "unexpected pane run for body: $body" >&3; false; }
   done
 }
 
@@ -1727,7 +1760,38 @@ _boot_line_executable() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run env SHELL="$STUB_BIN/noshell" bash "$boot"
+  # Forced failure for the teardown test below: stop here, with the fake
+  # app-server still up, the way a failing assertion would. The variable names
+  # a file that receives this test's own temp dir.
+  if [ -n "${AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH:-}" ]; then
+    printf '%s' "$TEST_SKILL_DIR" > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH"
+    # The same listing and command-line source the reaper uses (no ps -o, which
+    # Git Bash lacks).
+    local _p
+    for _p in $(_pids_referencing_dir "$TEST_SKILL_DIR"); do
+      ( source "$SCRIPTS/lib/compat.sh"; compat_get_cmdline "$_p"; echo )
+    done > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH.procs"
+    false
+  fi
   _assert_bridged_argv
+}
+
+@test "spawn: a test that fails after the launch leaves no fake app-server behind (teardown reap)" {
+  # Runs the launch test above for real, forced to fail right after the fake
+  # app-server is up. What the inner run's teardown does -- or does not do -- is
+  # then read off the process list, by the temp dir the inner test reported.
+  local marker="$TEST_SKILL_DIR/inner-dir" inner
+  run env AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH="$marker" \
+    bats -f "reaches the real binary WITH --remote \\(argv" "$BATS_TEST_DIRNAME/test_spawn.bats"
+  grep -q '^not ok 1 ' <<<"$output"
+  inner="$(cat "$marker")"
+  [ -n "$inner" ]
+  # Both halves of the fake were up and named by the temp dir: the bash codex
+  # and the python holding the listening socket. So "nothing references it
+  # now" covers the python and its socket, not just the bash.
+  grep -q 'codex app-server' "$marker.procs"
+  grep -qi 'python.* - ' "$marker.procs"
+  [ -z "$(_pids_referencing_dir "$inner")" ]
 }
 
 @test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
@@ -1787,7 +1851,10 @@ _install_fake_codex_bridge_stack() {
 case "${1:-}" in
   --version) echo "codex-cli 0.142.2"; exit 0 ;;
   app-server)
-    python3 - <<'PY'
+    # The test's own dir rides in argv (the script path), so the shared reaper
+    # finds this python directly; a native Windows python keeps reporting the
+    # same getppid() after its parent dies, so it cannot be left to notice.
+    python3 - "$0" <<'PY'
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1899,6 +1966,10 @@ _assert_bridged_argv() {
   # shellcheck disable=SC1090
   source "$SCRIPTS/lib/type-registry.sh"
   listed="$(agmsg_type_get codex spawn_unset_env)"
+  # A name the manifest forwards on purpose (spawn_forward_env, upstream #1624)
+  # is a reasoned decision too, not an unnoticed inheritance.
+  local forwarded
+  forwarded=" $(agmsg_type_get codex spawn_forward_env) "
   # Kept on purpose (each with its reason in type.conf): the seat's own marker;
   # agmsg-wide configuration the CLI's actas flow legitimately inherits; test
   # hooks that only bats sets; and names that are script-local variables
@@ -1911,6 +1982,7 @@ _assert_bridged_argv() {
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     case "$keep" in *" $v "*) continue ;; esac
+    case "$forwarded" in *" $v "*) continue ;; esac
     covered=0
     for entry in $listed; do
       case "$entry" in
@@ -2269,17 +2341,13 @@ EOF
   refute grep -qF 'status=spawned-but-unnamed' <<<"$output"
 }
 
-@test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
-  # The control half needs naming ON by default (against the fake herdr
-  # below, never a real terminal) to mean anything against the off half
-  # right after it -- opt back in from the harness's #1095 off
-  # (test_helper.bash).
+@test "join: registration does not name the caller with naming enabled or disabled" {
+  # Exercise both switch values against a fake terminal.
   unset AGMSG_SELF_NAME
   _setup_fake_herdr
-  # Control: a seat joining from its own pane names it -- key and prefixed label.
+  # Registration alone does not establish whose identity the caller holds.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
-  grep -q '^agent rename wT:pSelf ' "$HERDR_CALL_LOG"
-  grep -q '^pane rename wT:pSelf myteam:bob$' "$HERDR_CALL_LOG"
+  refute grep -q ' rename ' "$HERDR_CALL_LOG"
   : > "$HERDR_CALL_LOG"
   # The switch spawn sets on its pre-join: the same join, no naming call at all.
   AGMSG_SELF_NAME=off bash "$SCRIPTS/join.sh" myteam carol claude-code "$PROJ"
