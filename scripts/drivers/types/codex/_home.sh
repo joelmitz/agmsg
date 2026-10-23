@@ -20,18 +20,55 @@ agmsg_codex_default_home() {
   [ -n "${HOME:-}" ] && printf '%s/.codex' "$HOME"
 }
 
+# The canonical spelling of a Codex profile directory, by the SAME rules the
+# writers use (_profile.sh's agmsg_codex_profile_canonical, which records
+# codex_home=): an existing absolute directory, resolved to its physical path
+# (symlinks followed) and normalized (Git Bash /c/... and native C:\... both
+# become C:/...). Prints nothing and returns 1 when it cannot be resolved.
+# Duplicated rather than shared: _home.sh and _profile.sh must not source each
+# other (the sourcing graph stays acyclic).
+_agmsg_codex_home_canonical() {
+  local home="${1:-}"
+  case "$home" in
+    *[[:cntrl:]]*|'') return 1 ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$home" ] || return 1
+  if ! declare -F agmsg_canonical_path >/dev/null 2>&1 \
+     || ! declare -F agmsg_normalize_project_path >/dev/null 2>&1; then
+    [ -n "${SKILL_DIR:-}" ] || return 1
+    # shellcheck source=../../../lib/resolve-project.sh
+    . "$SKILL_DIR/scripts/lib/resolve-project.sh" || return 1
+  fi
+  home="$(agmsg_canonical_path "$home")" || return 1
+  home="$(agmsg_normalize_project_path "$home")" || return 1
+  case "$home" in
+    *[[:cntrl:]]*|'') return 1 ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$home"
+}
+
+# rc 0 when <recorded> (a role record's codex_home=) names the same profile
+# directory this process runs in. Both sides are compared in the writers'
+# canonical form, so a symlinked CODEX_HOME or a Git Bash /c/... spelling of
+# the recorded C:/... directory still matches, while a different directory
+# never does. Either side that cannot be resolved is a mismatch (fail closed).
 # Legacy role records predate codex_home=. They belong to the default
 # $HOME/.codex state root, never to an opt-in isolated home.
 agmsg_codex_role_home_matches() {
-  local recorded="$1" current default
+  local recorded="$1" current
   current="$(agmsg_codex_effective_home)"
   [ -n "$current" ] || return 1
   if [ -z "$recorded" ]; then
-    default="$(agmsg_codex_default_home)"
-    [ -n "$default" ] || return 1
-    recorded="$default"
+    recorded="$(agmsg_codex_default_home)"
+    [ -n "$recorded" ] || return 1
   fi
-  [ "${recorded%/}" = "${current%/}" ]
+  current="$(_agmsg_codex_home_canonical "$current")" || return 1
+  recorded="$(_agmsg_codex_home_canonical "$recorded")" || return 1
+  [ "$recorded" = "$current" ]
 }
 
 agmsg_codex_sessions_dir() {

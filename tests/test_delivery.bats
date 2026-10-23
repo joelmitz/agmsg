@@ -2905,6 +2905,79 @@ EOF
   grep -q -- "ws://127.0.0.1:50505" "$request_file"
 }
 
+# Fork review R1 (fork/v1.6.0, d04eda62 carry-over): the record SessionStart
+# writes holds codex_home in canonical form (physical path, normalized), so the
+# home gate must compare the current profile in that same form. A CODEX_HOME
+# reached through a symlink used to read as "another profile" against the
+# record written a moment earlier, and the request became a tombstone.
+_codex_home_gate_session_start() {   # <codex_home> <thread> -> prints request file path
+  source "$SCRIPTS/lib/hash.sh"
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  local seat_key project_hash
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  project_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "12345" "50505" "" "" "codex-cli-test"
+  ( unset AGMSG_CODEX_BRIDGE_APP_SERVER AGMSG_CODEX_HOME
+    CODEX_HOME="$1" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_SEAT_KEY="$seat_key" \
+    CODEX_THREAD_ID="$2" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null 2>&1 <<< "{\"session_id\":\"$2\"}" )
+  printf '%s' "$TEST_SKILL_DIR/run/codex-bridge-request.$seat_key"
+}
+
+@test "session-start.sh for codex (fork): a symlinked CODEX_HOME keeps the pair it just recorded" {
+  local real="$TEST_SKILL_DIR/profile-real" link="$TEST_SKILL_DIR/profile-link"
+  local thread=12345678-aaaa-4bbb-8ccc-1234567890ab request_file
+  mkdir -p "$real"
+  ln -s "$real" "$link"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  request_file="$(_codex_home_gate_session_start "$link/" "$thread")"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$SCRIPTS/lib/role-session.sh"
+  # The record names the physical directory, not the symlink...
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$(agmsg_normalize_project_path "$(cd "$real" && pwd -P)")" ]
+  # ...and the request still carries the pair instead of a tombstone.
+  [ -f "$request_file" ]
+  [ "$(sed -n '1p' "$request_file")" = "$(printf 'codex\t%s\tws://127.0.0.1:50505\tteam\talice' "$thread")" ]
+}
+
+@test "session-start.sh for codex (fork): a record of another profile directory is still refused" {
+  local mine="$TEST_SKILL_DIR/profile-mine" other="$TEST_SKILL_DIR/profile-other"
+  local thread=12345678-aaaa-4bbb-8ccc-1234567890ac request_file
+  mkdir -p "$mine" "$other"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$SCRIPTS/lib/role-session.sh"
+  # Two seats registered, so SessionStart chooses none and the record it is
+  # judged against is the one below: same thread, a different profile.
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  agmsg_role_session_record team alice "$thread" "$TEST_PROJECT" codex "" \
+    "$(agmsg_normalize_project_path "$(cd "$other" && pwd -P)")"
+  request_file="$(_codex_home_gate_session_start "$mine" "$thread")"
+  [ -f "$request_file" ]
+  [ "$(sed -n '1p' "$request_file")" = "$(printf 'codex\t%s\tws://127.0.0.1:50505\t' "$thread")" ]
+}
+
+@test "codex home gate (fork): symlink and trailing slash match, another or a missing directory does not" {
+  local real="$TEST_SKILL_DIR/gate-real" link="$TEST_SKILL_DIR/gate-link" other="$TEST_SKILL_DIR/gate-other"
+  mkdir -p "$real" "$other"
+  ln -s "$real" "$link"
+  run env -u AGMSG_CODEX_HOME SKILL_DIR="$TEST_SKILL_DIR" CODEX_HOME="$link/" bash -c '
+    source "$1/drivers/types/codex/_home.sh"
+    agmsg_codex_role_home_matches "$2" || exit 11
+    agmsg_codex_role_home_matches "$2/" || exit 12
+    agmsg_codex_role_home_matches "$3" && exit 13
+    agmsg_codex_role_home_matches "$4" && exit 14
+    exit 0' _ "$SCRIPTS" "$real" "$other" "$TEST_SKILL_DIR/gate-missing"
+  [ "$status" -eq 0 ]
+}
+
 @test "session-start.sh for codex retires a stale pair when its server is unavailable" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   _seed_role_record team alice thread-tombstone "$TEST_PROJECT" codex
