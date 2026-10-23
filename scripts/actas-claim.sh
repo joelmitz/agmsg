@@ -145,7 +145,9 @@ done <<< "$TEAMS"
 # socket, so a seat chosen by actas does not depend on how many seats the
 # project registers. Prints "delivery=native" after the status line; the actas
 # procedure then skips the Monitor. Anything short of a verified record leaves
-# the Monitor path as it was.
+# the Monitor path as it was. Fork: "delivery=native" also waits until the
+# daemon has confirmed a nudge reached this very socket; a socket no nudge has
+# reached yet may hold the first one, and nothing would re-arm the Monitor.
 NATIVE_DELIVERY=0
 if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
    && _native_target="$(agmsg_claude_code_native_target 2>/dev/null)" \
@@ -164,6 +166,8 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
       agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" || NATIVE_DELIVERY=0
       # This Claude Code holds agmsgd's nudges: keep the Monitor path.
       ! agmsg_daemon_claude_seat_held "$team" "$NAME" "${_native_target%%$'\t'*}" || NATIVE_DELIVERY=0
+      # Fork: and only once a nudge to this socket is confirmed (see the claude-code SessionStart).
+      agmsg_claude_code_native_confirmed "$team" "$NAME" "${_native_target%%$'\t'*}" || NATIVE_DELIVERY=0
     done <<< "$TEAMS"
   fi
 fi

@@ -99,6 +99,10 @@ function saveSeat(db, { seat, messagingSocket = null, state, reason = "" }, now)
   });
 }
 
+function seatReason(db, seat) {
+  return db.prepare("SELECT reason FROM beta_claude_seat WHERE seat = ?").get(seat)?.reason ?? "";
+}
+
 function setQueueState(db, id, state) {
   withImmediateTransaction(db, () => {
     db.prepare("UPDATE beta_claude_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
@@ -186,6 +190,7 @@ export function createClaudeCodeQueueChannel({
     if (pending) {
       const observation = pendingObservation(pending, observe);
       if (observation.state === "confirmed") {
+        log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} confirmed`);
         setQueueState(db, pending.id, "confirmed");
         saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable" }, now);
         return;
@@ -222,14 +227,22 @@ export function createClaudeCodeQueueChannel({
         if (!tried.includes(other)) {
           retryMode = other;
           carriedModes = tried;
+          // fork: record the retry, so agmsgd.log shows why a second nudge went out.
+          log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} held by the receiving session; resending as ${other}`);
           setQueueState(db, pending.id, "expired");
         }
       }
       if (retryMode === "") {
         if (!socketGone && !recordMoved) {
-          saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
+          const reason = socketCheck.state === "ok" ? observation.reason : socketCheck.reason;
+          // fork: log a hold once per episode, so agmsgd.log shows why a seat fell back to the Monitor.
+          if (reason === "peer_held" && !seatReason(db, seat).startsWith("peer_held")) {
+            log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} held by the receiving session`);
+          }
+          saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(reason) }, now);
           return;
         }
+        log(`channel: Claude Code seat ${team}/${agent} nudge ${pending.nonce} expired (${socketGone ? "messaging socket gone" : "seat record moved"})`);
         setQueueState(db, pending.id, "expired");
       }
     }
@@ -331,6 +344,7 @@ export function createClaudeCodeQueueChannel({
 
     const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     if (result.state !== "sent") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} send failed (${result.reason})`);
       setQueueState(db, id, "expired");
       if (result.reason === "socket_error:ENOENT") {
         goneSockets.add(record.messaging_socket);
@@ -340,11 +354,16 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
       return;
     }
+    log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} sent`);
     const firstCheck = pendingObservation(readPending(db, seat), observe);
     if (firstCheck.state === "confirmed") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} confirmed`);
       setQueueState(db, id, "confirmed");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
       return;
+    }
+    if (firstCheck.reason === "peer_held") {
+      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} held by the receiving session`);
     }
     saveSeat(db, { seat, messagingSocket: record.messaging_socket, ...observedSeat(firstCheck.reason) }, now);
   }

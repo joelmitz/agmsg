@@ -179,11 +179,11 @@ function channelFixture(t, hostPlatform = 'linux') {
   ensureClaudeCodeChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
   t.after(() => db.close());
-  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
+  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' }, observation: { state: 'absent' }, logs: [] };
   const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
-    log: () => {},
+    log: (message) => { state.logs.push(message); },
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'alice', teamConfig: { agents: { alice: { registrations: [{ type: 'claude-code', project: root }] } } } }] }),
     readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: state.session } }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
@@ -191,7 +191,7 @@ function channelFixture(t, hostPlatform = 'linux') {
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     send: async (args) => { state.sent += 1; (state.modes ??= []).push(args.fromMode); return { state: 'sent' }; },
     readMode: () => state.mode ?? '',
-    observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
+    observe: () => (state.hold ? { state: 'held' } : state.observation),
     socketAlive: () => state.alive,
     hostPlatform,
     transcriptPathOf: hostPlatform === 'win32' ? () => path.join(root, 'session.jsonl') : undefined,
@@ -361,6 +361,32 @@ test('a conversation stored under another project directory is found by its sess
   mkdirSync(path.dirname(expected), { recursive: true });
   writeFileSync(expected, '');
   assert.equal(resolveTranscriptPath(config, '/proj/recorded', session), expected, 'the recorded project wins when it has the file');
+});
+
+// fork: the sends, the resend and the holds must all be in agmsgd.log -- once
+// per nudge, not on every poll -- since nothing else records them.
+test('a held nudge marks the seat blocked (peer_held) and logs each send, the resend and each hold once', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  state.observation = { state: 'held' };
+  await channel.pollOnce();
+  await channel.pollOnce();
+  await channel.pollOnce();
+  await channel.pollOnce();
+  // rc.6: the held nudge is sent once the other way, then left alone.
+  assert.equal(state.sent, 2);
+  const held = db.prepare('SELECT state, reason FROM beta_claude_seat').get();
+  assert.equal(held.state, 'blocked');
+  assert.match(held.reason, /^peer_held/);
+  assert.equal(state.logs.filter((line) => / sent$/.test(line)).length, 2);
+  assert.equal(state.logs.filter((line) => line.includes('held by the receiving session; resending as ')).length, 1);
+  assert.equal(state.logs.filter((line) => / held by the receiving session$/.test(line)).length, 2);
+  // Approved in the session: the transcript then shows the delivery.
+  state.observation = { state: 'delivered' };
+  await channel.pollOnce();
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'addressable', reason: '' });
+  assert.equal(db.prepare("SELECT state FROM beta_claude_queue ORDER BY id DESC LIMIT 1").get().state, 'confirmed');
+  assert.equal(state.logs.filter((line) => / confirmed$/.test(line)).length, 1);
+  await channel.stop();
 });
 
 // Native Windows (measured on a real machine 2026-10-21): the inbox is the named

@@ -89,7 +89,8 @@ _agmsg_role_session_path_into() {
 
 # Read the fields the codex bridge launcher needs in ONE pass, into the caller's
 # shell: AGMSG_ROLE_SESSION_UUID, AGMSG_ROLE_SESSION_PROJECT, and
-# AGMSG_ROLE_SESSION_OWNER. All are empty when the record or field is absent.
+# AGMSG_ROLE_SESSION_OWNER, and AGMSG_ROLE_SESSION_CODEX_HOME. All are empty
+# when the record or field is absent.
 # This exists so the poll path
 # can resolve a role without a single command substitution -- the getters below
 # are fine one-shot, but each one costs a subshell and its own read of the same
@@ -100,6 +101,7 @@ agmsg_role_session_load() {
   AGMSG_ROLE_SESSION_UUID=""
   AGMSG_ROLE_SESSION_PROJECT=""
   AGMSG_ROLE_SESSION_OWNER=""
+  AGMSG_ROLE_SESSION_CODEX_HOME=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
   [ -f "$path" ] || return 0
@@ -113,6 +115,9 @@ agmsg_role_session_load() {
         ;;
       owner=*)
         [ -n "$AGMSG_ROLE_SESSION_OWNER" ] || AGMSG_ROLE_SESSION_OWNER="${line#owner=}"
+        ;;
+      codex_home=*)
+        [ -n "$AGMSG_ROLE_SESSION_CODEX_HOME" ] || AGMSG_ROLE_SESSION_CODEX_HOME="${line#codex_home=}"
         ;;
     esac
   done < "$path" 2>/dev/null
@@ -137,7 +142,7 @@ agmsg_role_session_load() {
 #                          from the type manifest. Empty when unknown.
 #   project=<project>      the resolved project root
 #   owner=<instance_id>    the actas owner token written by actas-claim
-#   codex_home=<path>      the effective absolute Codex profile directory
+#   codex_home=<path>      Codex state root; empty for non-Codex agent types
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
 # All read/modify/write operations share this lock. In particular, startup's
 # inactive-owner check and replacement must be one transaction with every writer.
@@ -185,6 +190,12 @@ _agmsg_role_session_record_unlocked() {
   mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  # Fall back to the effective home only when the caller passed no 7th argument
+  # at all. An explicit empty value (codex-record-session.sh when the profile
+  # directory could not be resolved) means "omit the field" and is kept as is.
+  if [ "$type" = "codex" ] && [ -z "$codex_home" ] && [ "$#" -lt 7 ]; then
+    codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
+  fi
   {
     printf 'session=%s\n' "$bare_sid"
     printf 'name=%s-%s\n' "$team" "$agent"
@@ -604,6 +615,24 @@ agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir
   [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
     && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
+}
+
+# rc 0 only when agmsgd has already seen one of its nudges reach THIS socket:
+# the seat's most recent beta_claude_queue row is `confirmed` and names
+# <socket>. A record the daemon can address is not yet proof the session shows
+# what it is sent: a receiving session whose permission mode class differs from
+# the sender's holds every nudge (measured 2026-10-16, Claude Code 2.1.301), and
+# a held, still-pending, expired or absent row all leave this rc 1. Callers keep
+# the Monitor until this holds, so a seat is never left with neither path.
+agmsg_claude_code_native_confirmed() {   # <team> <agent> <socket>
+  local team="$1" agent="$2" socket="$3" row
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$socket" ] || return 1
+  # The seat key is claude-code-queue.mjs's JSON.stringify([team, agent]);
+  # a name that would need JSON or SQL escaping is never matched here.
+  case "$team$agent" in *[\"\\\']*|*[[:cntrl:]]*) return 1 ;; esac
+  row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "${SKILL_DIR:-}/run/install.db" \
+    "SELECT state, messaging_socket FROM beta_claude_queue WHERE seat = '[\"$team\",\"$agent\"]' ORDER BY id DESC LIMIT 1;" 2>/dev/null)" || return 1
+  [ "${row%%$'\t'*}" = confirmed ] && [ "${row#*$'\t'}" = "$socket" ]
 }
 
 # rc 0 only when agmsgd's Claude channel will accept this install's storage.
