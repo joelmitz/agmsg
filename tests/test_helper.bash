@@ -39,6 +39,93 @@ unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
+# Fork: pin the two process-wide inputs CI runners never vary but a developer
+# shell does. TOP-LEVEL for the same reason as above (test_install.bats never
+# calls setup_test_env).
+# - umask: fixtures written with a plain redirect inherit it, and the product
+#   rejects a group/others-writable sync config. Under a umask 0002 shell
+#   (measured 2026-10-19) that turned test_remote.bats's set-endpoint repair
+#   fixture into a rejected 0664 file. CI runs with 022.
+# - message locale: tests match errno text from coreutils ("File exists").
+#   Under LANG=ja_JP.UTF-8 mkdir localizes it (test_registry_lock.bats).
+#   Only LC_MESSAGES is pinned, so character handling keeps the caller's
+#   UTF-8 locale; LC_ALL would override it, so it is folded into LC_CTYPE.
+umask 022
+if [ -n "${LC_ALL:-}" ]; then
+  export LC_CTYPE="$LC_ALL"
+  unset LC_ALL
+fi
+export LC_MESSAGES=C
+
+# Fork: hide a host `orca` that is not the Orca IDE CLI. On a Linux desktop
+# /usr/bin/orca is GNOME's screen reader; the terminal-driver sweep and
+# where.sh's probes call `orca terminal list/show`, and the screen reader does
+# not exit on those arguments (measured 2026-10-19: test_capability_docs.bats
+# and test_sweep_enumeration.bats hung there). CI runners have no `orca`, so
+# every test is written against "command not found" -- reproduce exactly
+# that, rather than a stub that exists (which would flip `command -v orca`).
+# Each PATH dir holding an `orca` is replaced by a once-per-run mirror of
+# symlinks without it. Tests that want an Orca still prepend their own fake
+# and win. A host without `orca` (CI) is untouched. Tests that hard-code
+# PATH=/usr/bin:/bin bypass this; none of them reach the orca driver.
+#
+# Publishing: the mirror is built in a private temp dir and published by one
+# `ln -sn` (portable, atomic, refuses an existing name), so a parallel loader
+# either wins or finds the winner's already-complete mirror. A mirror whose
+# links could not all be made is never published. Anything that
+# cannot be confirmed as a mirror without orca is an error: the helper then
+# fails to load (loudly) rather than putting a missing dir on PATH or
+# re-exposing the host orca.
+agmsg_test_hide_host_orca() {
+  command -v orca >/dev/null 2>&1 || return 0
+  local root="${BATS_RUN_TMPDIR:-${TMPDIR:-/tmp}}/agmsg-path-no-orca"
+  local d shadow tmp new="" IFS=:
+  mkdir -p "$root" || { echo "test_helper: cannot create $root" >&2; return 1; }
+  for d in $PATH; do
+    if [ -n "$d" ] && [ -f "$d/orca" ] && [ -x "$d/orca" ]; then
+      shadow="$root/${d//\//_}"
+      if [ ! -e "$shadow" ]; then
+        tmp="$(mktemp -d "$root/.tmp.XXXXXX")" \
+          || { echo "test_helper: cannot create a mirror of $d" >&2; return 1; }
+        # The mirror must be complete before it is published: every entry of
+        # $d but orca, checked both by ln's status and by count.
+        local -a src
+        src=("$d"/*)
+        if ! ln -s "${src[@]}" "$tmp"/ 2>/dev/null \
+          || ! rm -f "$tmp/orca" \
+          || [ "$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ne $(( ${#src[@]} - 1 )) ]; then
+          rm -rf "$tmp"
+          echo "test_helper: could not build a complete orca-free mirror of $d; refusing to run with the host orca on PATH" >&2
+          return 1
+        fi
+        # A loser of the publish race keeps nothing of its own.
+        ln -sn "$tmp" "$shadow" 2>/dev/null || rm -rf "$tmp"
+      fi
+      if [ ! -d "$shadow" ] || [ -e "$shadow/orca" ] || [ -L "$shadow/orca" ]; then
+        echo "test_helper: could not publish an orca-free mirror of $d at $shadow; refusing to run with the host orca on PATH" >&2
+        return 1
+      fi
+      d="$shadow"
+    fi
+    new="${new:+$new:}$d"
+  done
+  export PATH="$new"
+}
+agmsg_test_hide_host_orca || return 1
+
+# Strip host CLI session-identity env. inbox.sh infers caller type from
+# per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
+# would fail-closed (or falsely pass) against a fixture dest. Called at load
+# so suites that skip setup_test_env (test_install.bats) are still covered.
+# Do not globally export a replacement marker — Claude dest inbox callers
+# use agmsg_inbox, and type-guard tests set env per case.
+agmsg_clear_session_detect_env() {
+  unset CLAUDE_CODE_SESSION_ID GROK_SESSION_ID
+  unset CODEX_THREAD_ID CODEX_SANDBOX
+  unset GEMINI_CLI GEMINI_API_KEY
+}
+agmsg_clear_session_detect_env
+
 setup_test_env() {
   # A test never inherits the developer's terminal. The terminal drivers
   # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
@@ -49,7 +136,20 @@ setup_test_env() {
   # fake on PATH. CI runners carry none of these, so nothing changes there.
   unset TMUX TMUX_PANE TMUX_TMPDIR
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
+  agmsg_clear_session_detect_env
   unset CLAUDE_CONFIG_DIR
+  # Fork: the opt-in Codex profile vars select the Codex state root. A
+  # developer shell that exports one would redirect every codex fixture to the
+  # real profile (measured 2026-10-16: 52 launcher/record failures).
+  # CODEX_HOME itself is inherited by any suite run from inside Codex, and
+  # the codex role-home check compares it with the fixture's default home
+  # (measured 2026-10-19: test_spawn.bats's codex resume case). Tests that
+  # want them set them explicitly.
+  unset CODEX_HOME AGMSG_CODEX_HOME ORCA_CODEX_HOME
+  # A Claude Code developer shell's own delivery settings (measured
+  # 2026-10-17: AGMSG_CC_MONITOR_KEEP_ALIVE turned watch.bats's quiet-run
+  # "stopping" case into a re-arm).
+  unset AGMSG_CC_MONITOR_KEEP_ALIVE CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
@@ -70,6 +170,7 @@ setup_test_env() {
   cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
   chmod +x "$TEST_SKILL_DIR/scripts/"*.js 2>/dev/null || true
+  chmod +x "$TEST_SKILL_DIR/scripts/lib/print-strong-detect-env-keys.sh" 2>/dev/null || true
 
   # Agent-type manifests + per-type runtimes now live under scripts/drivers/types/
   # (the type registry reads <skill-root>/scripts/drivers/types/<name>/type.conf),
@@ -115,49 +216,206 @@ setup_test_env() {
   export TMPDIR="$AGMSG_TEST_TMPDIR"
 }
 
-# PIDs (one per line, this shell excluded) whose command line references <dir>.
-# The detached codex children — codex-bridge-launcher.sh and the codex-bridge.js it
-# starts (codex-monitor.sh spawns the launcher with `… &`, "outlives this script") —
-# resolve their SKILL_DIR from their own script path, so their argv carries
-# TEST_SKILL_DIR. The launcher records no pidfile of its own, so a pidfile sweep cannot
-# reach it; the command line is what names it. Unix uses ps; on Git Bash ps enumerates
-# MSYS processes, which the launcher/bridge are, so it reaches them there too.
+# Dest type from the fixture team config (registrations[].type, else legacy .type).
+agmsg_test_dest_type() {
+  local team="$1" agent="$2"
+  local cfg="${TEST_SKILL_DIR:-}/teams/$team/config.json"
+  [ -f "$cfg" ] || return 0
+  local cfg_sql agent_sql
+  cfg_sql=$(printf '%s' "$cfg" | sed "s/'/''/g")
+  agent_sql=$(printf '%s' "$agent" | sed "s/'/''/g")
+  sqlite3 :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agents AS (
+      SELECT
+        CASE
+          WHEN json_type(json_extract(value, '\$.registrations')) = 'array'
+            THEN json_extract(value, '\$.registrations')
+          ELSE json_array(json_object('type', json_extract(value, '\$.type')))
+        END AS registrations
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT COALESCE(json_extract(r.value, '\$.type'), '')
+    FROM agents, json_each(agents.registrations) AS r
+    WHERE json_extract(r.value, '\$.type') IS NOT NULL
+      AND CAST(json_extract(r.value, '\$.type') AS TEXT) != ''
+    LIMIT 1;
+  " 2>/dev/null
+}
+
+# Run inbox.sh with the dest type's strong detect= marker for this call only.
+# Does not export the marker into the calling test. Type-guard tests must call
+# inbox.sh with explicit env instead.
+agmsg_inbox() {
+  local team="$1" agent="$2"
+  shift 2
+  local dest_type inbox
+  dest_type="$(agmsg_test_dest_type "$team" "$agent")"
+  inbox="${SCRIPTS:-${TEST_SKILL_DIR:-}/scripts}/inbox.sh"
+  case "$dest_type" in
+    claude-code)
+      env CLAUDE_CODE_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-agmsg-test-claude-inbox}" \
+        bash "$inbox" "$team" "$agent" "$@"
+      ;;
+    codex)
+      env CODEX_THREAD_ID="${CODEX_THREAD_ID:-agmsg-test-codex-thread}" \
+        bash "$inbox" "$team" "$agent" "$@"
+      ;;
+    grok-build)
+      env GROK_SESSION_ID="${GROK_SESSION_ID:-agmsg-test-grok-session}" \
+        bash "$inbox" "$team" "$agent" "$@"
+      ;;
+    gemini)
+      env GEMINI_CLI="${GEMINI_CLI:-1}" \
+        bash "$inbox" "$team" "$agent" "$@"
+      ;;
+    *)
+      bash "$inbox" "$team" "$agent" "$@"
+      ;;
+  esac
+}
+
+# PIDs (one per line, this shell excluded) whose command line OR environment
+# references <dir> as a path of its own: <dir> itself or <dir>/..., bounded on BOTH
+# sides. On the left it must start an argument / an environment value / a list item
+# (start of the NUL-separated record, or right after `=`, `:`, whitespace or a
+# quote); on the right it must end there or continue with `/` (or `:`, whitespace,
+# a quote). So `/not-owned<dir>/home` and `<dir>x` are NOT matches.
 #
-# LIMIT (named deliberately, not a defect): this matches only processes that carry
-# $dir IN THEIR ARGV. A process whose CWD is inside $dir but whose argv does not name
-# it would NOT be found. The two known holders are argv-visible today — the launcher
-# resolves SKILL_DIR from its own script path (argv[0]), and the bridge receives
-# --workspace-root <dir> — so they are caught; but that is a property of THOSE two, not
-# a guarantee about any future holder. A cwd/open-fd sweep (lsof) would close the gap;
-# it is deliberately NOT used because lsof is slow and this runs in EVERY test's
-# teardown — too heavy for the ~all tests that hold nothing. If a future detached child
-# holds $dir without naming it in argv, revisit (add an lsof pass gated on the rm
-# actually failing, so the cost is paid only when it is needed).
+# Why environ as well as argv: a test exports HOME (and SCRIPTS, TMPDIR, ...) under
+# TEST_SKILL_DIR, so every process the test started inherits it -- including the
+# ones whose argv never names the dir: the `sleep 1` of a detached fake engine's
+# `while :; do sleep 1; done`, or a fake app-server's python. Those are exactly the
+# orphans that outlive a test (#1254 records, `remote.sh` nohup+disown engines).
+# The test's OWN ancestors (bats, bats-exec-test) cannot match: /proc/<pid>/environ
+# is the environment at exec time, and they were exec'd before setup_test_env
+# exported anything; this shell and its subshells are excluded explicitly anyway.
+#
+# Linux reads /proc/<pid>/cmdline and /proc/<pid>/environ (one grep, no ps).
+# environ is readable only for the caller's own processes; another user's process
+# could only match by argv, and could not be signalled anyway. Where /proc is
+# absent (macOS) -- or AGMSG_TEST_REAP_PS_ONLY is set, which is how the tests
+# exercise that path on Linux -- it uses `ps` argv with the SAME bounded pattern,
+# for the scan and for the pre-signal re-check alike. <dir> must be a plain
+# mktemp-style path ([A-Za-z0-9._/-]); anything else lists nothing (fail closed --
+# this feeds a KILL).
+#
+# Git Bash (upstream #1626): MSYS's ps has no -o, so the ps path would list
+# nothing and the reap would "succeed" having stopped nothing. MINGW/MSYS/CYGWIN
+# therefore always read /proc (the source compat_get_cmdline uses), and a native
+# process reports the dir in its mixed `C:/...` form, so that spelling (from
+# `cygpath -m`, itself validated as a plain drive path) is matched too, under the
+# same bounds. _PIDS_PROC_ROOT forces the /proc path against a /proc-shaped tree.
+_dir_ref_is_msys() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+  return 1
+}
+_dir_ref_alt() {   # <dir> -> its mixed C:/... spelling on Git Bash, else nothing
+  local alt=""
+  _dir_ref_is_msys || return 0
+  command -v cygpath >/dev/null 2>&1 || return 0
+  alt="$(cygpath -m "$1" 2>/dev/null)" || return 0
+  case "$alt" in
+    "$1") return 0 ;;
+    [A-Za-z]:/?*) case "${alt#?:}" in *[!A-Za-z0-9._/-]*) return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$alt"
+}
+_dir_ref_ere() {   # <dir> -> ERE matching <dir> (or its Git Bash alt) as a bounded path
+  local q="'\"" esc alt
+  esc="${1//./[.]}"
+  alt="$(_dir_ref_alt "$1")"
+  [ -n "$alt" ] && esc="($esc|${alt//./[.]})"
+  printf '(^|[=:[:space:]%s])%s(/|:|[[:space:]%s]|$)' "$q" "$esc" "$q"
+}
+_dir_ref_proc_root() { printf '%s' "${_PIDS_PROC_ROOT:-/proc}"; }
+_dir_ref_use_proc() {
+  [ -z "${AGMSG_TEST_REAP_PS_ONLY:-}" ] || return 1
+  [ -n "${_PIDS_PROC_ROOT:-}" ] && return 0
+  _dir_ref_is_msys && return 0
+  [ -r /proc/self/environ ]
+}
 _pids_referencing_dir() {   # <dir>
-  # MSYS's ps has no -o, so on Git Bash the listing below would come back empty
-  # and the reap would "succeed" having stopped nothing. Read /proc/<pid>/cmdline
-  # there instead (the source compat_get_cmdline uses). A native process reports
-  # the dir in its mixed `C:/...` form, so match both spellings.
-  # _PIDS_PROC_ROOT forces this branch on a host with a /proc-shaped tree.
-  local proc_root="${_PIDS_PROC_ROOT:-/proc}" dir="$1" alt="" f p cl
-  if [ -n "${_PIDS_PROC_ROOT:-}" ] || case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
-    command -v cygpath >/dev/null 2>&1 && alt="$(cygpath -m "$dir" 2>/dev/null || true)"
-    for f in "$proc_root"/[0-9]*/cmdline; do
-      [ -r "$f" ] || continue
-      p="${f#"$proc_root"/}"; p="${p%/cmdline}"
-      [ "$p" = "$$" ] && continue
-      cl="$(tr '\0' ' ' < "$f" 2>/dev/null)" || continue
-      case "$cl" in
-        *"$dir"*) printf '%s\n' "$p" ;;
-        *) if [ -n "$alt" ] && [ "$alt" != "$dir" ]; then
-             case "$cl" in *"$alt"*) printf '%s\n' "$p" ;; esac
-           fi ;;
-      esac
-    done
-    return 0
+  local dir="$1" re out p root
+  case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
+  re="$(_dir_ref_ere "$dir")"
+  root="$(_dir_ref_proc_root)"
+  if _dir_ref_use_proc; then
+    # Captured first, not piped: a pipeline's other members would be alive, carry
+    # the exported dir, and list themselves. The grep itself is gone by the time
+    # the caller signals, and the caller re-checks every pid before each kill.
+    out="$(grep -lazE -- "$re" "$root"/[0-9]*/cmdline "$root"/[0-9]*/environ 2>/dev/null)"
+  else
+    out="$(ps -eo pid=,args= 2>/dev/null |
+      AGMSG_REAP_RE="$re" awk '{ pid = $1; sub(/^[[:space:]]*[0-9]+[[:space:]]*/, ""); if ($0 ~ ENVIRON["AGMSG_REAP_RE"]) print pid }')"
   fi
-  ps -eo pid=,args= 2>/dev/null |
-    AGMSG_REAP_DIR="$dir" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+  for p in $out; do
+    p="${p#"$root"/}"; p="${p%%/*}"
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    [ "$p" = "$$" ] || [ "$p" = "${BASHPID:-}" ] && continue
+    printf '%s\n' "$p"
+  done | sort -u
+  return 0
+}
+
+# 0 if <pid> still references <dir> right now (re-read fresh just before a signal,
+# so a pid that exited and was reused in between is never signalled). Same
+# bounded pattern and the same source (/proc, or ps argv) as the scan.
+_pid_references_dir() {   # <pid> <dir>
+  local pid="$1" dir="$2" re root
+  case "$pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
+  case "$dir" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  re="$(_dir_ref_ere "$dir")"
+  root="$(_dir_ref_proc_root)"
+  if _dir_ref_use_proc; then
+    grep -qazE -- "$re" "$root/$pid/cmdline" "$root/$pid/environ" 2>/dev/null
+  else
+    ps -o args= -p "$pid" 2>/dev/null | grep -qE -- "$re"
+  fi
+}
+
+# 0 if <dir> is a TEST_SKILL_DIR the reaper may scan for: a real mktemp-style temp
+# path, never a short/rooty prefix.
+_test_skill_dir_reapable() {   # <dir>
+  local dir="$1"
+  case "$dir" in
+    ""|/|/tmp|/var|/private|/usr|"$HOME") return 1 ;;
+  esac
+  case "$dir" in
+    /tmp/*|/private/*|/var/folders/*|/private/var/folders/*) return 0 ;;
+  esac
+  # Outside the well-known temp roots, allow ONLY under a TMPDIR that is set AND a
+  # real path — never unset, "", or "/". Resolve and VALIDATE the prefix before using
+  # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
+  # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
+  # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
+  # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
+  # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
+  local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
+  [ -n "$_tmp" ] || return 1
+  case "$dir" in "$_tmp"/?*) return 0 ;; esac
+  return 1
+}
+
+# Stop ONE pid a test read from a file it wrote (a pidfile, a #1254 seat record):
+# a file's number is not proof of ownership. Signal only a positive single pid
+# (never 0, 1, empty or non-numeric -- `kill 0` would hit the whole process group),
+# and only while /proc (or ps) shows it still references this test's own
+# TEST_SKILL_DIR, re-checked before the TERM and again before the KILL.
+# Returns 0 whether or not it signalled; it never signals anything else.
+kill_test_owned_pid() {   # <pid>
+  local pid="$1" dir="${TEST_SKILL_DIR:-}"
+  case "$pid" in ''|0|1|*[!0-9]*) return 0 ;; esac
+  _test_skill_dir_reapable "$dir" || return 0
+  _pid_references_dir "$pid" "$dir" || return 0
+  kill "$pid" 2>/dev/null || true
+  wait_for_pid_exit "$pid" && return 0
+  _pid_references_dir "$pid" "$dir" || return 0
+  kill -KILL "$pid" 2>/dev/null || true
+  return 0
 }
 
 # Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the
@@ -167,7 +425,7 @@ _pids_referencing_dir() {   # <dir>
 # open messages.db). #662 == #1036 == #1049.
 #
 # Scope is $TEST_SKILL_DIR ITSELF — a unique mktemp path — so matching it in process
-# args cannot reach a developer's live bridge or another test's processes; this is never
+# args or environment cannot reach a developer's live bridge or another test's processes; this is never
 # a blanket `pkill codex-bridge.js`. Guarded to a temp path so a mis-set variable can
 # never turn the scan loose on a short/rooty prefix. A single `ps` for the ~all tests
 # that spawn nothing.
@@ -180,24 +438,7 @@ _pids_referencing_dir() {   # <dir>
 # NOT as "measured", per the day's rule that a claim states how it was verified (#1036).
 _reap_test_skill_dir_procs() {
   local dir="${TEST_SKILL_DIR:-}"
-  case "$dir" in
-    ""|/|/tmp|/var|/private|/usr|"$HOME") return 0 ;;
-  esac
-  case "$dir" in
-    /tmp/*|/private/*|/var/folders/*|/private/var/folders/*) : ;;
-    *)
-      # Outside the well-known temp roots, allow ONLY under a TMPDIR that is set AND a
-      # real path — never unset, "", or "/". Resolve and VALIDATE the prefix before using
-      # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
-      # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
-      # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
-      # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
-      # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
-      local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
-      [ -n "$_tmp" ] || return 0
-      case "$dir" in "$_tmp"/?*) : ;; *) return 0 ;; esac
-      ;;
-  esac
+  _test_skill_dir_reapable "$dir" || return 0
   local pids tries=0 sig p
   while :; do
     pids="$(_pids_referencing_dir "$dir")"
@@ -210,7 +451,10 @@ _reap_test_skill_dir_procs() {
     # that hold nothing return on the first check above), then return and let the rm
     # surface anything still there. The 6s headroom is what covers a load-3-digit host.
     sig=TERM; [ "$tries" -ge 3 ] && sig=KILL
-    for p in $pids; do kill "-$sig" "$p" 2>/dev/null || true; done
+    for p in $pids; do
+      _pid_references_dir "$p" "$dir" || continue
+      kill "-$sig" "$p" 2>/dev/null || true
+    done
     [ "$tries" -ge 60 ] && return 1
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))
@@ -243,14 +487,12 @@ teardown_test_env() {
   # it per test, a later one -- reads a TMPDIR that no longer exists.
   [ -n "${AGMSG_TEST_REAL_TMPDIR:-}" ] && export TMPDIR="$AGMSG_TEST_REAL_TMPDIR"
   [ -n "${AGMSG_TEST_TMPDIR:-}" ] && rm -rf "$AGMSG_TEST_TMPDIR" 2>/dev/null
-  # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
-  # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
-  # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
-  # that dominates the runtime and pushes CI shards over their timeout. The race it fixes
-  # is rare (only the codex tests spawn the detached launcher), and it announces itself
-  # as a non-zero rm ("Directory not empty" / "Device or resource busy"), so pay the cost
-  # exactly there: on failure, reap the TEST_SKILL_DIR-scoped holders and retry.
-  rm -rf "$TEST_SKILL_DIR" 2>/dev/null && return 0
+  # Reap EVERY time, before the rm. Gating it on the rm failing (as it once was) misses
+  # the common leak: on Linux an orphan whose cwd/argv is inside the tree does not stop
+  # the rm, so a detached engine or fake server just kept running after the suite --
+  # one per affected test per run, spinning once the run's PATH mirror was gone. The
+  # scan is one grep over /proc (about the cost of one `ps`), and for the ~all tests
+  # that hold nothing it returns on the first scan without sleeping.
   local reap_status=0 rm_status=0
   _reap_test_skill_dir_procs || reap_status=$?
   rm -rf "$TEST_SKILL_DIR" || rm_status=$?

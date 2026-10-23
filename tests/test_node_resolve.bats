@@ -27,7 +27,13 @@ make_fake_node() {  # $1 = path to create as an executable stub
   make_fake_node "$FAKE_HOME/.nvm/versions/node/v18.4.0/bin/node"
   make_fake_node "$FAKE_HOME/.nvm/versions/node/v20.11.0/bin/node"
   make_fake_node "$FAKE_HOME/.nvm/versions/node/v9.9.0/bin/node"
-  run env -i HOME="$FAKE_HOME" PATH=/usr/bin:/bin bash -c 'source "'"$SCRIPTS"'/lib/node.sh"; agmsg_resolve_node'
+  # Fork: PATH=/usr/bin:/bin only "lacks node" where the distro ships none; a
+  # host with /usr/bin/node (measured 2026-10-19) answered that instead. Give
+  # the resolver just the tools it runs, so PATH really has no node.
+  local sysbin="$FAKE_HOME/sysbin" t
+  mkdir -p "$sysbin"
+  for t in bash sort tail; do ln -s "$(command -v "$t")" "$sysbin/$t"; done
+  run env -i HOME="$FAKE_HOME" PATH="$sysbin" bash -c 'source "'"$SCRIPTS"'/lib/node.sh"; agmsg_resolve_node'
   [ "$status" -eq 0 ]
   # Version sort, not lexical: v20.11.0 beats v9.9.0 and v18.4.0.
   [ "$output" = "$FAKE_HOME/.nvm/versions/node/v20.11.0/bin/node" ]

@@ -48,9 +48,11 @@ teardown() {
   # BY THE PATH THEY ACTUALLY RUN UNDER. The hanging fake is COPIED over
   # `$SCRIPTS/remote.sh`, so matching the name it was written as reaps nothing
   # and the child outlives the whole file — which is how this suite stopped
-  # exiting even with every case green. Both paths are inside the test's own
-  # skill dir, so the pattern cannot reach anything else.
-  pkill -f "$TEST_SKILL_DIR/" 2>/dev/null || true
+  # exiting even with every case green. teardown_test_env's reaper does exactly
+  # that, by pid: every process whose argv or environment names this test's own
+  # skill dir, re-checked in /proc before each signal, and it re-scans until none
+  # is left, so a child forked while the first ones were being killed is caught
+  # too, which a one-shot `pkill -f` cannot do.
   teardown_test_env
 }
 

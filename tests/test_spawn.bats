@@ -38,14 +38,33 @@ EOF
 }
 
 teardown() {
-  # The fake `codex app-server` (bash, with the python it waits on) is not in
-  # any pidfile a failed test is sure to have written, and teardown_test_env
-  # only reaps once its plain rm fails -- which it does not on macOS/Linux. So
-  # reap everything whose argv names this test's TEST_SKILL_DIR here, always.
-  # It reads argv the way the Git Bash path needs (/proc), is scoped to this
-  # test's own temp dir, and the python child exits once its parent is gone.
+  # Stop the fake app-servers this test's records name (pid-checked), then
+  # sweep anything else still naming this test's own TEST_SKILL_DIR (upstream
+  # #1669: the fake's python, and whatever a test that failed early left up).
+  # teardown_test_env reaps again; this explicit pass is cheap (one /proc scan)
+  # and keeps the suite independent of that.
+  _stop_fake_app_servers
   _reap_test_skill_dir_procs || true
   teardown_test_env
+}
+
+# Stop every fake app-server a bridged launch brought up in this test. Runs from
+# teardown so a failed assertion cannot skip it. The shim records each seat's
+# server in run/codex-app-server.<seat>.record (#1254), not a .pid file, so read
+# it with the production reader rather than re-parsing the format here. The
+# record's pid is not trusted as is: kill_test_owned_pid signals it only if it is
+# a positive single pid that /proc still shows as this test's own process.
+_stop_fake_app_servers() {
+  local rec
+  for rec in "$TEST_SKILL_DIR"/run/codex-app-server.*.record; do
+    [ -f "$rec" ] || continue
+    (
+      # shellcheck disable=SC1091
+      . "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+      _agmsg_codex_seat_record_read "$rec" || exit 0
+      kill_test_owned_pid "$SEAT_REC_PID"
+    )
+  done
 }
 
 # --- argument validation ---
@@ -1843,8 +1862,19 @@ s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
 print("codex app-server (WebSockets)")
 print("  listening on: ws://127.0.0.1:%d" % s.getsockname()[1]); sys.stdout.flush()
 ppid = os.getppid()
-while True:
+def parent_gone():
+    # Reparented (to init or a subreaper) or the parent pid no longer exists.
     if os.getppid() != ppid:
+        return True
+    try:
+        os.kill(ppid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+while True:
+    if parent_gone():
         break
     try:
         c, _ = s.accept(); c.close()
@@ -1870,7 +1900,7 @@ FAKE
 }
 
 # The evidence both end-to-end tests read: the real binary was reached exactly
-# once, bridged, with the actas prompt. The fake app-server is put down by teardown.
+# once, bridged, with the actas prompt. Teardown puts the fake app-server down.
 _assert_bridged_argv() {
   [ -f "$CALL_LOG" ]
   # The real binary was reached exactly once, with the bridge flag and the actas prompt.
@@ -1936,20 +1966,23 @@ _assert_bridged_argv() {
   # shellcheck disable=SC1090
   source "$SCRIPTS/lib/type-registry.sh"
   listed="$(agmsg_type_get codex spawn_unset_env)"
+  # A name the manifest forwards on purpose (spawn_forward_env, upstream #1624)
+  # is a reasoned decision too, not an unnoticed inheritance.
+  local forwarded
+  forwarded=" $(agmsg_type_get codex spawn_forward_env) "
   # Kept on purpose (each with its reason in type.conf): the seat's own marker;
   # agmsg-wide configuration the CLI's actas flow legitimately inherits; test
   # hooks that only bats sets; and names that are script-local variables
   # assigned inside the stack before they are read, never environment inputs
   # (role-session lookup results, codex-monitor's parsed command/args/version,
   # the doc URL constant from delivery.sh).
-  # CODEX_HOME is intentionally inherited: the session recorder records the
-  # effective profile for resume, and spawned Codex seats use that same profile.
-  local keep=" CODEX_HOME AGMSG_SPAWNED AGMSG_BASH AGMSG_WATCH_ONCE_INTERVAL AGMSG_WATCH_ONCE_TIMEOUT AGMSG_TEST_DISPATCHER_STALE_BARRIER AGMSG_TEST_ASSUME_CODEX_SOCKET AGMSG_ROLE_SESSION_UUID AGMSG_ROLE_SESSION_PROJECT CODEX_ARGS CODEX_COMMAND CODEX_VERSION CODEX_MONITOR_DOC_URL "
+  local keep=" AGMSG_SPAWNED AGMSG_BASH AGMSG_WATCH_ONCE_INTERVAL AGMSG_WATCH_ONCE_TIMEOUT AGMSG_TEST_DISPATCHER_STALE_BARRIER AGMSG_TEST_ASSUME_CODEX_SOCKET AGMSG_ROLE_SESSION_UUID AGMSG_ROLE_SESSION_PROJECT AGMSG_ROLE_SESSION_CODEX_HOME CODEX_ARGS CODEX_COMMAND CODEX_VERSION CODEX_MONITOR_DOC_URL "
   local inventory missing=""
   inventory="$( { grep -ohE '\$\{?(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-shim.sh "$dir"/codex-monitor.sh "$dir"/_app-server.sh "$dir"/codex-bridge-launcher.sh "$dir"/codex-record-session.sh "$dir"/_session-start.sh "$dir"/codex-shim-install.sh "$dir"/_delivery.sh | sed -E 's/^\$\{?//'; grep -ohE 'process\.env\.(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-bridge.js | sed 's/process\.env\.//'; } | sort -u )"
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     case "$keep" in *" $v "*) continue ;; esac
+    case "$forwarded" in *" $v "*) continue ;; esac
     covered=0
     for entry in $listed; do
       case "$entry" in

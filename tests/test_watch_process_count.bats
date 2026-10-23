@@ -43,7 +43,7 @@ teardown() {
   # short-circuit -- a mistake caught and fixed once already during this
   # work's own planning (see the design notes referenced from #1321).
   bash "$SCRIPTS/send.sh" team bob alice "seed" >/dev/null
-  bash "$SCRIPTS/inbox.sh" team alice >/dev/null
+  agmsg_inbox team alice >/dev/null
 
   local shimbin="$BATS_TEST_TMPDIR/shim-bin" countlog="$BATS_TEST_TMPDIR/counts.log"
   mkdir -p "$shimbin"
