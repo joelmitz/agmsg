@@ -110,7 +110,7 @@ teardown() {
   bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-projB
   run bash "$SK/scripts/send.sh" demo alice bob "hello from install"
   [ "$status" -eq 0 ]
-  run bash "$SK/scripts/inbox.sh" demo bob
+  run env CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash "$SK/scripts/inbox.sh" demo bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello from install" ]]
 }
@@ -136,6 +136,17 @@ teardown() {
     --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
   [ "$status" -eq 1 ]
   [[ "$output" == *"no reservation or state exists for recovery"* ]]
+}
+
+@test "install: Antigravity TUI shim explains ack as marking verified messages read" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" --help
+  [ "$status" -eq 0 ]
+  grep -qF 'ack          mark saved messages read only after verifying the same batch was received and replied to on screen' <<<"$output"
+  grep -qF 'replay       resend the unresolved saved batch to agy without marking messages read' <<<"$output"
+  grep -qF 'reset-guard  clear a regular-inbox violation without marking messages read' <<<"$output"
 }
 
 @test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
@@ -691,7 +702,7 @@ teardown() {
   local store="$FAKE_HOME/override-store"
   AGMSG_STORAGE_PATH="$store" bash "$SK/scripts/send.sh" demo alice bob "via override"
   [ -f "$store/messages.db" ]
-  run bash -c "AGMSG_STORAGE_PATH='$store' bash '$SK/scripts/inbox.sh' demo bob"
+  run bash -c "AGMSG_STORAGE_PATH='$store' CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash '$SK/scripts/inbox.sh' demo bob"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "via override" ]]
 }

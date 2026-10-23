@@ -24,9 +24,12 @@ setup() {
 }
 
 teardown() {
+  # ENGINE_PIDS come from pidfiles / child pid files the fixtures wrote, so stop
+  # them through kill_test_owned_pid (a positive single pid still referencing this
+  # test's TEST_SKILL_DIR only), then collect any that were this shell's children.
   local pid
   for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
+    kill_test_owned_pid "$pid"
     wait "$pid" 2>/dev/null || true
   done
   teardown_test_env
@@ -136,8 +139,14 @@ write_fake_node_ps_fixture() {
   printf '%s\n' "$fake_bin"
 }
 
+# Register the engine `sync start` just launched so teardown kills it. Call it right
+# after the start and BEFORE any assertion: remote.sh detaches the engine on purpose
+# (nohup + disown), so an assertion that fails first would otherwise leave it running
+# past the test. A missing pidfile leaves ENGINE_PID empty, so a later `kill -0` still
+# fails the test instead of this line hiding which assertion was meant to.
 remember_engine_pid() {
-  ENGINE_PID="$(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid")"
+  ENGINE_PID="$(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid" 2>/dev/null || true)"
+  [ -n "$ENGINE_PID" ] || return 0
   ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$ENGINE_PID"
 }
 
@@ -688,12 +697,12 @@ write_windows_spelling_fixtures() {
   local second_start=$!
   wait "$first_start" || first_status=$?
   wait "$second_start" || second_status=$?
+  remember_engine_pid
   [ "$first_status" -eq 0 ]
   [ "$second_status" -eq 0 ]
   [ "$(grep -h -c 'Sync engine started' "$first_out" "$second_out" | awk '{s += $1} END {print s}')" -eq 1 ]
   [ "$(grep -h -c 'Sync engine already running' "$first_out" "$second_out" | awk '{s += $1} END {print s}')" -eq 1 ]
 
-  remember_engine_pid
   kill -0 "$ENGINE_PID"
   rm -f "$first_out" "$second_out"
 }
@@ -706,9 +715,9 @@ write_windows_spelling_fixtures() {
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_LOG_READY_FILE="$ready_file" \
     bash "$SCRIPTS/remote.sh" sync start testteam
+  remember_engine_pid
   [ "$status" -eq 0 ]
   [ -f "$ready_file" ]
-  remember_engine_pid
   kill -0 "$ENGINE_PID"
 }
 
@@ -727,6 +736,7 @@ write_windows_spelling_fixtures() {
     AGMSG_TEST_LOG_READY_FILE="$ready_file" \
     AGMSG_TEST_SYNC_START_READY_CEILING=0 \
     bash "$SCRIPTS/remote.sh" sync start testteam
+  remember_engine_pid
   [ "$status" -eq 0 ]
   refute grep -qF "did not become ready" <<<"$output"
 }
@@ -809,9 +819,11 @@ write_unownable_ps_fixture() {
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
     AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
+  # Hand the child to teardown before any assertion: none of them may leave it running.
+  child_pid="$(cat "$child_pid_file" 2>/dev/null || true)"
+  [ -z "$child_pid" ] || ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$child_pid"
   [ "$status" -ne 0 ]
-
-  child_pid="$(cat "$child_pid_file")"
+  [ -n "$child_pid" ]
   # The premise: it really is still running. Without this the assertions below
   # would pass just as well against a message about a process that had died,
   # which is the thing the old wording could not distinguish.
@@ -834,9 +846,6 @@ write_unownable_ps_fixture() {
   # And a way out that works from where the operator actually is.
   printf '%s\n' "$output" | grep -q -F "kill $child_pid"
   printf '%s\n' "$output" | grep -q -F "remote.sh disconnect 'testteam'"
-
-  kill -9 "$child_pid" 2>/dev/null || true
-  wait "$child_pid" 2>/dev/null || true
 }
 
 # --- the probe a minted pid is checked with (#652) -----------------------

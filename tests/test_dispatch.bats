@@ -17,19 +17,19 @@ teardown() {
 }
 
 @test "dispatch: explicit team and agent can check inbox" {
-  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_BOB" --team demo --agent bob -- inbox
+  run env CODEX_THREAD_ID=dispatch-codex-seat bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_BOB" --team demo --agent bob -- inbox
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages." ]]
 }
 
 @test "dispatch: environment team and agent can check inbox" {
-  run env AGMSG_TEAM=demo AGMSG_AGENT=bob bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_BOB" -- inbox
+  run env AGMSG_TEAM=demo AGMSG_AGENT=bob CODEX_THREAD_ID=dispatch-codex-seat bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_BOB" -- inbox
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages." ]]
 }
 
 @test "dispatch: whoami single identity resolves inbox" {
-  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" -- inbox
+  run env CODEX_THREAD_ID=dispatch-codex-seat bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" -- inbox
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages." ]]
 }

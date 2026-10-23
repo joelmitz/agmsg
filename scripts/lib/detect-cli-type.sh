@@ -4,10 +4,10 @@
 # hands the type to join.sh, reset.sh, delivery.sh and identities.sh, and a
 # default guessed there registers a real agent under a type nobody chose.
 #
-# Sourcing this requires lib/type-registry.sh and lib/compat.sh to be sourced
-# first; it reads agmsg_known_types / agmsg_type_get / compat_get_comm /
-# compat_get_ppid and deliberately does not source them itself, so a caller
-# cannot end up with two copies of the registry's state.
+# Sourcing this requires lib/type-registry.sh first (agmsg_known_types /
+# agmsg_type_get). agmsg_detect_cli_type also needs lib/compat.sh
+# (compat_get_comm / compat_get_ppid). This file deliberately does not source
+# either, so a caller cannot end up with two copies of the registry's state.
 
 # Auto-detect CLI type from environment variables and the process tree, driven by
 # the per-type manifests' `detect=` (env-var names), `detect_fallback=` (weak
@@ -28,6 +28,45 @@ _agmsg_detect_order() {
     printf '%s\t%s\n' "$_priority" "$_t"
   done < <(agmsg_known_types | sort -u) |
     LC_ALL=C sort -n -k1,1 -k2,2 | cut -f2-
+}
+
+# Strong `detect=` env only. No process-tree, no detect_fallback=, no
+# claude-code default — those stay on agmsg_detect_cli_type for whoami.
+# `detect=explicit` and empty are skipped. Multiple distinct types at once
+# yield empty (fail-closed). Several markers for one type count as that type.
+agmsg_detect_cli_type_from_env() {
+  # `detect=` tokens are split with `read -ra` (IFS word-split, NO pathname
+  # expansion) rather than an unquoted `for x in $list` — a file in the caller's
+  # cwd matching a pattern like `claude-*` must not glob-eat the pattern. (Plain
+  # `set -f` can't be used here: agmsg_known_types discovers types via a `*/`
+  # glob that must keep working.)
+  local _t _v _detect _toks _hit=""
+  while IFS= read -r _t; do
+    [ -n "$_t" ] || continue
+    _detect="$(agmsg_type_get "$_t" detect)"
+    if [ -z "$_detect" ] || [ "$_detect" = "explicit" ]; then
+      continue
+    fi
+    read -ra _toks <<<"$_detect"
+    for _v in "${_toks[@]}"; do
+      [ -n "$_v" ] || continue
+      case "$_v" in
+        [A-Za-z_]* )
+          case "${_v#?}" in *[!A-Za-z0-9_]*) continue ;; esac
+          ;;
+        *) continue ;;
+      esac
+      if [ -n "${!_v:-}" ]; then
+        if [ -n "$_hit" ] && [ "$_hit" != "$_t" ]; then
+          return 0
+        fi
+        _hit="$_t"
+        break
+      fi
+    done
+  done < <(agmsg_known_types | sort -u)
+  [ -n "$_hit" ] && printf '%s\n' "$_hit"
+  return 0
 }
 
 agmsg_detect_cli_type() {
