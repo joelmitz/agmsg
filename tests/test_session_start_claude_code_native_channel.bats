@@ -165,6 +165,8 @@ _confirm_native_delivery() {   # <agent> <socket> [state]
 @test "session-start: a resumed session whose own pid cannot be identified clears the stale destination and says why" {
   _mark_daemon_ready
   env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-nopid" >/dev/null
+  # fork: the native path needs a confirmed delivery to this socket.
+  _confirm_native_delivery alice /tmp/cc-socks/old.sock
   run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/old.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nopid"}'
   grep -qF "agmsgd is running and will deliver" <<<"$output"
@@ -207,7 +209,9 @@ _confirm_native_delivery() {   # <agent> <socket> [state]
   # actas-claim keeps the same project on the Monitor path.
   run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-legacy.sock" bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-legacy"
   refute grep -qx "delivery=native" <<<"$output"
-  # Choosing agmsgd for the project brings the direct path back.
+  # Choosing agmsgd for the project brings the direct path back (fork: once a
+  # delivery to this socket is confirmed).
+  _confirm_native_delivery alice /tmp/cc-socks/sid-legacy.sock
   printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJ" 2>/dev/null && pwd -P || printf "%s" "$PROJ")" > "$RUN_DIR/delivery-choice"
   run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-legacy.sock" bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-legacy"
   grep -qx "delivery=native" <<<"$output"
