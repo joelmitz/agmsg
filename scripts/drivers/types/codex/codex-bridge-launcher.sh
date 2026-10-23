@@ -13,7 +13,10 @@ set -euo pipefail
 exec 3>&- 4>&-
 
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
-# dispatcher starts bridges only for roles recorded as belonging to this seat.
+# dispatcher starts a bridge only for the Codex role this seat's own request
+# names (#1280); other seats in the same project dispatch their own roles.
+# One role held by several seats at once is NOT supported (upstream #1280 does
+# not define it): bridge state files are keyed by role, not by seat.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -69,7 +72,6 @@ _agmsg_codex_seat_key_ok "$SEAT_KEY" || {
 # below -- the request file, the dispatcher/child locks, the rate-limiter
 # identity -- is this seat's own coordination and is keyed by SEAT_KEY so
 # concurrent seats in the same project never contend with each other over it.
-PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
 
@@ -85,11 +87,17 @@ TAB="$(printf '\t')"
 # over the app-server's "loaded" thread (see the thread-resolution block below).
 # shellcheck source=../../../lib/role-session.sh
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
+# shellcheck source=_home.sh
+source "$SCRIPT_DIR/_home.sh"
 # shellcheck source=../../../lib/resolve-project.sh
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # Canonicalize once so the record's project (stored from the codex actas flow's
 # cwd) compares equal to this launcher's project even across a symlinked path.
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+# Native Node receives the MSYS `/c/...` launcher argument as `C:\...`.
+# Hash the platform-independent native spelling so the launcher and bridge
+# publish the same lease identity on Windows.
+PROJECT_HASH="$(agmsg_normalize_project_path "$PROJECT" | tr '\\' '/' | agmsg_sha1)"
 
 mkdir -p "$RUN_DIR"
 
@@ -103,7 +111,7 @@ LIFETIME_PID="$PARENT_PID"
 HELD_LOCK_RESOURCE=""
 
 release_held_lock() {
-  rm -f "$IDENTITY_CACHE_MARKER" 2>/dev/null || true
+  rm -f "$IDENTITY_CACHE_MARKER" "${ROLE_CACHE_MARKER:-}" 2>/dev/null || true
   [ -n "$HELD_LOCK_RESOURCE" ] || return 0
   agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
 }
@@ -277,43 +285,24 @@ poll_sleep() {
   return 0
 }
 
-# Any change here can change the safe subscription set. Include the request
-# thread, owner, and each role's recorded project, not merely registrations:
-# actas/resume rewrites a role record without changing identities.sh output.
-# $1 is this tick's already-resolved identity list. It is passed in rather than
-# re-resolved so one iteration runs identities.sh once, not twice.
-#
-# Assigns to SAFETY_STATE instead of printing, and reads the roles with a
-# herestring rather than a pipeline, so the whole thing runs in the caller's
-# shell. Both matter: agmsg_role_session_load memoizes the record path, and a
-# memo written inside a command substitution or a pipeline subshell is
-# discarded the moment it is useful.
-build_safety_state() {
-  local identity="$1"
-  local request="" team name
-  if [ -f "$REQUEST_FILE" ]; then
-    IFS= read -r request < "$REQUEST_FILE" 2>/dev/null || true
-  fi
-  SAFETY_STATE="request=$request"
-  while IFS="$TAB" read -r team name; do
-    [ -n "$team" ] || continue
-    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
-  done <<< "$identity"
-}
-
-# The role is claimed a moment after launch, so retry while the parent
-# (codex-monitor.sh) is alive. Never substitute the project's other identities
-# when this seat's own record is not available.
+# actas may register the role a moment after launch, so retry while the parent
+# (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
   acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
+  seat_wait_noted=0
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
+    # #1280: dispatch ONLY the role this seat's own request names, and only
+    # while that role's record still proves this seat's thread and project.
+    # Never fall back to the project-wide identity list: another seat in the
+    # same project (and effective home) owns the other roles, and starting a
+    # child for them here makes each seat's dispatcher fight the other's
+    # bridge over the role-keyed state files.
     seat_pairs=""
     if read_seat_request && request_pair_matches_record "$REQUEST_PAIR" \
       && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
@@ -321,16 +310,21 @@ if [ -z "$ROLE_PAIR" ]; then
     fi
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
     if [ -z "$seat_pairs" ]; then
-      echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+      if [ "$seat_wait_noted" != "1" ]; then
+        echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+        seat_wait_noted=1
+      fi
       # No owned pair is authoritative: forget any children this seat used to
       # own so a later re-registration can be dispatched again.
       known_pairs=""
       poll_sleep
       continue
     fi
-    # Forget pairs that are no longer registered. A child now exits by itself
-    # once its own registration is gone, so a stale known_pairs entry would
-    # suppress the respawn if that same pair were registered again later.
+    seat_wait_noted=0
+    # Forget pairs that are no longer this seat's selected pair. A child exits
+    # by itself once its own registration is gone, so a stale known_pairs entry
+    # would suppress the respawn if that pair were selected again later (the
+    # child lock turns a redundant respawn into an immediate exit).
     retained=""
     while IFS= read -r seen_pair; do
       [ -n "$seen_pair" ] || continue
@@ -360,7 +354,7 @@ if [ -z "$ROLE_PAIR" ]; then
   exit 0
 fi
 
-# One live child per (seat, role) — #485. Children are `nohup`'d and bound to
+# One live child per (project, role) — #485. Children are `nohup`'d and bound to
 # the shared app-server, while the dispatcher runs in the TUI's process group and
 # is killed by the SIGHUP a pane teardown delivers. A replacement dispatcher
 # starts with an empty known_pairs and re-spawns the ENTIRE child set, so without
@@ -384,8 +378,6 @@ while _agmsg_pid_alive_local "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
-build_safety_state "$ids"
-safety_state="$SAFETY_STATE"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -396,12 +388,7 @@ safety_state="$SAFETY_STATE"
 thread_hint="loaded"
 if [ -f "$REQUEST_FILE" ]; then
   _hint_type=""; _hint_thread=""; _hint_app=""
-  _hint_line=""
-  IFS= read -r _hint_line < "$REQUEST_FILE" 2>/dev/null || true
-  _agmsg_codex_request_parse "$_hint_line" || true
-  _hint_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
-  _hint_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
-  _hint_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+  IFS="$TAB" read -r _hint_type _hint_thread _hint_app < "$REQUEST_FILE" 2>/dev/null || true
   [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
 fi
 safe_ids=""
@@ -414,12 +401,13 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   candidate_thread="$AGMSG_ROLE_SESSION_UUID"
   if [ -n "$candidate_thread" ]; then
     candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
+    candidate_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
     # A record for another project proves this role's current seat is elsewhere:
     # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
     # before a concrete request thread is available; multiplexed roles require
     # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] || ! agmsg_codex_role_home_matches "$candidate_home"; then
       continue
     fi
   else
@@ -495,14 +483,14 @@ _REAP_WAIT_TICKS=50
 #            binaries introduces no such divergence.
 #
 # The Windows branch is taken INSTEAD of the /proc branch, not merely before it:
-# MSYS/Cygwin do expose a working /proc, but it is keyed by the emulation layer's
+# MSYS does expose a working /proc, but it is keyed by the emulation layer's
 # own pid space while a lease records the Windows pid codex-bridge.js sees as
 # process.pid. Letting /proc win would return the start time of whatever
 # unrelated MSYS process sits at that number -- the recycled-pid confusion this
 # token exists to prevent, with nothing to signal it.
 _agmsg_is_windows() {
-  case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
-    MINGW*|MSYS*|CYGWIN*|CLANGARM*) return 0 ;;
+  case "${MSYSTEM:-}" in
+    MINGW*|MSYS*|CLANGARM*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -710,6 +698,248 @@ appserver_file="$RUN_DIR/codex-bridge.$bridge_key.appserver"
 # appears for a bridge first launched on "loaded", it is torn down and relaunched
 # on the recorded thread instead of clinging to the ambiguous "loaded" one.
 thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
+retire_fence="$RUN_DIR/codex-bridge-retire.$PROJECT_HASH.$BRIDGE_PAIRS_HASH"
+
+# Windows never receives an external kill from this launcher.  A retire record
+# survives pidfile/meta cleanup and launcher restarts; the bridge acknowledges
+# the identically-shaped request and shuts itself down.  An acknowledgement is
+# only receipt, never exit proof.
+_read_stop_record() {
+  local file="$1" line k v n=0
+  local sv=0 sp=0 spa=0 sh=0 spi=0 ss=0 sss=0 sn=0 se=0
+  rv=""; rproject=""; rpairs=""; rhost=""; rpid=""; rstart=""; rstartsrc=""; rnonce=""; rexpires=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); case "$line" in *=*) ;; *) return 1 ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      v) sv=$((sv + 1)); rv="$v" ;;
+      project) sp=$((sp + 1)); rproject="$v" ;;
+      pairs) spa=$((spa + 1)); rpairs="$v" ;;
+      host) sh=$((sh + 1)); rhost="$v" ;;
+      pid) spi=$((spi + 1)); rpid="$v" ;;
+      start) ss=$((ss + 1)); rstart="$v" ;;
+      startsrc) sss=$((sss + 1)); rstartsrc="$v" ;;
+      nonce) sn=$((sn + 1)); rnonce="$v" ;;
+      expires) se=$((se + 1)); rexpires="$v" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  [ "$n" -eq 9 ] && [ "$sv$sp$spa$sh$spi$ss$sss$sn$se" = 111111111 ] || return 1
+  [ "$rv" = 1 ] && [ "$rstartsrc" = pwsh ] && [ -n "$rhost" ] || return 1
+  case "$rproject" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rproject}" -eq 40 ] || return 1
+  case "$rpairs" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rpairs}" -eq 40 ] || return 1
+  case "$rnonce" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rnonce}" -eq 40 ] || return 1
+  case "$rpid$rstart$rexpires" in *[!0-9]*) return 1 ;; esac
+  [ -n "$rpid" ] && [ -n "$rstart" ] && [ -n "$rexpires" ]
+}
+
+_write_stop_record() {
+  local file="$1" pid="$2" start="$3" nonce="$4" expires="$5" host="$6"
+  local tmp="$file.tmp.$$.$RANDOM"
+  ( umask 077; printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\nnonce=%s\nexpires=%s\n' \
+      "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$start" "$nonce" "$expires" > "$tmp" ) || return 1
+  mv -f "$tmp" "$file"
+}
+
+# Prints LIVE<TAB><ticks>, ABSENT, or UNKNOWN.  Only ABSENT and a changed live
+# token prove that the retired process is gone.
+_windows_process_state() {
+  local pid="$1" bin out
+  for bin in powershell.exe pwsh; do
+    out="$("$bin" -NoProfile -NonInteractive -Command \
+      "try { \$p=Get-Process -Id $pid -ErrorAction Stop; Write-Output ('LIVE' + [char]9 + \$p.StartTime.Ticks) } catch [Microsoft.PowerShell.Commands.ProcessCommandException] { Write-Output 'ABSENT' } catch { exit 3 }" \
+      2>/dev/null | tr -d '\r' | head -n 1)" || continue
+    case "$out" in
+      ABSENT) printf '%s' ABSENT; return 0 ;;
+      "LIVE$TAB"*) case "${out#"LIVE$TAB"}" in ''|*[!0-9]*) ;; *) printf '%s' "$out"; return 0 ;; esac ;;
+    esac
+  done
+  printf '%s' UNKNOWN
+  return 1
+}
+
+_windows_stop_request_from_fence() {
+  _read_stop_record "$retire_fence" || return 1
+  [ "$rproject" = "$PROJECT_HASH" ] && [ "$rpairs" = "$BRIDGE_PAIRS_HASH" ] || return 1
+  local now nonce expires request="$RUN_DIR/codex-bridge-stop.$rpid"
+  now="$(date +%s)"; case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$rexpires" -lt "$now" ]; then
+    nonce="$(printf '%s' "$$:$RANDOM:$RANDOM:$now:$rpid:$rstart" | agmsg_sha1)"
+    expires=$((now + 10))
+    _write_stop_record "$retire_fence" "$rpid" "$rstart" "$nonce" "$expires" "$rhost" || return 1
+    _read_stop_record "$retire_fence" || return 1
+  fi
+  _write_stop_record "$request" "$rpid" "$rstart" "$rnonce" "$rexpires" "$rhost"
+}
+
+_windows_begin_retire() {
+  local pid="$1" token="$2" host lease nonce now expires
+  [ -f "$retire_fence" ] && return 0
+  case "$token" in "pwsh$TAB"*) ;; *) return 1 ;; esac
+  host="$(hostname 2>/dev/null)"; [ -n "$host" ] || return 1
+  lease="$RUN_DIR/codex-bridge-lease.$pid"
+  _read_lease "$lease" || return 1
+  [ "$lproj" = "$PROJECT_HASH" ] && [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] \
+    && [ "$lhost" = "$host" ] && [ "$lpid" = "$pid" ] \
+    && [ "$lstartsrc$TAB$lstart" = "$token" ] || return 1
+  now="$(date +%s)"; case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  expires=$((now + 10)); nonce="$(printf '%s' "$$:$RANDOM:$RANDOM:$now:$pid:$lstart" | agmsg_sha1)"
+  _write_stop_record "$retire_fence" "$pid" "$lstart" "$nonce" "$expires" "$host" || return 1
+  _windows_stop_request_from_fence
+}
+
+_windows_wait_exit_proof() {
+  _read_stop_record "$retire_fence" || return 1
+  local old_pid="$rpid" old_start="$rstart" state waited=0
+  _windows_stop_request_from_fence || return 1
+  while [ "$waited" -lt "$_REAP_WAIT_TICKS" ]; do
+    state="$(_windows_process_state "$old_pid" 2>/dev/null || true)"
+    case "$state" in
+      ABSENT) return 0 ;;
+      "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$old_start" ] && return 0 ;;
+    esac
+    sleep 0.1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+_windows_current_bridge_valid() {
+  local pid="$1" want_url="$2" want_thread="$3" state token lease="$RUN_DIR/codex-bridge-lease.$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in "LIVE$TAB"*) token="${state#"LIVE$TAB"}" ;; *) return 1 ;; esac
+  _read_lease "$lease" || return 1
+  [ "$lproj" = "$PROJECT_HASH" ] && [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] \
+    && [ "$lhost" = "$(hostname 2>/dev/null)" ] \
+    && [ "$lpid" = "$pid" ] && [ "$lstartsrc" = pwsh ] && [ "$lstart" = "$token" ] || return 1
+  local got_url="" got_thread=""
+  IFS= read -r got_url < "$appserver_file" 2>/dev/null || true
+  IFS= read -r got_thread < "$thread_file" 2>/dev/null || true
+  [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
+}
+
+# このchild自身の登録とbinding（thread/project/home/owner）は、ROLE_PAIR自身の
+# 登録とrole-session recordだけから観測する。requestのthreadや他roleのrecordは
+# bindingの根拠にしない。SessionStartやresumeがrequestだけを書いた場合、この
+# roleのbindingは意図的に変えない。ROLE_PAIRのrecordが更新された時点で再bindする。
+# requestが使われるのは「このseatがどのroleを選んでいるか」(pair)の判定だけで、
+# requestはseat固有のため、別pairを選んだ場合のみ退役する
+# （_seat_request_selects_other_pair、#1280）。
+_role_binding_read_uncached() {
+  local rows row_team row_name extra found=0 team name text line session="" project="" home="" owner=""
+  local nsession=0 nproject=0 nhome=0 nowner=0
+  ROLE_BINDING_CURRENT=""
+  ROLE_BINDING_SESSION=""; ROLE_BINDING_PROJECT=""; ROLE_BINDING_HOME=""; ROLE_BINDING_OWNER=""
+  rows="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null)" || return 1
+  while IFS="$TAB" read -r row_team row_name extra; do
+    [ "$row_team$TAB$row_name" != "$ROLE_PAIR" ] || found=1
+  done <<EOF
+$rows
+EOF
+  if [ "$found" = 0 ]; then ROLE_BINDING_CURRENT=ABSENT; return 0; fi
+  IFS="$TAB" read -r team name <<EOF
+$ROLE_PAIR
+EOF
+  _agmsg_role_session_path_into "$team" "$name" || return 1
+  [ -f "$_AGMSG_ROLE_SESSION_PATH" ] && [ -r "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  text="$(cat "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      session=*) session="${line#session=}"; nsession=$((nsession + 1)) ;;
+      project=*) project="${line#project=}"; nproject=$((nproject + 1)) ;;
+      codex_home=*) home="${line#codex_home=}"; nhome=$((nhome + 1)) ;;
+      owner=*) owner="${line#owner=}"; nowner=$((nowner + 1)) ;;
+    esac
+  done <<EOF
+$text
+EOF
+  [ "$nsession" = 1 ] && [ "$nproject" = 1 ] && [ "$nhome" -le 1 ] && [ "$nowner" -le 1 ] || return 1
+  [ -n "$session" ] && [ -n "$project" ] || return 1
+  project="$(agmsg_canonical_path "$project" 2>/dev/null)" || return 1
+  ROLE_BINDING_SESSION="$session"; ROLE_BINDING_PROJECT="$project"
+  ROLE_BINDING_HOME="$home"; ROLE_BINDING_OWNER="$owner"
+  ROLE_BINDING_CURRENT="$(printf '%s\0' "$session" "$project" "$home" "$owner" | agmsg_sha1)" || return 1
+  [ -n "$ROLE_BINDING_CURRENT" ]
+}
+
+# 安定時は成功した同一bindingを最大5秒だけ再利用する。mtimeが同秒なら
+# 再読取する（Bash 3.2の秒精度）。登録/record変更・削除、読取失敗はhitにしない。
+# 強制読取はspawn直前と変更の二重確認で使い、cacheを解除証明に流用しない。
+ROLE_CACHE_MARKER="$RUN_DIR/.role-binding-cache.$$"
+ROLE_CACHE_COUNT=-1
+ROLE_CACHE_AT=-5
+_role_binding_cache_fresh() {
+  local f count=0
+  [ -n "${ROLE_BINDING_CURRENT:-}" ] && [ "$ROLE_BINDING_CURRENT" != ABSENT ] || return 1
+  [ $((SECONDS - ROLE_CACHE_AT)) -lt 5 ] || return 1
+  [ -f "$ROLE_CACHE_MARKER" ] || return 1
+  [ -f "${_AGMSG_ROLE_SESSION_PATH:-}" ] && [ -r "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  [ "$ROLE_CACHE_MARKER" -nt "$_AGMSG_ROLE_SESSION_PATH" ] || return 1
+  for f in "$TEAMS_DIR"/*/config.json; do
+    [ -f "$f" ] || continue
+    count=$((count + 1))
+    [ -r "$f" ] && [ "$ROLE_CACHE_MARKER" -nt "$f" ] || return 1
+  done
+  [ "$count" = "$ROLE_CACHE_COUNT" ]
+}
+_role_binding_read() {
+  local f count=0
+  if [ "${1:-}" != force ] && _role_binding_cache_fresh; then return 0; fi
+  # markerは実読取前に更新する。読取中の更新は次回も再読取になる。
+  : > "$ROLE_CACHE_MARKER" 2>/dev/null || true
+  for f in "$TEAMS_DIR"/*/config.json; do
+    [ -f "$f" ] || continue
+    count=$((count + 1))
+  done
+  if ! _role_binding_read_uncached; then
+    rm -f "$ROLE_CACHE_MARKER" 2>/dev/null || true
+    return 1
+  fi
+  ROLE_CACHE_COUNT=$count
+  ROLE_CACHE_AT=$SECONDS
+  return 0
+}
+
+# argvを採取したdescriptorと直前読取が一致する場合だけspawnを許す。
+# 不一致やUNKNOWNでは既存metadataを変更せず、次tickで再評価する。
+_role_binding_spawn_unchanged() {
+  local candidate="$1"
+  _role_binding_read force || return 1
+  [ "$ROLE_BINDING_CURRENT" != ABSENT ] && [ "$ROLE_BINDING_CURRENT" = "$candidate" ]
+}
+
+_windows_role_changed_once() {
+  _role_binding_read "${1:-}" || return 1
+  [ "$ROLE_BINDING_CURRENT" != "$ROLE_BINDING_SNAPSHOT" ]
+}
+
+_windows_role_change_confirmed() {
+  local first
+  _windows_role_changed_once || return 1
+  _windows_role_changed_once force || return 1
+  first="$ROLE_BINDING_CURRENT"
+  sleep 0.3
+  _windows_role_changed_once force || return 1
+  [ "$ROLE_BINDING_CURRENT" = "$first" ]
+}
+
+_windows_retire_published_bridge() {
+  local pid="$1" start="$2" want_url="$3" want_thread="$4" state
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in
+    ABSENT) return 0 ;;
+    "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$start" ] && return 0 ;;
+  esac
+  _windows_current_bridge_valid "$pid" "$want_url" "$want_thread" || return 1
+  [ "$lstart" = "$start" ] || return 1
+  retire_recorded_bridge || return 1
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in
+    ABSENT) return 0 ;;
+    "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$start" ] && return 0 ;;
+  esac
+  return 1
+}
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -728,7 +958,11 @@ retire_recorded_bridge() {
   local lproj lpairs lhost lpid lstart lstartsrc
   [ -f "$pidfile" ] || return 0
   IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-  _agmsg_pid_valid "$old_pid" || return 0
+  if ! _agmsg_is_windows; then
+    _agmsg_pid_valid "$old_pid" || return 0
+  else
+    case "$old_pid" in ''|*[!0-9]*) return 0 ;; esac
+  fi
   lease="$RUN_DIR/codex-bridge-lease.$old_pid"
   [ -f "$lease" ] || return 0
   _read_lease "$lease" || return 0
@@ -737,17 +971,41 @@ retire_recorded_bridge() {
   [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || return 0
   token="$(_start_token "$old_pid" 2>/dev/null || true)"
   [ -n "$token" ] && [ "$token" = "$lstartsrc	$lstart" ] || return 0
+  if _agmsg_is_windows; then
+    _windows_begin_retire "$old_pid" "$token" || return 1
+    _windows_wait_exit_proof || return 1
+    return 0
+  fi
   kill "$old_pid" 2>/dev/null || true
 }
 
+# #1280: this seat's request names a DIFFERENT role than this child's (an actas
+# switched the seat to another role, or published an empty-pair tombstone for an
+# ambiguous claim). The request file is this SEAT's own (REQUEST_FILE is keyed by
+# SEAT_KEY, written only by this seat's SessionStart / actas / resume), so unlike
+# a project-wide file it cannot be changed by another seat's activity: a pair
+# that is not ours means this seat no longer serves our role, and the child
+# retires -- the dispatcher starts the child for the newly selected pair.
+# Only a well-formed request of this launcher's type counts. A missing,
+# unreadable or malformed file (a transient read, a request being replaced)
+# proves nothing and never retires: the writers publish by atomic rename, so a
+# complete read is either the old or the new request, never a torn one.
+_seat_request_selects_other_pair() {
+  local line=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS= read -r line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$line" || return 1
+  [ "${AGMSG_CODEX_REQUEST_TYPE:-}" = "$TYPE" ] || return 1
+  [ "${AGMSG_CODEX_REQUEST_TEAM:-}$TAB${AGMSG_CODEX_REQUEST_NAME:-}" != "$ROLE_PAIR" ]
+}
+
+ROLE_BINDING_SNAPSHOT=""
+_role_binding_read && ROLE_BINDING_SNAPSHOT="$ROLE_BINDING_CURRENT"
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
-  # Resolved once per iteration and threaded through the fingerprint, so a tick
-  # runs identities.sh once rather than twice — and usually not at all, because
-  # the resolve is served from the mtime-guarded cache.
-  refresh_identity_cache
-  current_ids="$IDENTITY_CACHE"
-  [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+  # 不確定な登録/record読取を空の登録とみなさない。
+  if ! _role_binding_read; then poll_sleep; continue; fi
+  if [ "$ROLE_BINDING_CURRENT" = ABSENT ]; then current_ids=""; else current_ids="$ROLE_PAIR"; fi
   # This child is scoped to one role (`resolve_identity` filters on ROLE_PAIR),
   # so an empty list means the role itself is gone. Nothing upstream retires a
   # child: losing the registration only sends it back through the re-exec, whose
@@ -758,7 +1016,10 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -z "$current_ids" ]; then
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
-      retire_recorded_bridge
+      if ! retire_recorded_bridge; then
+        sleep 0.3
+        continue
+      fi
       exit 0
     fi
     sleep 0.3
@@ -766,62 +1027,37 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   fi
   deregistered_ticks=0
 
-  # Check the seat request before refreshing role-record safety state. Actas
-  # publishes role changes here; retire this child immediately when its pair is
-  # no longer the selected one.
-  request_pair=""
-  _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
-  if [ -f "$REQUEST_FILE" ]; then
-    _request_line=""
-    IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null || true
-    _agmsg_codex_request_parse "$_request_line" || true
-    _rtype="${AGMSG_CODEX_REQUEST_TYPE:-}"; _rthread="${AGMSG_CODEX_REQUEST_THREAD:-}"
-    _rapp="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"; _rteam="${AGMSG_CODEX_REQUEST_TEAM:-}"
-    _rname="${AGMSG_CODEX_REQUEST_NAME:-}"
-    if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
-      request_pair="$_rteam$TAB$_rname"
+  # #1280: the seat now selects another role. Retire this role's bridge and
+  # exit; a failed retire (Windows exit proof pending) is retried next tick
+  # rather than abandoning a bridge that may still be alive.
+  if _seat_request_selects_other_pair; then
+    if ! retire_recorded_bridge; then
+      sleep 0.3
+      continue
     fi
-  fi
-  if [ "$request_pair" != "$ROLE_PAIR" ]; then
-    retire_recorded_bridge
     exit 0
   fi
 
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  build_safety_state "$current_ids"
-  if [ "$SAFETY_STATE" != "$safety_state" ]; then
-    retire_recorded_bridge
+  if [ "$ROLE_BINDING_CURRENT" != "$ROLE_BINDING_SNAPSHOT" ]; then
+    # 完成lease公開後の通常loopでも、同じ変更を2回確認する。
+    if ! _windows_role_change_confirmed; then poll_sleep; continue; fi
+    if ! retire_recorded_bridge; then
+      poll_sleep
+      continue
+    fi
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
-  # Resolve the thread this iteration would launch against. A request file may
-  # outlive the app-server that wrote it: SessionStart deliberately exits before
-  # rewriting the request when no recorded role belongs to the new thread, and
-  # actas records the role later without rewriting this project-wide file. The
-  # launcher's APP_SERVER argument, however, comes from the live app-server that
-  # owns this launcher generation, so it is the sole endpoint authority. Keep the
-  # request's thread hint for older Codex versions, but never let its stale URL
-  # override the live launcher's endpoint.
-  thread_id="loaded"
+  # spawn引数とsnapshotは成功した同一record読取から作る。
+  binding_candidate="$ROLE_BINDING_CURRENT"
+  rec_thread="$ROLE_BINDING_SESSION"
+  rec_project_phys="$ROLE_BINDING_PROJECT"
+  rec_home="$ROLE_BINDING_HOME"
+  rec_owner="$ROLE_BINDING_OWNER"
   req_app_server="$APP_SERVER"
-  if [ -f "$REQUEST_FILE" ]; then
-    [ -n "${_rthread:-}" ] && thread_id="$_rthread"
-  fi
-
-  # A child launcher is role-scoped. The seat request supplies the pair and
-  # thread selected by SessionStart; the role-session record is re-read and
-  # must agree before this child can bind a bridge.
-  IFS="$TAB" read -r team name <<EOF
-$ids
-EOF
-  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-  rec_thread="$AGMSG_ROLE_SESSION_UUID"
-  rec_project="$AGMSG_ROLE_SESSION_PROJECT"
-  rec_owner="$AGMSG_ROLE_SESSION_OWNER"
-  rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
-  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
-    || [ "$rec_thread" != "${_rthread:-}" ]; then
+  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] || ! agmsg_codex_role_home_matches "$rec_home"; then
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That
     # wait is open-ended, so it has to be the cheapest path in the file.
@@ -829,6 +1065,38 @@ EOF
     continue
   fi
   thread_id="$rec_thread"
+
+  # Recover a retire operation before consulting the pidfile. cleanupMeta() may
+  # have removed that pidfile already; the independent fence remains authoritative.
+  windows_exit_proven=0
+  retired_request_pid=""
+  if _agmsg_is_windows && [ -f "$retire_fence" ]; then
+    if ! _read_stop_record "$retire_fence" \
+      || [ "$rproject" != "$PROJECT_HASH" ] || [ "$rpairs" != "$BRIDGE_PAIRS_HASH" ]; then
+      poll_sleep
+      continue
+    fi
+    retired_request_pid="$rpid"
+    if ! _windows_wait_exit_proof; then
+      poll_sleep
+      continue
+    fi
+    windows_exit_proven=1
+    current_pid=""
+    IFS= read -r current_pid < "$pidfile" 2>/dev/null || true
+    if [ -n "$current_pid" ] && [ "$current_pid" != "$retired_request_pid" ]; then
+      if _windows_current_bridge_valid "$current_pid" "$req_app_server" "$thread_id"; then
+        rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
+          "$RUN_DIR/codex-bridge-stop.$retired_request_pid.ack"
+        poll_sleep
+        continue
+      fi
+      # A different live-but-unverified pid may be a bridge spawned just before
+      # a launcher crash. Never start beside it.
+      state="$(_windows_process_state "$current_pid" 2>/dev/null || true)"
+      case "$state" in "LIVE$TAB"*) poll_sleep; continue ;; esac
+    fi
+  fi
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
@@ -900,17 +1168,30 @@ EOF
   # at the top of the loop. A lease-less bridge that never dies simply lingers
   # (orphan survival is acceptable; a wrong-kill or a double-start is not).
   if [ -n "$need_kill" ]; then
+    if _agmsg_is_windows; then
+      if ! _windows_begin_retire "$need_kill" "$need_kill_token" \
+        || ! _windows_wait_exit_proof; then
+        poll_sleep
+        continue
+      fi
+      windows_exit_proven=1
+      retired_request_pid="$need_kill"
+    else
     _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
     if [ -z "$need_kill_token" ] || [ -z "$_nk_now" ] || [ "$_nk_now" = "$need_kill_token" ]; then
       poll_sleep
       continue
     fi
+    fi
   fi
-  # Committed to spawning now: clear the stale records immediately before writing
-  # the new ones, so no gate can bail out between the wipe and the rewrite.
+  if ! _role_binding_spawn_unchanged "$binding_candidate"; then
+    poll_sleep
+    continue
+  fi
+  # 再確認後もargvを採取した世代を保持する。直後の更新は次tickで検出する。
+  ROLE_BINDING_SNAPSHOT="$binding_candidate"
   rm -f "$pidfile" "$appserver_file" "$thread_file"
   bridge_owner_args=(--owner "$rec_owner")
-
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --workspace-root "$STORAGE_DIR" \
@@ -924,32 +1205,20 @@ EOF
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
-  printf '%s\n' "$launched_pid" > "$pidfile"
+  # Git Bash $! is an MSYS pid, while codex-bridge.js and its lease use a
+  # Windows pid. Never publish $! as a native pid on the default Windows path.
+  # The Node bridge publishes its own native pidfile before its complete lease.
+  if ! _agmsg_is_windows || [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    printf '%s\n' "$launched_pid" > "$pidfile"
+  fi
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
-    # A custom bridge is foregrounded by the test harness, so a plain wait
-    # would hide a role change until the bridge exits on its own. Poll the
-    # request while it runs and retire this exact leased bridge when the seat
-    # selects another pair; the normal outer loop handles the same transition
-    # for the default bridge, which is not waited on here.
+    # 同じroleのbinding変更に加え、このseat自身のrequestが別pairを選んだ場合（#1280）だけを退役理由にする。不正・欠落requestは退役理由にしない。
+    # The seat selecting another role (#1280) retires this role's bridge too.
     while _agmsg_pid_alive_local "$launched_pid"; do
-      _bridge_request_pair=""
-      if [ -f "$REQUEST_FILE" ]; then
-        _bridge_request_line=""
-        IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null || true
-        _agmsg_codex_request_parse "$_bridge_request_line" || true
-        _bridge_req_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
-        _bridge_req_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
-        _bridge_req_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
-        _bridge_req_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
-        _bridge_req_name="${AGMSG_CODEX_REQUEST_NAME:-}"
-        if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
-          _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
-        fi
+      if _windows_role_change_confirmed || _seat_request_selects_other_pair; then
+        retire_recorded_bridge || true
       fi
-      if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
-        retire_recorded_bridge
-      fi
-      sleep 0.2
+      poll_sleep
     done
     wait "$launched_pid" 2>/dev/null || true
     recorded_pid=""
@@ -959,6 +1228,85 @@ EOF
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
+  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    # Keep this child lock while the native Node publishes its pidfile and
+    # lease. A missing/partial lease, a changed role, or an uncertain process
+    # state must never send this launcher back to the spawn path.
+    published=0; publish_tick=0; published_start=""
+    while [ "$publish_tick" -lt 300 ]; do
+      published_pid=""
+      if [ -f "$pidfile" ]; then
+        IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
+      fi
+      if [ -n "$published_pid" ] && \
+        _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
+        published=1
+        published_start="$lstart"
+        printf "native-publication accepted pid=%s project=%s pairs=%s\n" "$published_pid" "$lproj" "$lpairs" >> "$log"
+        break
+      fi
+      sleep 0.1
+      publish_tick=$((publish_tick + 1))
+    done
+    if [ "$published" = 1 ]; then
+      if _windows_role_change_confirmed; then
+        while _agmsg_pid_alive_local "$PARENT_PID"; do
+          if _windows_retire_published_bridge "$published_pid" "$published_start" \
+            "$req_app_server" "$thread_id"; then
+            exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
+          fi
+          sleep 1
+        done
+        exit 1
+      fi
+    else
+      # A local child can outlive a failed status probe, and may publish late.
+      # Park with the child lock held instead of creating a second native Node.
+      # On role removal -- or when this seat selects another role (#1280) --
+      # retire only a later, fully verified native lease. Both signals are
+      # re-observed every tick, so a switch seen while the lease is still
+      # unpublished is acted on as soon as it can be proved, never by
+      # signaling the unproven pid.
+      while _agmsg_pid_alive_local "$PARENT_PID"; do
+        if _windows_role_change_confirmed || _seat_request_selects_other_pair; then
+          published_pid=""
+          if [ -f "$pidfile" ]; then
+            IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
+          fi
+          if [ -n "$published_pid" ] && \
+            _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
+            published_start="$lstart"
+            if _windows_retire_published_bridge "$published_pid" "$published_start" \
+              "$req_app_server" "$thread_id"; then
+              exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
+            fi
+          fi
+        fi
+        sleep 1
+      done
+      exit 1
+    fi
+  fi
+  verified_pid="$launched_pid"
+  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ] && [ "$published" = 1 ]; then
+    verified_pid="$published_pid"
+  fi
+  if _agmsg_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
+    verified=0
+    _verify_tick=0
+    while [ "$_verify_tick" -lt "$_REAP_WAIT_TICKS" ]; do
+      if _windows_current_bridge_valid "$verified_pid" "$req_app_server" "$thread_id"; then
+        verified=1
+        break
+      fi
+      sleep 0.1
+      _verify_tick=$((_verify_tick + 1))
+    done
+    if [ "$verified" = 1 ]; then
+      rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
+        "$RUN_DIR/codex-bridge-stop.$retired_request_pid.ack"
+    fi
+  fi
   poll_reset
   sleep 1
 done

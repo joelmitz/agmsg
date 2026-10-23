@@ -52,12 +52,25 @@ make_rollout() {
   agmsg_transcript_exists "deep-uuid" "/anything"   # project is not part of the lookup
 }
 
+@test "codex transcript_exists: AGMSG_CODEX_HOME selects the isolated sessions tree" {
+  local isolated="$TEST_SKILL_DIR/isolated-codex"
+  local old_sessions="$CODEX_SESSIONS"
+  export CODEX_SESSIONS="$isolated/sessions"
+  make_rollout "isolated-uuid" "/proj"
+  export CODEX_SESSIONS="$old_sessions"
+  source "$TYPES/codex/_transcript-exists.sh"
+  AGMSG_CODEX_HOME="$isolated" agmsg_transcript_exists "isolated-uuid" "/proj"
+  ! agmsg_transcript_exists "isolated-uuid" "/proj"
+}
+
 @test "codex transcript_exists: empty uuid / unset HOME are not found" {
   # shellcheck disable=SC1090
   source "$TYPES/codex/_transcript-exists.sh"
   make_rollout "abc-uuid" "/proj"
   refute agmsg_transcript_exists "" "/proj"
-  HOME="" run agmsg_transcript_exists "abc-uuid" "/proj"
+  # Fork: the lookup honors CODEX_HOME (setup exports it), so "no profile at
+  # all" means HOME and CODEX_HOME both empty.
+  HOME="" CODEX_HOME="" run agmsg_transcript_exists "abc-uuid" "/proj"
   [ "$status" -ne 0 ]
 }
 
@@ -159,6 +172,27 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
+# Fork: AGMSG_CODEX_HOME (the opt-in isolated profile) and #1653's per-thread
+# record work together. The hook, run in the TUI's environment, publishes the
+# effective home; a tool shell that carries neither variable then records it.
+@test "codex record (fork): the SessionStart hook publishes the AGMSG_CODEX_HOME profile and a bare tool shell records it" {
+  local proj iso thread=66666666-7777-4888-8999-aaaaaaaaaaaa expected_home
+  proj="$(mktemp -d)"
+  iso="$TEST_SKILL_DIR/isolated profile"
+  mkdir -p "$iso" "$HOME/.codex"
+  bash "$SCRIPTS/join.sh" team alice codex "$proj" >/dev/null
+  AGMSG_CODEX_HOME="$iso" CODEX_THREAD_ID="$thread" \
+    bash "$SCRIPTS/session-start.sh" codex "$proj" <<< "{\"session_id\":\"$thread\"}" >/dev/null 2>&1 || true
+  [ -f "$RUN_DIR/codex-thread-home.$thread" ]
+  env -u CODEX_HOME -u AGMSG_CODEX_HOME CODEX_THREAD_ID="$thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  expected_home="$(agmsg_normalize_project_path "$(cd "$iso" && pwd -P)")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
 @test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {
   local proj invalid_home
   proj="$(mktemp -d)"
@@ -170,11 +204,16 @@ recorded_uuid() {
     [ "$(recorded_uuid team alice)" = still-recorded ]
     [ -z "$(agmsg_role_session_get team alice codex_home)" ]
   done
+  # fork: rollout discovery is scoped to the effective Codex home
+  # (agmsg_codex_sessions_dir), so a rollout under the default home is not
+  # found while CODEX_HOME points at a missing directory. Upstream's version of
+  # this test expected the default-home rollout to be found; the isolated-home
+  # feature is why fork differs. The record is simply skipped (exit 0).
   make_rollout legacy-profile-thread "$proj"
   run env -u CODEX_THREAD_ID CODEX_HOME="$TEST_SKILL_DIR/missing" \
     bash "$TYPES/codex/codex-record-session.sh" team bob "$proj"
   [ "$status" -eq 0 ]
-  [ "$(recorded_uuid team bob)" = legacy-profile-thread ]
+  [ -z "$(recorded_uuid team bob)" ]
   [ -z "$(agmsg_role_session_get team bob codex_home)" ]
 }
 
@@ -197,6 +236,30 @@ recorded_uuid() {
   source "$SCRIPTS/lib/resolve-project.sh"
   expected_home="$(agmsg_normalize_project_path "$expected_home")"
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
+@test "codex record: isolated home may replace a seat recorded in the default home" {
+  local proj isolated
+  proj="$(mktemp -d)"
+  isolated="$TEST_SKILL_DIR/isolated-codex"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice old-thread "$proj" codex "" "$HOME/.codex"
+  local old_sessions="$CODEX_SESSIONS"
+  export CODEX_SESSIONS="$isolated/sessions"
+  make_rollout "isolated-thread" "$proj"
+  export CODEX_SESSIONS="$old_sessions"
+
+  AGMSG_CODEX_HOME="$isolated" env -u CODEX_THREAD_ID \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "isolated-thread" ]
+  # The recorder stores the canonical (physical) profile path. On macOS the
+  # temp dir sits behind a /var -> /private/var symlink, so compare against the
+  # canonical form rather than the spelling the test used.
+  source "$SKILL_DIR/scripts/lib/resolve-project.sh"
+  local expected
+  expected="$(cd "$isolated" && pwd -P)"
+  expected="$(agmsg_normalize_project_path "$expected")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected" ]
 }
 
 @test "codex record: records NOTHING when two recent rollouts share the cwd (ambiguous)" {

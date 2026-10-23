@@ -25,6 +25,7 @@ setup() {
   export FAKE_CODEX="$TEST_PROJECT/real-codex"
   cat > "$FAKE_CODEX" <<'EOF'
 #!/usr/bin/env bash
+[ -n "${CODEX_HOME_LOG:-}" ] && printf '%s\t%s\n' "${1:-}" "${CODEX_HOME:-}" >> "$CODEX_HOME_LOG"
 case "${1:-}" in
   --version)
     echo "codex-cli ${FAKE_CODEX_VERSION:-0.142.2}"
@@ -37,6 +38,11 @@ case "${1:-}" in
     if [ "${FAKE_CODEX_MODE:-listen}" = "broken" ]; then
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
+    fi
+    if [ -n "${MONITOR_ENV_LOG:-}" ]; then
+      printf '%s\t%s\n' \
+        "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" \
+        "${AGMSG_CODEX_SEAT_KEY:-}" > "$MONITOR_ENV_LOG"
     fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
@@ -201,6 +207,24 @@ teardown() {
 
 # --- #1254: one app-server per seat, never reused ---
 
+@test "codex-monitor: app-server inherits the launcher contract for SessionStart" {
+  local monitor_env_log="$TEST_PROJECT/monitor-env.log"
+
+  run env -u AGMSG_CODEX_BRIDGE_LAUNCHER -u AGMSG_CODEX_SEAT_KEY \
+    MONITOR_ENV_LOG="$monitor_env_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" \
+      --project "$TEST_PROJECT" --codex-command codex --
+
+  [ "$status" -eq 0 ]
+  [ -f "$monitor_env_log" ]
+  local launcher_flag seat_key
+  IFS=$'\t' read -r launcher_flag seat_key < "$monitor_env_log"
+  [ "$launcher_flag" = "1" ]
+  [ -n "$seat_key" ]
+}
+
 @test "codex-monitor: a second launch in the same project never reuses the first launch's server (#1254)" {
   skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
 
@@ -243,6 +267,81 @@ teardown() {
   # The first seat's own server is untouched by the second launch.
   kill -0 "$first_pid"
   kill -0 "$second_pid"
+}
+
+@test "codex-monitor: isolates app-server and remote TUI in AGMSG_CODEX_HOME" {
+  skip_on_windows "uses POSIX absolute paths and process replacement"
+  local isolated="$TEST_PROJECT/codex-home"
+  local home_log="$TEST_PROJECT/codex-home.log"
+
+  run env AGMSG_CODEX_HOME="$isolated" CODEX_HOME_LOG="$home_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  [ -d "$isolated" ]
+  grep -q $'^app-server\t'"$isolated"'$' "$home_log"
+  grep -q $'^--remote\t'"$isolated"'$' "$home_log"
+  # #1254: there is no codex-app-server.<project-hash>.home file any more --
+  # nothing is reused, so nothing has to be recorded to decide whether reuse is
+  # safe. The isolation itself is what this asserts, and it is observable in
+  # what the app-server and the --remote TUI were actually launched with above.
+}
+
+@test "codex-monitor: a second seat under a different AGMSG_CODEX_HOME gets its own server" {
+  skip_on_windows "uses POSIX absolute paths and process replacement"
+  # Before #1254 this asserted that a DIFFERENT CODEX_HOME forced the shared,
+  # project-keyed app-server to be torn down and rebuilt. There is no sharing
+  # left to arbitrate: every launch starts its own server, so the property that
+  # mattered (a seat never talks to a server belonging to another state root)
+  # now holds structurally. What still needs asserting is that the fork-local
+  # AGMSG_CODEX_HOME isolation survives that change -- the second seat's own
+  # server must be launched under the isolated root, not the default one.
+  local first_log="$TEST_PROJECT/first-home.log"
+  local second_log="$TEST_PROJECT/second-home.log"
+  local isolated="$TEST_PROJECT/isolated-home"
+
+  run env CODEX_HOME_LOG="$first_log" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  local first_rec; first_rec="$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.record)"
+  local first_pid; first_pid="$(awk -F= '/^pid=/{print $2; exit}' "$first_rec")"
+  [ -n "$first_pid" ]
+  grep -q $'^app-server\t'"$HOME/.codex"'$' "$first_log"
+
+  run env CODEX_HOME_LOG="$second_log" AGMSG_CODEX_HOME="$isolated" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  # Its own record, not the first one rewritten, and its own live server.
+  local count; count="$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.record | grep -c .)"
+  [ "$count" -eq 2 ]
+  local second_rec second_pid
+  for second_rec in "$TEST_SKILL_DIR"/run/codex-app-server.*.record; do
+    [ "$second_rec" = "$first_rec" ] && continue
+    second_pid="$(awk -F= '/^pid=/{print $2; exit}' "$second_rec")"
+  done
+  [ -n "$second_pid" ]
+  [ "$second_pid" != "$first_pid" ]
+  # The second seat's server runs under the isolated root; the first is untouched.
+  grep -q $'^app-server\t'"$isolated"'$' "$second_log"
+  kill -0 "$first_pid"
+  kill -0 "$second_pid"
+}
+
+@test "codex-monitor: rejects a relative AGMSG_CODEX_HOME before launch" {
+  run env AGMSG_CODEX_HOME="relative/codex-home" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -ne 0 ]
+  grep -qF 'must be an absolute path' <<<"$output"
+  [ ! -e "$TEST_PROJECT/relative" ]
+}
+
+@test "codex-monitor: rejects filesystem root as AGMSG_CODEX_HOME" {
+  run env AGMSG_CODEX_HOME="/" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be /"* ]]
 }
 
 # --- port discovery vs colorized banner (codex 0.144+) ---

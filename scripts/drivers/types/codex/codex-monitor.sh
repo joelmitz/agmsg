@@ -31,6 +31,10 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # _agmsg_codex_seat_key_new / _agmsg_codex_seat_record_write and friends.
 # shellcheck source=./_seat-key.sh
 source "$SCRIPT_DIR/_seat-key.sh"
+# agmsg_codex_effective_home: an opt-in Codex state root (fork-local feature;
+# upstream has no CODEX_HOME support). Kept across the #1254 realignment.
+# shellcheck source=./_home.sh
+source "$SCRIPT_DIR/_home.sh"
 # agmsg_canonical_path, for matching a resume thread's project against role-
 # session records in the SAME canonical form they were recorded in (#1401).
 # shellcheck source=../../../lib/resolve-project.sh
@@ -57,6 +61,9 @@ Usage: codex-monitor.sh [--project <path>] [--codex-command <codex|resume>] [-- 
 Starts this seat's own agmsg-managed Codex app-server on a loopback ws:// port,
 enables agmsg Codex bridge delivery for this project, then execs:
   codex resume --remote ws://127.0.0.1:<port>
+
+Set AGMSG_CODEX_HOME to an absolute dedicated state directory to isolate the
+monitor app-server from Codex Desktop's default ~/.codex state.
 
 (--socket-path is accepted for compatibility but ignored: codex 0.141+ requires
 a ws:// transport for --remote. See #170.)
@@ -102,6 +109,11 @@ case "$CODEX_COMMAND" in
 esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
+
+# An opt-in state root keeps agmsg's app-server, sessions, and remote-control
+# registration separate from Codex Desktop's default ~/.codex state. Export the
+# resolved value to the app-server, bridge launcher, hooks, and remote TUI.
+agmsg_codex_apply_home codex-monitor || exit 1
 
 # Direct monitor-wrapper users follow the same intent rule as shim users.
 # This path must run before creating the seat or any long-lived process.
@@ -198,14 +210,20 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # built to outlive its caller and is stopped only by codex-bridge-launcher.sh
 # once this seat's TUI exits (see _seat-key.sh's stop function).
 #
-# AGMSG_CODEX_SEAT_KEY is set on the app-server's OWN command, not just
-# exported below: its children (the shell-tool-command processes Codex runs
-# under --remote) inherit THIS process's environment directly, which is the
-# whole point -- no ancestry walk is needed anywhere downstream to find a
+# These values are set on the app-server's OWN command, not just exported
+# below. AGMSG_CODEX_BRIDGE_LAUNCHER=1: SessionStart hooks run in the
+# already-started app-server's environment, so a later export in this parent
+# shell cannot switch them to the request-only launcher path. The endpoint
+# itself remains in the seat record because its dynamic port is not known
+# until after this process starts.
+#
+# AGMSG_CODEX_SEAT_KEY: its children (the shell-tool-command processes Codex
+# runs under --remote) inherit THIS process's environment directly, which is
+# the whole point -- no ancestry walk is needed anywhere downstream to find a
 # seat's own server (design review, replacing an earlier ancestry-walk design).
 #
-# Also passed as a `shell_environment_policy.set` override: under a
-# `shell_environment_policy.inherit` other than the default "all" (e.g.
+# The seat key is also passed as a `shell_environment_policy.set` override:
+# under a `shell_environment_policy.inherit` other than the default "all" (e.g.
 # "core" or "none"), Codex 0.158+ no longer lets tool-command children see a
 # var the policy excludes, so the plain env var above stops reaching them.
 # `set` is applied after `inherit`/exclude, so this reaches the tool

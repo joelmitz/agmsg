@@ -63,6 +63,8 @@ export SKILL_DIR
 . "$SCRIPT_DIR/_seat-key.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_app-server.sh"
+# shellcheck source=_home.sh
+. "$SCRIPT_DIR/_home.sh"
 
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
 # <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
@@ -93,7 +95,8 @@ fi
 # by the session itself or passed by the bridge with the thread the app-server
 # confirmed, which is exactly how a seeded seat gets corrected after arming.
 if [ -z "$thread" ] && [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
-  exit 0
+  recorded_home="$(agmsg_role_session_get "$TEAM" "$AGENT" codex_home 2>/dev/null || true)"
+  agmsg_codex_role_home_matches "$recorded_home" && exit 0
 fi
 
 # Ask the app-server which threads it has loaded, and subtract the ones a role
@@ -173,15 +176,19 @@ fi
 # Codex runs tool commands in the app-server's shell, which does not carry it.
 # The SessionStart hook runs in the TUI's environment and published the profile
 # for this thread, so use that before falling back to $HOME/.codex.
+# Fork: an explicit variable is read through agmsg_codex_effective_home, so the
+# opt-in AGMSG_CODEX_HOME wins over CODEX_HOME (agmsg_codex_apply_home exports
+# both as the same directory on every fork launch path), and the fallback is
+# the effective home rather than a bare $HOME/.codex.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_profile.sh"
 codex_home=""
-if [ -n "${CODEX_HOME:-}" ]; then
-  codex_home="$(agmsg_codex_profile_from_env)" || codex_home=""
+if [ -n "${AGMSG_CODEX_HOME:-}${CODEX_HOME:-}" ]; then
+  codex_home="$(agmsg_codex_profile_canonical "$(agmsg_codex_effective_home)")" || codex_home=""
 elif [ -n "$thread" ]; then
   codex_home="$(agmsg_codex_thread_home_lookup "$SKILL_DIR/run" "$thread")" || codex_home=""
 fi
-[ -n "$codex_home" ] || codex_home="$(agmsg_codex_profile_from_env)" || codex_home=""
+[ -n "$codex_home" ] || codex_home="$(agmsg_codex_profile_canonical "$(agmsg_codex_effective_home)")" || codex_home=""
 
 if [ -z "$thread" ]; then
   # No app-server to ask, or it could not be reached -- a codex session outside
@@ -193,9 +200,9 @@ if [ -z "$thread" ]; then
   if [ -n "$codex_home" ]; then
     sessions_dir="$codex_home/sessions"
   else
-    sessions_dir="${HOME:-}/.codex/sessions"
+    sessions_dir="$(agmsg_codex_sessions_dir)"
   fi
-  if [ -n "${sessions_dir%/.codex/sessions}" ] && [ -d "$sessions_dir" ]; then
+  if [ -n "$sessions_dir" ] && [ -d "$sessions_dir" ]; then
     # Distinct thread ids whose session_meta cwd (canonicalized -- codex records
     # the physical cwd while agmsg may hold a symlinked path, #160) matches the
     # project, among the most recent rollouts. Exactly one => unambiguously ours.
@@ -258,9 +265,7 @@ agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "$rec
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish
 # the same seat request here so a resumed seat's dispatcher has an authority
-# record even when SessionStart did not run. A recovered app-server is required
-# for a non-empty pair; without it, publish an empty-pair tombstone to retire
-# any stale role selection and let a later hook retry with the endpoint.
+# record even when SessionStart did not run.
 if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_SEAT_KEY"; then
   request_file="$SKILL_DIR/run/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   request_server="$(_agmsg_codex_app_server_url "$PROJECT" 2>/dev/null || true)"
