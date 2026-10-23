@@ -2965,6 +2965,8 @@ _codex_home_gate_session_start() {   # <codex_home> <thread> -> prints request f
 }
 
 @test "codex home gate (fork): symlink and trailing slash match, another or a missing directory does not" {
+  # A missing directory spelled differently from the current one cannot be
+  # proved to be it, so it is refused; the identical spelling still matches.
   local real="$TEST_SKILL_DIR/gate-real" link="$TEST_SKILL_DIR/gate-link" other="$TEST_SKILL_DIR/gate-other"
   mkdir -p "$real" "$other"
   ln -s "$real" "$link"
@@ -2974,6 +2976,7 @@ _codex_home_gate_session_start() {   # <codex_home> <thread> -> prints request f
     agmsg_codex_role_home_matches "$2/" || exit 12
     agmsg_codex_role_home_matches "$3" && exit 13
     agmsg_codex_role_home_matches "$4" && exit 14
+    CODEX_HOME="$4" agmsg_codex_role_home_matches "$4/" || exit 15
     exit 0' _ "$SCRIPTS" "$real" "$other" "$TEST_SKILL_DIR/gate-missing"
   [ "$status" -eq 0 ]
 }

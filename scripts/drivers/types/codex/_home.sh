@@ -55,7 +55,8 @@ _agmsg_codex_home_canonical() {
 # directory this process runs in. Both sides are compared in the writers'
 # canonical form, so a symlinked CODEX_HOME or a Git Bash /c/... spelling of
 # the recorded C:/... directory still matches, while a different directory
-# never does. Either side that cannot be resolved is a mismatch (fail closed).
+# never does. An identical spelling (trailing / aside) matches as before;
+# otherwise either side that cannot be resolved is a mismatch (fail closed).
 # Legacy role records predate codex_home=. They belong to the default
 # $HOME/.codex state root, never to an opt-in isolated home.
 agmsg_codex_role_home_matches() {
@@ -66,6 +67,8 @@ agmsg_codex_role_home_matches() {
     recorded="$(agmsg_codex_default_home)"
     [ -n "$recorded" ] || return 1
   fi
+  # The same spelling is the same directory, whether or not it exists yet.
+  [ "${recorded%/}" = "${current%/}" ] && return 0
   current="$(_agmsg_codex_home_canonical "$current")" || return 1
   recorded="$(_agmsg_codex_home_canonical "$recorded")" || return 1
   [ "$recorded" = "$current" ]
