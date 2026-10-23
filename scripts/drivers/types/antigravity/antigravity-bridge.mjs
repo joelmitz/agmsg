@@ -8,6 +8,25 @@ import {read,atomic,proc,violations} from './bridge-read-guard.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const root=path.resolve(here,'../../../..');
 const transport=path.join(here,'inbox-transport.sh');
+const strongDetectHelper=path.join(root,'scripts','lib','print-strong-detect-env-keys.sh');
+const ENV_NAME=/^[A-Za-z_][A-Za-z0-9_]*$/;
+export function strongDetectEnvKeys() {
+  const r=spawnSync(strongDetectHelper,[],{encoding:'utf8'});
+  if(r.error) throw Error(`agy launch refused: cannot run the strong detect helper (${r.error.code||r.error.message})`);
+  if(r.status!==0) throw Error(`agy launch refused: strong detect helper exited nonzero (${r.status})`);
+  const keys=[];
+  for(const line of (r.stdout||'').split(/\r?\n/)) {
+    if(!line) continue;
+    if(!ENV_NAME.test(line)) throw Error('agy launch refused: strong detect helper returned an invalid environment variable name');
+    keys.push(line);
+  }
+  return keys;
+}
+export function childEnvWithoutStrongDetect() {
+  const env={...process.env};
+  for(const k of strongDetectEnvKeys()) delete env[k];
+  return env;
+}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const shutdownDelay=ms=>new Promise(r=>setTimeout(r,ms).unref());
 const encodePart=value=>[...Buffer.from(String(value))].map(byte=>/[A-Za-z0-9._-]/.test(String.fromCharCode(byte))?String.fromCharCode(byte):`%${byte.toString(16).toUpperCase().padStart(2,'0')}`).join('');
@@ -105,7 +124,7 @@ export class Bridge {
     if(this.o.model) args.push('--model',this.o.model);
     const executable=this.o.agy||'agy';
     // Do not inherit the fd3 capability value; connect only stdin, stdout, and stderr.
-    this.child=spawn(executable,args,{cwd:this.project,stdio:['pipe','pipe','pipe']});
+    this.child=spawn(executable,args,{cwd:this.project,stdio:['pipe','pipe','pipe'],env:childEnvWithoutStrongDetect()});
     this.childStart=null;try{this.childStart=proc(this.child.pid).start;}catch{}
     const child=this.child;
     child.stderr.on('data',d=>process.stderr.write(d));child.stdin.on('error',e=>this.fail(e));
@@ -125,7 +144,7 @@ export class Bridge {
       const delay=[1000,5000,15000][this.restarts++];await sleep(delay);
       if(!this.stopping) await this.launch().catch(e=>this.fail(e));
     });});
-    await this.input(`You are the agmsg headless worker. team=${this.team}, role=${this.role}, project=${this.project}. The bridge exclusively handles delivery and marking messages read. Do not call inbox.sh, check-inbox.sh, or bare $agmsg. To reply, use bash ${root}/scripts/send.sh ${this.team} ${this.role} <recipient> --stdin. Report operations that cannot be approved. Reply only with initialization complete.`,true);
+    await this.input(`You are the agmsg headless worker. team=${this.team}, role=${this.role}, project=${this.project}. The bridge exclusively handles delivery and marking messages read. Do not call inbox.sh, check-inbox.sh, or bare $agmsg. To reply, use bash ${root}/scripts/send.sh ${this.team} ${this.role} <recipient> --body -. Report operations that cannot be approved. Reply only with initialization complete.`,true);
   }
   async event(e) {
     if(this.failed||this.stopping)return;

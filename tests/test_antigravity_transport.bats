@@ -232,7 +232,10 @@ PY
     > "$run_dir/antigravity-reservation.legacy-missing.json"
   printf '{"type":null,"state":"%s/missing-invalid.json"}\n' "$run_dir" \
     > "$run_dir/antigravity-reservation.legacy-invalid.json"
-  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
+  # Like every real writer, name the violations sidecar: without it the guard
+  # below would have had nowhere legitimate to record its refusal.
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty","violations":"%s"}\n' \
+    "$$" "$state" "$run_dir/read-reservation.fixture__worker.json.violations" \
     > "$run_dir/read-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
@@ -247,6 +250,27 @@ PY
   run node "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" check "$run_dir/read-reservation.fixture__worker.json" 1 fixture worker
   [ "$status" -eq 13 ]
   refute grep -q 'unsupported' <<<"$output"
+}
+
+@test "the mjs read-guard: a reservation without an absolute violations path refuses and writes nothing" {
+  # The refusal path appends to reservation.violations (and locks it). A
+  # reservation that omits it, or names a relative path, once made the guard
+  # write `undefined` / `undefined.lock` into whatever directory it ran from.
+  local run_dir="$TEST_SKILL_DIR/run"
+  local state="$run_dir/antigravity-noviol.state.json"
+  local cwd="$BATS_TEST_TMPDIR/guard-cwd"
+  mkdir -p "$cwd"
+  printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
+  local body
+  for body in \
+    "{\"type\":\"antigravity\",\"pid\":$$,\"start\":\"x\",\"state\":\"$state\"}" \
+    "{\"type\":\"antigravity\",\"pid\":$$,\"start\":\"x\",\"state\":\"$state\",\"violations\":\"rel.violations\"}"; do
+    printf '%s\n' "$body" > "$run_dir/read-reservation.noviol.json"
+    run bash -c 'cd "$1" && node "$2" check "$3" 1 fixture worker </dev/null' _ \
+      "$cwd" "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" "$run_dir/read-reservation.noviol.json"
+    [ "$status" -eq 13 ]
+    [ -z "$(ls -A "$cwd")" ]
+  done
 }
 
 @test "the mjs read-guard: an unreadable process identity refuses with a reason" {
@@ -276,15 +300,33 @@ PY
 }
 
 @test "a plain inbox read cannot consume messages while a reservation exists" {
+  # Upstream asserts the SOFT outcome: its guard rides on the storage reader,
+  # so inbox.sh displays, fails to record read state, exits 0, and the message
+  # is shown again on the next plain read. This fork refuses HARDER and in two
+  # independent places, so that last step cannot be expressed here:
+  #   1. inbox.sh calls agmsg_bridge_guard_check before displaying anything.
+  #   2. the fork-local caller-type guard refuses any plain read of a dest whose
+  #      type is detect=explicit (antigravity is one), with or without a
+  #      reservation -- see tests/test_inbox_type_guard.bats.
+  # The property both designs exist to protect is the same and is what this
+  # test pins: a blocked read must not display OR consume the message. Non-
+  # consumption is therefore checked against storage, not by reading it back.
   bash "$SCRIPTS/join.sh" fixture sender antigravity "$PROJ" >/dev/null
   bash "$SCRIPTS/send.sh" fixture sender worker 'held message' >/dev/null
+  local before
+  before="$(bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; storage_list_unread fixture worker' _ "$SCRIPTS" | grep -c .)"
+  [ "$before" -eq 1 ]
+
   printf '{"type":"antigravity","state":"%s"}\n' "$TEST_SKILL_DIR/run/missing-state.json" \
     > "$TEST_SKILL_DIR/run/read-reservation.fixture__worker.json"
   run bash "$SCRIPTS/inbox.sh" fixture worker
-  [ "$status" -eq 0 ]
-  grep -q 'failed to record read state' <<<"$output"
-  run bash "$SCRIPTS/inbox.sh" fixture worker
-  grep -q 'held message' <<<"$output"
+  [ "$status" -ne 0 ]
+  refute grep -q 'held message' <<<"$output"
+
+  # Not displayed, and not consumed: still unread after the blocked read.
+  local after
+  after="$(bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; storage_list_unread fixture worker' _ "$SCRIPTS" | grep -c .)"
+  [ "$after" -eq "$before" ]
 }
 
 @test "a non-Antigravity storage load does not source the Antigravity guard" {

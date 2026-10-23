@@ -81,7 +81,7 @@ project; it refuses (fail-closed) if zero or several are registered. Pass them
 explicitly when the project has more than one.
 
 ```
-Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]
+Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]
 ```
 
 Anything after `--` is passed to the real `agy` process unchanged, for
@@ -90,7 +90,15 @@ example `agy-tui --team T --name R -- --dangerously-skip-permissions`.
 [Permissions for `agy`](#permissions-for-agy) for when it is worth reaching
 for.
 
-`status`, `stop`, `resume` and `reset-guard` work from a non-interactive shell
+The command name `ack` is retained for compatibility. In user-facing terms it
+means "mark the saved messages as read" and must be used only after confirming
+the same batch's `AGMSG_RECEIVED:` line and reply on the agy screen. `replay`
+resends the saved batch without marking it read.
+
+`agy-tui diagnose` reads the seat, supervisor, child, phase, guard, delivery and
+engine state in one read-only pass and never launches `agy`.
+
+`status`, `diagnose`, `stop`, `resume` and `reset-guard` work from a non-interactive shell
 and do not need `agy` on `PATH`. Only the default `run` action requires a TTY.
 
 ## Reading `status`
@@ -110,23 +118,22 @@ it is safe to paste into a bug report.
 ## Pause and resume
 
 When you type outside an injected receive turn, the supervisor immediately
-pauses delivery and prints this once to its own stderr:
+pauses delivery. While the child TUI is still drawing, the supervisor does not
+print onto the same terminal; `agy-tui status` is the live view (`paused` vs
+`running`). Notices raised while the TUI runs are printed to stderr after it
+exits and the terminal attributes are restored.
 
-```
-[agmsg] Automatic delivery is paused while a person is entering input. It will resume when the empty input prompt returns
-```
-
-This is deliberate, not a failure. Live delivery resumes only after the
-supervisor first observes a non-idle screen, then observes the supported empty
-idle prompt continuously with no pending terminal input or output. An unresolved
-batch, a durable attention condition, or the legacy manual-resume latch prevents
-automatic resume. An Esc that leaves the old idle screen visible therefore stays
-paused because no non-idle redraw was observed.
+This is deliberate, not a failure. Live delivery resumes after the supported
+empty idle prompt stays continuously ready, with no pending terminal input or
+output, for a short stability window. A non-idle redraw after typing still
+resets that window, but it is not required: if the screen is already idle, or
+returns to idle before a non-idle frame is observed, delivery resumes once the
+empty prompt stays stable. An unresolved batch, a durable attention condition,
+or the legacy manual-resume latch prevents automatic resume.
 
 An ordinary-input pause is written to the state file. After a supervisor restart
-it can clear only after the newly launched TUI renders the supported empty idle
-prompt; the live-session requirement to first observe non-idle does not apply to
-this restart path. An ordinary-input pause needs no command: finish the human
+it can clear once the newly launched TUI renders the supported empty idle
+prompt for the same stability window. An ordinary-input pause needs no command: finish the human
 turn and return to the empty input prompt, and the supervisor resumes delivery
 after the safety checks above pass. Durable attention and legacy
 `manualResumeRequired` states are never cleared automatically. Clear the input
@@ -161,7 +168,8 @@ reservation for an identity, running any of these:
 - `check-inbox.sh`
 
 trips agmsg's read guard. The guard records a `read-denied` violation, the
-supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**:
+supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**.
+After the TUI exits, stderr shows:
 
 ```
 detected a mark-read attempt through the regular inbox; stopping without ack
@@ -184,8 +192,8 @@ input pause from a durable pause or an unresolved batch.
 | Symptom | Cause | Recovery |
 |---|---|---|
 | `detected a mark-read attempt through the regular inbox` | a `read-denied` violation is latched | `agy-tui reset-guard …` |
-| A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | `agy-tui ack …` or `agy-tui replay …` |
-| `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the non-idle and stable-idle checks pass. |
+| A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | after checking the agy screen, mark the saved messages as read with `agy-tui ack …`, or resend them with `agy-tui replay …` |
+| `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the empty prompt stays stable. A live supervisor that is already stuck can also be cleared with `$agmsg resume` / `agy-tui resume …`. |
 | `paused` with a durable manual-resume latch | `manualResumeRequired`; automatic resume is deliberately disabled | Clear the input box, then run `$agmsg resume` or `agy-tui resume …`. |
 | A real `agy` permission dialog appears while a batch is in flight (`WAITING_FOR_RESULT`) | agy 1.2.5's permission screen is not a recognized shape; the keypress you send it marks the batch `uncertain`, sets durable attention, and **stops the supervisor** | This is the same stuck-batch case above, not an ordinary pause: run `agy-tui status`, then `agy-tui ack` or `agy-tui replay` with `--batch <id>` and `--confirm-id <message-id>` for each pending message, then start the supervisor again. An empty input prompt does not bring it back on its own. Prefer `--dangerously-skip-permissions` (status box at the top) to avoid triggering this at all. |
 | A Python traceback after running `replay` | the batch `replay` was pointed at was already cleared by an earlier `ack` | Nothing to run — the message was already handled. Confirm with `agy-tui status`; do not re-run `replay`. |
@@ -199,7 +207,8 @@ cannot take the identity's exclusivity lock. It never marks messages read.
 For a stuck batch, choose by **whether the model actually read the messages**:
 
 - The model produced the `AGMSG_RECEIVED:` line and answered → the work is done,
-  only the bookkeeping failed. Use `agy-tui ack`.
+  only marking the saved messages as read failed. Use `agy-tui ack` to mark
+  them read.
 - The model never saw them → use `agy-tui replay`, which re-injects the same
   batch.
 
@@ -211,7 +220,8 @@ id set before doing anything.
 > string. If an old `AGMSG_RECEIVED:<that batch id>` line is still visible — for
 > example because `agy` redrew earlier conversation history — the supervisor can
 > match it and acknowledge without the model reading anything. Clear the screen,
-> or use `ack` if the model demonstrably already answered.
+> or use `agy-tui ack` to mark the saved messages read if the model demonstrably
+> already answered.
 >
 > The permanent fix for this is listed under
 > [Known limitations](#known-limitations).
@@ -418,7 +428,9 @@ killing the terminal you are working in. Stop the supervisor explicitly first.
 - **A real permission dialog during a delivery is exactly the second case
   above.** Observed with agy 1.2.5: its permission screen is not one of the
   recognized signatures, so the keypress you send it stops the supervisor with
-  an uncertain batch — see the recovery table below.
+  an uncertain batch — see the recovery table below. This fork's supervisor
+  also accepts a `Run this command?` question and a `1. Yes` choice without the
+  `>` cursor; whether that covers agy 1.2.5's dialog has not been re-measured.
   `--dangerously-skip-permissions` (status box at the top) is the only known
   way to avoid triggering this at all, which is why it is the practical
   requirement for the experimental monitor seat today, not merely a
@@ -435,12 +447,12 @@ killing the terminal you are working in. Stop the supervisor explicitly first.
   the state file at the end of one run is still there at the start of the
   next; the new process comes up already paused for a reason that has nothing
   to do with anything it has done yet.
-- **The pause-resume hint can be overdrawn by the agy screen.** The line
-  telling you delivery is paused and how to resume is printed to the
-  supervisor's own stderr once, at the moment it becomes true; if `agy`
-  redraws its screen afterward, that redraw can cover the hint in whatever
-  terminal you are watching. Absence of the hint on screen is not evidence
-  delivery is not paused — check `agy-tui status` instead.
+- **Live pause/resume notices are not shown while the agy TUI runs.** To keep
+  them from corrupting the agy screen, the supervisor holds them and prints
+  them to stderr only after the TUI exits. The resume hint for a pause carried
+  over from the state file is printed once before `agy` starts. Absence of a
+  notice on screen is not evidence delivery is not paused — check
+  `agy-tui status` instead.
 - **`resume` fails with `could not uniquely identify a TUI supervisor to stop
   or resume` when no supervisor is running for that identity.** This is not a
   bug in the identity lookup: there is genuinely nothing to resume. Run

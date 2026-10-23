@@ -10,12 +10,17 @@ ROLE="${AGMSG_ANTIGRAVITY_ROLE:-}"
 AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
-  printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]'
+  printf '%s\n' 'Usage: agy-tui [status|diagnose|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]'
+  printf '%s\n' \
+    '  diagnose     read seat/supervisor/child/phase/guard/delivery/engine in one pass (read-only by default)' \
+    '  ack          mark saved messages read only after verifying the same batch was received and replied to on screen' \
+    '  replay       resend the unresolved saved batch to agy without marking messages read' \
+    '  reset-guard  clear a regular-inbox violation without marking messages read'
 }
 
 ACTION=""
 case "${1:-}" in
-  status|stop|resume|reset-guard|ack|replay) ACTION="$1"; shift ;;
+  status|diagnose|stop|resume|reset-guard|ack|replay) ACTION="$1"; shift ;;
 esac
 
 # PASSTHROUGH stays empty (and SAW_DASHDASH false) unless the caller writes a
@@ -31,6 +36,9 @@ esac
 PASSTHROUGH=()
 SAW_DASHDASH=0
 MONITOR_EXTRA=()
+# diagnose's own flags (fork): collected here so the strict parse above still
+# refuses anything else, and handed only to the read-only diagnose entry point.
+DIAG_EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="${2:?--project requires a value}"; shift 2 ;;
@@ -39,6 +47,8 @@ while [ $# -gt 0 ]; do
     --agy) AGY="${2:?--agy requires a value}"; shift 2 ;;
     --batch) MONITOR_EXTRA+=(--batch "${2:?--batch requires a value}"); shift 2 ;;
     --confirm-id) MONITOR_EXTRA+=(--confirm-id "${2:?--confirm-id requires a value}"); shift 2 ;;
+    --self-test) DIAG_EXTRA+=(--self-test); shift ;;
+    --status) DIAG_EXTRA+=(--status "${2:?--status requires a value}"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; SAW_DASHDASH=1; PASSTHROUGH=("$@"); break ;;
     *)
@@ -65,6 +75,18 @@ fi
 
 if [ -z "$TEAM" ] || [ -z "$ROLE" ]; then
   printf 'agy-tui: specify both --team and --name.\n' >&2
+  exit 1
+fi
+
+if [ "$ACTION" = diagnose ]; then
+  # Read-only, and it never launches agy -- so it must not refuse when the
+  # binary is absent. Dispatched before the monitor path for the same reason
+  # the shim lives outside the supervisor's argparse: state-changing actions
+  # and this one do not share a route.
+  exec bash "$HERE/antigravity-diagnose.sh" "$PROJECT" "$TEAM" "$ROLE" ${DIAG_EXTRA[@]:+"${DIAG_EXTRA[@]}"}
+fi
+if [ "${#DIAG_EXTRA[@]}" -gt 0 ]; then
+  printf 'agy-tui: --self-test and --status are diagnose options\n' >&2
   exit 1
 fi
 

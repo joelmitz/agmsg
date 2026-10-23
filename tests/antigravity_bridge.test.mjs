@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
 import {once} from 'node:events';
-import {forbiddenTool} from '../scripts/drivers/types/antigravity/antigravity-bridge.mjs';
+import {forbiddenTool,childEnvWithoutStrongDetect} from '../scripts/drivers/types/antigravity/antigravity-bridge.mjs';
+import { isolatedEnv } from './helpers/isolated-env.mjs';
 const repo=path.resolve(import.meta.dirname,'..');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // Under parallel runs each fixture spawns multiple bash/node child processes,
@@ -19,7 +20,7 @@ function fixture(driver='sqlite',mode='success',extra={}) {
   fs.cpSync(path.join(repo,'scripts'),path.join(install,'scripts'),{recursive:true});
   fs.copyFileSync(path.join(repo,'tests/fixtures/fake-antigravity.mjs'),path.join(dir,'fake.mjs'));
   const fake=path.join(dir,'agy');fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
-  const env={...process.env,AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra};
+  const env=isolatedEnv({AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra});
   const sh=(name,args=[])=>{const r=spawnSync('bash',[path.join(install,'scripts',name),...args],{env,encoding:'utf8'});assert.equal(r.status,0,r.stderr+r.stdout);return r.stdout;};
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
@@ -54,14 +55,17 @@ test('stream tool detection looks only at the command',()=>{
   assert.equal(forbiddenTool(base),false);
 });
 
-test('without a reservation, the positive control still lets inbox marking-read proceed',async()=>{
+test('type guard rejects standard inbox without reservation and preserves unread status',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
     await f.close();
     f.sh('send.sh',['fixture','sender','worker','positive control']);
-    const out=f.sh('inbox.sh',['fixture','worker']);
-    assert.match(out,/positive control/);
+    const r=spawnSync('bash',[path.join(f.install,'scripts/inbox.sh'),'fixture','worker'],{env:f.env,encoding:'utf8'});
+    assert.notEqual(r.status,0);
+    assert.doesNotMatch(r.stdout,/positive control/);
+    const unread=spawnSync('bash',['-c',`source '${f.install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`],{env:f.env,encoding:'utf8'});
+    assert.match(unread.stdout,/positive control/);
   } finally { await f.close(); }
 });
 
@@ -163,13 +167,17 @@ test('a SIGTERM exit of verify while idle is treated as a normal stop',async()=>
   const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal});
   try {
     await waitFor(()=>f.output().includes('ready'));
+    // Arm only now: verify also runs while the monitor is still initializing,
+    // and a TERM there is a different case (NEEDS_ATTENTION, no 'ready').
+    fs.writeFileSync(`${signal}.armed`,'');
+    await waitFor(()=>fs.existsSync(`${signal}.reached`));
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
     assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
-  } finally { fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
+  } finally { for(const s of ['armed','reached'])fs.rmSync(`${signal}.${s}`,{force:true}); await f.close(); }
 });
 
 test('an explicit ack recovery of a completed batch does not re-run the model',async()=>{
@@ -225,4 +233,117 @@ for(const mode of ['attack','append-failure','crash','broken'])test(`abnormal ${
     assert.equal(unread.length,mode==='attack'||mode==='append-failure'?2:1);
     assert.equal(f.state().batch.messages.length,1);
   }catch(e){e.message+='\n'+f.output();throw e;}finally{await f.close();}
+});
+
+const STRONG_MARKERS=['CLAUDE_CODE_SESSION_ID','CODEX_THREAD_ID','CODEX_SANDBOX','GROK_SESSION_ID'];
+
+test('childEnvWithoutStrongDetect does not mutate process.env',()=>{
+  process.env.CLAUDE_CODE_SESSION_ID='parent-keep';
+  process.env.GEMINI_API_KEY='keep-fallback';
+  const env=childEnvWithoutStrongDetect();
+  assert.equal(process.env.CLAUDE_CODE_SESSION_ID,'parent-keep');
+  assert.equal(process.env.GEMINI_API_KEY,'keep-fallback');
+  assert.equal(env.CLAUDE_CODE_SESSION_ID,undefined);
+  assert.equal(env.GEMINI_API_KEY,'keep-fallback');
+  delete process.env.CLAUDE_CODE_SESSION_ID;
+});
+
+test('initial bridge child spawn omits strong detect keys while preserving GEMINI_API_KEY',async()=>{
+  const dump=path.join(os.tmpdir(),`agmsg-agy-env-${process.pid}-${Date.now()}`);
+  const parentEnv={
+    CLAUDE_CODE_SESSION_ID:'parent-claude',
+    CODEX_THREAD_ID:'parent-codex',
+    CODEX_SANDBOX:'parent-sandbox',
+    GROK_SESSION_ID:'parent-grok',
+    GEMINI_API_KEY:'keep-fallback',
+    FAKE_AGY_DUMP_ENV:dump,
+  };
+  const f=fixture('sqlite','success',parentEnv);
+  try {
+    await waitFor(()=>fs.existsSync(dump)&&fs.readFileSync(dump,'utf8').trim());
+    const rec=JSON.parse(fs.readFileSync(dump,'utf8').trim().split('\n')[0]);
+    for(const k of STRONG_MARKERS) assert.equal(rec.env[k],undefined,k);
+    assert.equal(rec.env.GEMINI_API_KEY,'keep-fallback');
+    assert.equal(f.env.CLAUDE_CODE_SESSION_ID,'parent-claude');
+    assert.equal(f.env.GEMINI_API_KEY,'keep-fallback');
+  } finally { fs.rmSync(dump,{force:true}); await f.close(); }
+});
+
+test('restarted child spawn after bridge close still omits strong detect keys',async()=>{
+  const dump=path.join(os.tmpdir(),`agmsg-agy-env-restart-${process.pid}-${Date.now()}`);
+  const f=fixture('sqlite','exit-after-first',{
+    CLAUDE_CODE_SESSION_ID:'parent-claude',
+    CODEX_THREAD_ID:'parent-codex',
+    GEMINI_API_KEY:'keep-fallback',
+    FAKE_AGY_DUMP_ENV:dump,
+  });
+  try {
+    await waitFor(()=>{
+      if(!fs.existsSync(dump)) return false;
+      return fs.readFileSync(dump,'utf8').trim().split('\n').filter(Boolean).length>=2;
+    });
+    const rows=fs.readFileSync(dump,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+    assert.ok(rows.length>=2);
+    for(const rec of rows) {
+      assert.equal(rec.env.CLAUDE_CODE_SESSION_ID,undefined);
+      assert.equal(rec.env.CODEX_THREAD_ID,undefined);
+      assert.equal(rec.env.GEMINI_API_KEY,'keep-fallback');
+    }
+  } finally { fs.rmSync(dump,{force:true}); await f.close(); }
+});
+
+function helperInstall() {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-helper-'));
+  const install=path.join(dir,'install'),project=path.join(dir,'project');
+  fs.mkdirSync(install);fs.mkdirSync(project);
+  fs.cpSync(path.join(repo,'scripts'),path.join(install,'scripts'),{recursive:true});
+  fs.copyFileSync(path.join(repo,'tests/fixtures/fake-antigravity.mjs'),path.join(dir,'fake.mjs'));
+  const dump=path.join(dir,'child.env');
+  const fake=path.join(dir,'agy');
+  fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
+  const env=isolatedEnv({
+    AGMSG_STORAGE_DRIVER:'sqlite',
+    AGMSG_STORAGE_PATH:path.join(install,'db'),
+    AGMSG_CONFIG:path.join(dir,'config.json'),
+    FAKE_AGY_DUMP_ENV:dump,
+    CLAUDE_CODE_SESSION_ID:'parent-claude',
+    FIXTURE_INSTALL:install,
+  });
+  const sh=(name,args=[])=>{const r=spawnSync('bash',[path.join(install,'scripts',name),...args],{env,encoding:'utf8'});assert.equal(r.status,0,r.stderr+r.stdout);return r.stdout;};
+  sh('join.sh',['fixture','worker','antigravity',project]);
+  sh('join.sh',['fixture','sender','codex',project]);
+  sh('delivery.sh',['set','monitor','antigravity',project]);
+  return {dir,install,project,env,fake,dump,helper:path.join(install,'scripts/lib/print-strong-detect-env-keys.sh')};
+}
+
+async function assertAgyNotStarted(prep, mutateHelper) {
+  mutateHelper(prep.helper);
+  const child=spawn('bash',[path.join(prep.install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',prep.project,'--team','fixture','--name','worker','--agy',prep.fake,'--poll','100'],{env:prep.env,stdio:['pipe','pipe','pipe']});
+  let output='';child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
+  await Promise.race([once(child,'close'),delay(5000)]);
+  if(child.exitCode===null) child.kill('SIGKILL');
+  assert.notEqual(child.exitCode,0,output);
+  assert.equal(fs.existsSync(prep.dump),false,output);
+  assert.match(output,/agy launch refused/);
+}
+
+test('bridge does not launch agy if the helper exits non-zero',async()=>{
+  const prep=helperInstall();
+  try {
+    await assertAgyNotStarted(prep,h=>fs.writeFileSync(h,'#!/bin/sh\nexit 7\n',{mode:0o700}));
+  } finally { fs.rmSync(prep.dir,{recursive:true,force:true}); }
+});
+
+test('bridge does not launch agy if the helper is not executable',async()=>{
+  const prep=helperInstall();
+  try {
+    await assertAgyNotStarted(prep,h=>fs.chmodSync(h,0o644));
+  } finally { fs.rmSync(prep.dir,{recursive:true,force:true}); }
+});
+
+test('bridge does not launch agy if the helper returns an invalid env name',async()=>{
+  const prep=helperInstall();
+  try {
+    await assertAgyNotStarted(prep,h=>fs.writeFileSync(h,'#!/bin/sh\necho BAD-NAME\n',{mode:0o700}));
+  } finally { fs.rmSync(prep.dir,{recursive:true,force:true}); }
 });
