@@ -12,7 +12,22 @@
 load test_helper
 
 setup() { setup_test_env; }
-teardown() { teardown_test_env; }
+# Every orphan _start_orphan made is stopped here, before teardown_test_env, so a
+# failed assertion cannot leave one behind. Where the reaper reads `ps` argv only
+# (no /proc), an orphan that names TEST_SKILL_DIR only in its environment is
+# invisible to it -- and such an orphan still holds a descriptor bats waits on,
+# which hung a macOS shard to the 30-minute cap. The pids are ones this file
+# started itself, so they are signalled directly.
+teardown() {
+  local p
+  if [ -f "$BATS_TEST_TMPDIR/orphans.pids" ]; then
+    while IFS= read -r p; do
+      case "$p" in ''|0|1|*[!0-9]*) continue ;; esac
+      kill "$p" 2>/dev/null || true
+    done < "$BATS_TEST_TMPDIR/orphans.pids"
+  fi
+  teardown_test_env
+}
 
 # Spawn a detached holder whose argv carries $TEST_SKILL_DIR (as the launcher's does),
 # keeping run/ busy. Echoes its pid once it is actually writing run/.
@@ -145,6 +160,7 @@ _wait_for_holder_ready() {
 # caller nor bats waits on it.
 _start_orphan() {
   ( "$@" </dev/null >/dev/null 2>&1 3>&- & printf '%s\n' "$!" > "$TEST_SKILL_DIR/orphan.pid" )
+  cat "$TEST_SKILL_DIR/orphan.pid" >> "$BATS_TEST_TMPDIR/orphans.pids"
   cat "$TEST_SKILL_DIR/orphan.pid"
 }
 
@@ -152,7 +168,7 @@ _start_orphan() {
   # The leak this exists for: a detached `while :; do sleep 1; done` engine (or its
   # `sleep`, or a fake app-server's python) whose argv does not name the test dir and
   # which does not stop `rm -rf` on Linux. It inherits HOME=$TEST_SKILL_DIR/home.
-  [ -r /proc/self/environ ] || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
+  _dir_ref_use_proc || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
   local orphan; orphan="$(_start_orphan sleep 300)"
   kill -0 "$orphan"
   refute grep -qaF -- "$TEST_SKILL_DIR" "/proc/$orphan/cmdline"   # argv does not name it
@@ -166,7 +182,7 @@ _start_orphan() {
   # Another test's mktemp dir can share TEST_SKILL_DIR as a string prefix only if its
   # name is longer; the match is path-bounded (<dir> or <dir>/...), so that process
   # survives. env -i so nothing of THIS test's environment comes along.
-  [ -r /proc/self/environ ] || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
+  _dir_ref_use_proc || skip "environment scan needs /proc (ps-argv fallback elsewhere)"
   local sibling="${TEST_SKILL_DIR}x" other
   other="$(_start_orphan env -i PATH="$PATH" HOME="$sibling/home" AGMSG_PROBE="$sibling" sleep 300)"
   kill -0 "$other"
@@ -195,7 +211,7 @@ _rc() { "$@" >/dev/null 2>&1 && echo 0 || echo 1; }
 ARGV_PROBE=(env -i "PATH=$PATH" bash -c 'exec -a "$0" sleep 300')
 
 @test "path match rejects a foreign path that merely CONTAINS TEST_SKILL_DIR (/not-owned<dir>/...), in scan and re-check" {
-  [ -r /proc/self/environ ] || skip "environment scan needs /proc"
+  _dir_ref_use_proc || skip "environment scan needs /proc"
   local foreign="/not-owned$TEST_SKILL_DIR" envp argp listed r_env r_arg
   envp="$(_start_orphan env -i PATH="$PATH" HOME="$foreign/home" sleep 300)"
   argp="$(_start_orphan "${ARGV_PROBE[@]}" "$foreign/x")"
@@ -213,7 +229,7 @@ ARGV_PROBE=(env -i "PATH=$PATH" bash -c 'exec -a "$0" sleep 300')
 }
 
 @test "path match accepts <dir> itself and <dir>/... in argv and in the environment (positive control)" {
-  [ -r /proc/self/environ ] || skip "environment scan needs /proc"
+  _dir_ref_use_proc || skip "environment scan needs /proc"
   local envp argp exactp listed r
   envp="$(_start_orphan env -i PATH="$PATH" HOME="$TEST_SKILL_DIR/home" sleep 300)"
   exactp="$(_start_orphan env -i PATH="$PATH" PROBE_DIR="$TEST_SKILL_DIR" sleep 300)"
@@ -286,6 +302,9 @@ _owned_kill_would_signal() {   # <pid> -> prints WOULD_SIGNAL lines, sends nothi
 }
 
 @test "kill_test_owned_pid stops a process that IS this test's (positive control)" {
+  # The orphan names TEST_SKILL_DIR only in its environment (HOME), which only the
+  # /proc path can see; the ps-argv path (macOS) correctly declines to signal it.
+  _dir_ref_use_proc || skip "ownership by environment needs /proc (ps-argv fallback elsewhere)"
   local mine
   mine="$(_start_orphan sleep 300)"     # inherits HOME=$TEST_SKILL_DIR/home
   kill -0 "$mine"

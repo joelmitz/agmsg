@@ -95,16 +95,30 @@ _agmsg_codex_request_parse() {   # <line>
 # (a seat with no witness on record is simply never stopped automatically --
 # left running, reported); only ever consulted before a kill.
 #   Linux -> /proc/<pid>/stat field 22 (starttime, clock ticks): lossless.
-#   Windows (MSYS/MINGW/CLANGARM) -> PowerShell (Get-Process -Id
+#   Windows (see _agmsg_codex_is_windows) -> PowerShell (Get-Process -Id
 #     <pid>).StartTime.Ticks -- taken INSTEAD of /proc, not merely before it:
 #     MSYS exposes a working /proc, but keyed by the emulation layer's own pid
 #     space, not the Windows pid a cmdline match is about.
 #   else -> `ps -o lstart=`, second precision.
+#
+# The one Windows test every codex shell piece uses (the launcher and
+# codex-diag.sh source this file). Two sources, either is enough:
+#   - `uname -s` (MINGW*/MSYS*/CYGWIN*): what the host IS. It does not depend
+#     on which MSYS environment a Git Bash was started in. The windows-latest
+#     runner's Git Bash (Git for Windows 2.56.0.windows.2, measured 2026-10-24)
+#     runs with MSYSTEM=UCRT64, which an MSYSTEM-only test that knew only
+#     MINGW/MSYS/CLANGARM read as POSIX.
+#   - MSYSTEM (any MSYS2 environment name): kept so a POSIX host can select
+#     the Windows path under test by setting it, as the suite does.
+# uname is read once per shell; MSYSTEM is read on every call.
 _agmsg_codex_is_windows() {
   case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*) return 0 ;;
-    *) return 1 ;;
+    MINGW*|MSYS*|UCRT*|CLANG*) return 0 ;;
   esac
+  case "${_AGMSG_CODEX_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  return 1
 }
 _agmsg_codex_seat_witness() {   # <pid> -> "src<TAB>token" on stdout
   local pid="$1" s r tok bin

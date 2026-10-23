@@ -487,18 +487,12 @@ _REAP_WAIT_TICKS=50
 # own pid space while a lease records the Windows pid codex-bridge.js sees as
 # process.pid. Letting /proc win would return the start time of whatever
 # unrelated MSYS process sits at that number -- the recycled-pid confusion this
-# token exists to prevent, with nothing to signal it.
-_agmsg_is_windows() {
-  case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
+# token exists to prevent, with nothing to signal it. "Windows" is
+# _agmsg_codex_is_windows from _seat-key.sh.
 _start_token() {
   local pid="$1" s r tok bin
   local -a a
-  if _agmsg_is_windows; then
+  if _agmsg_codex_is_windows; then
     for bin in powershell.exe pwsh; do
       # `tr -d '\r'` because PowerShell writes CRLF and Node's .trim() on the
       # writer side strips it there, so both end up with the bare digits.
@@ -585,7 +579,7 @@ _read_lease() {
 # (the pid is only killable in this shell's pid namespace; Windows is the #458
 # mismatch) and a no-op with no process lister.
 _reap_orphan_bridges() {
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; esac
+  _agmsg_codex_is_windows && return 0
   command -v pgrep >/dev/null 2>&1 || return 0
   local myhost pid lease cur killed="" waited
   local lproj lpairs lhost lpid lstart lstartsrc
@@ -958,7 +952,7 @@ retire_recorded_bridge() {
   local lproj lpairs lhost lpid lstart lstartsrc
   [ -f "$pidfile" ] || return 0
   IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-  if ! _agmsg_is_windows; then
+  if ! _agmsg_codex_is_windows; then
     _agmsg_pid_valid "$old_pid" || return 0
   else
     case "$old_pid" in ''|*[!0-9]*) return 0 ;; esac
@@ -971,7 +965,7 @@ retire_recorded_bridge() {
   [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || return 0
   token="$(_start_token "$old_pid" 2>/dev/null || true)"
   [ -n "$token" ] && [ "$token" = "$lstartsrc	$lstart" ] || return 0
-  if _agmsg_is_windows; then
+  if _agmsg_codex_is_windows; then
     _windows_begin_retire "$old_pid" "$token" || return 1
     _windows_wait_exit_proof || return 1
     return 0
@@ -1070,7 +1064,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # have removed that pidfile already; the independent fence remains authoritative.
   windows_exit_proven=0
   retired_request_pid=""
-  if _agmsg_is_windows && [ -f "$retire_fence" ]; then
+  if _agmsg_codex_is_windows && [ -f "$retire_fence" ]; then
     if ! _read_stop_record "$retire_fence" \
       || [ "$rproject" != "$PROJECT_HASH" ] || [ "$rpairs" != "$BRIDGE_PAIRS_HASH" ]; then
       poll_sleep
@@ -1168,7 +1162,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # at the top of the loop. A lease-less bridge that never dies simply lingers
   # (orphan survival is acceptable; a wrong-kill or a double-start is not).
   if [ -n "$need_kill" ]; then
-    if _agmsg_is_windows; then
+    if _agmsg_codex_is_windows; then
       if ! _windows_begin_retire "$need_kill" "$need_kill_token" \
         || ! _windows_wait_exit_proof; then
         poll_sleep
@@ -1208,7 +1202,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Git Bash $! is an MSYS pid, while codex-bridge.js and its lease use a
   # Windows pid. Never publish $! as a native pid on the default Windows path.
   # The Node bridge publishes its own native pidfile before its complete lease.
-  if ! _agmsg_is_windows || [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+  if ! _agmsg_codex_is_windows || [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     printf '%s\n' "$launched_pid" > "$pidfile"
   fi
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
@@ -1228,7 +1222,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
-  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+  if _agmsg_codex_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     # Keep this child lock while the native Node publishes its pidfile and
     # lease. A missing/partial lease, a changed role, or an uncertain process
     # state must never send this launcher back to the spawn path.
@@ -1288,10 +1282,10 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     fi
   fi
   verified_pid="$launched_pid"
-  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ] && [ "$published" = 1 ]; then
+  if _agmsg_codex_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ] && [ "$published" = 1 ]; then
     verified_pid="$published_pid"
   fi
-  if _agmsg_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
+  if _agmsg_codex_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
     verified=0
     _verify_tick=0
     while [ "$_verify_tick" -lt "$_REAP_WAIT_TICKS" ]; do

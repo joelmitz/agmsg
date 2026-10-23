@@ -439,7 +439,7 @@ kill_test_owned_pid() {   # <pid>
 _reap_test_skill_dir_procs() {
   local dir="${TEST_SKILL_DIR:-}"
   _test_skill_dir_reapable "$dir" || return 0
-  local pids tries=0 sig p
+  local pids tries=0 sig p live
   while :; do
     pids="$(_pids_referencing_dir "$dir")"
     [ -n "$pids" ] || return 0
@@ -451,10 +451,18 @@ _reap_test_skill_dir_procs() {
     # that hold nothing return on the first check above), then return and let the rm
     # surface anything still there. The 6s headroom is what covers a load-3-digit host.
     sig=TERM; [ "$tries" -ge 3 ] && sig=KILL
+    # Only a pid that STILL references the dir counts. On Git Bash every scan
+    # lists a pid or two that is already gone when re-checked (measured on
+    # windows-latest, 2026-10-24: two per scan, with no /proc entry left) --
+    # short-lived processes of the scan itself, whose environ there carries the
+    # exported dir. Counting them spun every teardown to the bound and failed it.
+    live=0
     for p in $pids; do
       _pid_references_dir "$p" "$dir" || continue
+      live=1
       kill "-$sig" "$p" 2>/dev/null || true
     done
+    [ "$live" = 1 ] || return 0
     [ "$tries" -ge 60 ] && return 1
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))

@@ -1700,7 +1700,9 @@ _lease_verdict() { # <startsrc> <start> -> prints accept|reject
 
 _run_start_token() { # <pid> -> runs _start_token in a subshell
   run bash -c '
-    pattern="/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p"
+    source "$(dirname "$1")/_seat-key.sh"
+    # In a variable: bash 3.2 brace-expands a literal {..,..} nested inside "$(...)".
+    pattern="/^_start_token() {/,/^}/p"
     eval "$(sed -n "$pattern" "$1")"
     _start_token "$2"
   ' _ "$LAUNCHER" "$1"

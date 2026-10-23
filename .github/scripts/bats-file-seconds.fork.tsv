@@ -1,0 +1,178 @@
+# joelmitz/agmsg（fork）専用の bats 実行時間表（macOS、秒）。
+#
+# CI の tests.yml は、シャードの振り分け（"Compute this shard's test files"）で
+# SHARD_TESTS_SECONDS_TABLE にこのファイルを渡し、upstream と共通の
+# bats-file-seconds.tsv の代わりに使う。upstream 側の表は upstream の内容のまま
+# 触らない（sync-upstream での衝突を避けるため）。tests/test_ci_sharding.bats は
+# 引き続き upstream 側の表で振り分けの性質を検査する。
+#
+# 書式・使い方は bats-file-seconds.tsv の冒頭と同じ（basename<TAB>seconds、
+# basename 順、表に無いファイルはこの表の平均値で見積もられる）。
+#
+# 計測元: GitHub Actions run 39992997598（tests.yml、PR #23、macos-latest、
+# 5 shard、2026-10-24 JST）の bats-timings-macos-latest-* artifact 5 個の
+# file_end 行。151 ファイル中 142 ファイルがこの run の実測値。shard 2 が
+# 30 分の上限で打ち切られたため、残り 9 ファイル（test_bin_agmsg、
+# test_claude_template、test_hash、test_herdr_cli_routing、test_local_quoting、
+# test_remote_curl_stderr、test_remote_sync_ca_bundle、
+# test_team_guidance_usage、test_teardown_reap）は upstream 側の表の値を写した。
+#
+# 分けた理由: fork の macOS の実行時間は合計約 7750 秒で、upstream 側の表の
+# 合計（約 6030 秒）からずれていた。ずれは一部のファイルに集中しており
+# （test_install 426 秒に対し表は 158 秒、test_remote_status_liveness 247 秒に
+# 対し 87 秒、test_codex_bridge_launcher 409 秒に対し 266 秒）、upstream 側の
+# 表で振り分けると shard 2 に約 30 分の実作業が集まって上限に達していた。
+# この表では 5 shard とも約 1550 秒になる。
+#
+# 更新するときは、全 shard が完走した run の artifact から同じ方法で取り直す。
+test_actas_integration.bats	67
+test_actas_lock.bats	39
+test_agmsg_command.bats	3
+test_agmsgd_claude_code_queue.bats	1
+test_agmsgd_codex_queue.bats	1
+test_agmsgd_control.bats	0
+test_agmsgd_daemon_sh.bats	164
+test_agmsgd_db.bats	1
+test_agmsgd_entrypoint.bats	9
+test_agmsgd_executor.bats	1
+test_agmsgd_launch.bats	5
+test_agmsgd_lifecycle.bats	0
+test_agmsgd_log.bats	0
+test_agmsgd_main.bats	0
+test_agmsgd_owner.bats	0
+test_agmsgd_status.bats	9
+test_agmsgd_switch.bats	17
+test_antigravity_resume.bats	1
+test_antigravity_transport.bats	28
+test_api.bats	53
+test_app_release_signing.bats	0
+test_apply_fail_stderr.bats	0
+test_bin_agmsg.bats	1
+test_binding_mode.bats	6
+test_boot_command.bats	7
+test_bump_app_version.bats	0
+test_bundle_core_fetch.bats	1
+test_capability_docs.bats	3
+test_ci_forensics.bats	1
+test_ci_sharding.bats	159
+test_ci_workflow.bats	1
+test_claude_template.bats	1
+test_close_fds.bats	1
+test_cmdline_path_match.bats	3
+test_codex_bridge.bats	227
+test_codex_bridge_launcher.bats	409
+test_codex_diag.bats	33
+test_codex_monitor.bats	29
+test_codex_resume.bats	28
+test_codex_shim.bats	27
+test_compat.bats	3
+test_compat_posix.bats	2
+test_config.bats	3
+test_cut_release.bats	3
+test_daemon_offer.bats	2
+test_delivery.bats	450
+test_delivery_choice_screen.bats	2
+test_delivery_cli.bats	16
+test_despawn.bats	140
+test_dispatch.bats	49
+test_doctor.bats	116
+test_endpoint_scheme.bats	1
+test_endpoint_table_node.bats	0
+test_enforced_assertions.bats	1
+test_engine_inherited_fds.bats	21
+test_export.bats	37
+test_ext_tool.bats	11
+test_ext_tool_jev_handle.bats	609
+test_ext_tool_slack_handle.bats	216
+test_harness_self_name_off.bats	3
+test_hash.bats	5
+test_helper_host_isolation.bats	1
+test_herdr_cli_routing.bats	3
+test_identity_path_forms.bats	9
+test_inbox.bats	112
+test_inbox_type_guard.bats	75
+test_install.bats	426
+test_install_op_lock.bats	4
+test_instance_id.bats	51
+test_jsonl_remote_sync.bats	68
+test_key.bats	92
+test_legacy_mirror.bats	10
+test_local_quoting.bats	1
+test_local_team_ids.bats	12
+test_locator.bats	8
+test_messaging.bats	101
+test_migrate_team_store.bats	134
+test_node_resolve.bats	0
+test_peek_poke.bats	75
+test_perf_harness.bats	15
+test_placement_actual_location.bats	4
+test_placement_collisions.bats	34
+test_plugin_registry.bats	5
+test_printed_command_paths.bats	11
+test_refute.bats	1
+test_registry_lock.bats	18
+test_release_ci_skip.bats	1
+test_release_dist_tag.bats	1
+test_remote.bats	536
+test_remote_curl_config_paths.bats	5
+test_remote_curl_stderr.bats	4
+test_remote_curl_stderr_get.bats	5
+test_remote_engine_start_refusal.bats	47
+test_remote_forget.bats	17
+test_remote_header_sink.bats	5
+test_remote_refusal.bats	19
+test_remote_setup_doc.bats	12
+test_remote_status_liveness.bats	247
+test_remote_sync.bats	204
+test_remote_sync_apply_blob.bats	7
+test_remote_sync_ca_bundle.bats	2
+test_remote_sync_driver_input.bats	1
+test_remote_sync_engine.bats	13
+test_remote_sync_reject_envelope.bats	8
+test_require_python3.bats	5
+test_reset_role_session.bats	13
+test_resolve_project.bats	61
+test_resume_seat_guard.bats	18
+test_resurrect_panes.bats	9
+test_role_session.bats	23
+test_roster_journal.bats	87
+test_safe_poke_draft.bats	5
+test_self_fix.bats	30
+test_self_identity.bats	36
+test_self_name.bats	184
+test_self_proof.bats	69
+test_self_rename.bats	49
+test_self_write.bats	55
+test_self_write_lock.bats	39
+test_session_start_claude_code_native_channel.bats	68
+test_session_start_terminal_line.bats	11
+test_setup.bats	1
+test_shquote.bats	0
+test_spawn.bats	402
+test_spawn_fd_guard.bats	1
+test_spawn_options.bats	5
+test_sqlite_crlf.bats	14
+test_sqlite_sync_jq_binary.bats	9
+test_storage.bats	46
+test_storage_contract.bats	50
+test_sweep_enumeration.bats	12
+test_sync_autostart.bats	48
+test_sync_cipher.bats	10
+test_team.bats	181
+test_team_guidance_usage.bats	1
+test_team_list.bats	32
+test_team_status.bats	15
+test_teardown_reap.bats	3
+test_terminal_context_line.bats	3
+test_terminal_registry.bats	135
+test_token_locate.bats	14
+test_transcript_exists.bats	4
+test_type_registry.bats	43
+test_unguarded_env_reads.bats	3
+test_wait_helpers.bats	41
+test_watch.bats	357
+test_watch_install_changed.bats	39
+test_watch_once.bats	63
+test_watch_process_count.bats	18
+test_watch_stuck_map.bats	4
+test_where.bats	5

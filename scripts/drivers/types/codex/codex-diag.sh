@@ -141,9 +141,6 @@ new_count="$(grep -c . "$DIAG_TMP/new" 2>/dev/null || true)"
 loaded_only="$(cat "$DIAG_TMP/current" 2>/dev/null || true)"
 new_thread="$(cat "$DIAG_TMP/new" 2>/dev/null || true)"
 
-is_windows_git_bash() {
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; *) return 1 ;; esac
-}
 probe_ss_pids() {
   [ -n "$PORT" ] && command -v ss >/dev/null 2>&1 || return 1
   ss -tnp 2>/dev/null | awk -v p=":$PORT" '$0 ~ p { print }' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -nu
@@ -173,7 +170,7 @@ TUI_PIDS=""
 process_reason="no-matching-tui"
 probe_ok=0
 : >"$DIAG_TMP/pids"
-if is_windows_git_bash; then
+if _agmsg_codex_is_windows; then
   # WinPID is authoritative. Empty ss is absent auxiliary evidence; MSYS PIDs are not mixed in.
   if probe_windows_pids >"$DIAG_TMP/pids"; then probe_ok=1; else process_reason="process-observation-failed"; fi
 else

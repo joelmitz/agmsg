@@ -37,21 +37,17 @@ test("safe-stop request accepts only the exact ordered v1 schema", () => {
   ]) assert.equal(parseBridgeStopRecord(malformed), null);
 });
 
-test("Windows detection includes MSYS families but excludes CYGWIN", () => {
-  const prior = process.env.MSYSTEM;
-  try {
-    for (const value of ["MINGW64_NT-10.0", "MSYS_NT-10.0", "CLANGARM64_NT-10.0"]) {
-      process.env.MSYSTEM = value;
-      assert.equal(isMsysWindows(), true, value);
-    }
-    for (const value of ["CYGWIN_NT-10.0", "", "Linux"]) {
-      process.env.MSYSTEM = value;
-      assert.equal(isMsysWindows(), false, value);
-    }
-  } finally {
-    if (prior === undefined) delete process.env.MSYSTEM;
-    else process.env.MSYSTEM = prior;
+test("Windows detection: win32 host, or an MSYS2 MSYSTEM on any host", () => {
+  // Git for Windows 2.56 on windows-latest runs Git Bash with MSYSTEM=UCRT64.
+  for (const value of ["MINGW64", "MSYS", "UCRT64", "CLANG64", "CLANGARM64"]) {
+    assert.equal(isMsysWindows({ MSYSTEM: value }, "linux"), true, value);
   }
+  for (const value of ["CYGWIN_NT-10.0", "", "Linux", undefined]) {
+    assert.equal(isMsysWindows({ MSYSTEM: value }, "linux"), false, String(value));
+  }
+  // The host decides on its own: no MSYSTEM at all is still Windows on win32.
+  assert.equal(isMsysWindows({}, "win32"), true);
+  assert.equal(isMsysWindows({ MSYSTEM: "UCRT64" }, "win32"), true);
 });
 
 test("safe-stop identity, TTL, and nonce checks fail closed", () => {

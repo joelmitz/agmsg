@@ -403,6 +403,8 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         env:
           SHARD: ${{ matrix.shard }}
+          # fork 専用: fork の実測表で振り分ける（bats-file-seconds.fork.tsv の冒頭を参照）。
+          SHARD_TESTS_SECONDS_TABLE: .github/scripts/bats-file-seconds.fork.tsv
         run: |
           set -euo pipefail
           if [ "$SHARD" -gt "$SHARD_TOTAL" ]; then

@@ -72,8 +72,13 @@ function _resolveWatchRearmMs() {
 const WATCH_REARM_MS = _resolveWatchRearmMs();
 const BRIDGE_STOP_POLL_MS = 100;
 
-function isMsysWindows() {
-  return /^(?:MINGW|MSYS|CLANGARM)/.test(process.env.MSYSTEM || "");
+// The same test as _agmsg_codex_is_windows in _seat-key.sh, so the bridge and
+// the launcher that retires it agree on which path they are on. Node reports
+// the host itself (win32 under Git Bash, whatever MSYSTEM says -- UCRT64 on
+// the windows-latest runner's Git for Windows 2.56); MSYSTEM lets a POSIX host
+// select the Windows path under test, as the launcher's tests do.
+function isMsysWindows(env = process.env, platform = process.platform) {
+  return platform === "win32" || /^(?:MINGW|MSYS|UCRT|CLANG)/.test(env.MSYSTEM || "");
 }
 
 function parseBridgeStopRecord(text) {
