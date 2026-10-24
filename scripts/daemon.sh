@@ -377,9 +377,15 @@ _start_unregistered_launcher() {
   disown 2>/dev/null || true
 }
 
-# NOT YET RUN ON WINDOWS in this environment -- written to the Windows
-# Task Scheduler contract (LogonTrigger + RestartOnFailure via XML, since plain
-# `/Create` flags do not set restart-on-failure) and shellchecked only.
+# Written to the Windows Task Scheduler contract (LogonTrigger +
+# RestartOnFailure via XML, since plain `/Create` flags do not set
+# restart-on-failure). Run on Windows 11 as a non-administrator user: a
+# LogonTrigger without a <UserId> means "at logon of any user", which needs
+# administrator rights, so `schtasks /Create /XML` failed with "Access is
+# denied". Naming the current user in the trigger registers fine and the task
+# runs as that user (LogonType Interactive, RunLevel Limited) with agmsgd
+# reaching ready via `/Run`. Not yet confirmed on Windows: that the task
+# actually starts agmsgd at the next logon.
 # schtasks takes /Create-style switches; without this Git Bash rewrites a
 # leading-slash argument into a path ("C:/Program Files/Git/Create").
 _schtasks() {
@@ -392,10 +398,26 @@ _xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
+# The account the LogonTrigger fires for, as DOMAIN\user. Windows sets
+# USERDOMAIN and USERNAME for every logon session and Git Bash inherits them
+# (Git Bash's own `whoami` prints the bare user name only). Fails rather than
+# guessing: without a user the trigger means "any user", which a
+# non-administrator cannot register.
+_windows_task_user() {
+  local domain="${USERDOMAIN:-}" user="${USERNAME:-}"
+  if [ -z "$domain" ] || [ -z "$user" ]; then
+    echo "agmsg daemon: cannot tell which Windows user to register the scheduled task for (USERDOMAIN='$domain', USERNAME='$user'); not registering it" >&2
+    return 1
+  fi
+  printf '%s\\%s' "$domain" "$user"
+}
+
 _register_windows() {
-  local node_path="$1" name xml
+  local node_path="$1" name xml task_user
   name="$(_schtasks_name)"
   xml="$SKILL_DIR/run/${name}.xml"
+  task_user="$(_windows_task_user)" || return 1
+  task_user="$(_xml_escape "$task_user")"
   # A bare `bash.exe` in the task is resolved by CreateProcess, which looks in
   # System32 first and finds WSL's launcher there, not Git Bash. Name the Git
   # Bash that is running this script by its full path instead.
@@ -416,7 +438,7 @@ _register_windows() {
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$task_user</UserId></LogonTrigger>
   </Triggers>
   <Actions>
     <Exec>

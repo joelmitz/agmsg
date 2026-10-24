@@ -309,6 +309,9 @@ if [ "$1 $2" = "-m /" ]; then printf '%s/\n' "${AGMSGD_FAKE_GIT_ROOT:?}"; exit 0
 printf '%s\n' "$2"
 EOF
   chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks" "$TEST_SKILL_DIR/fake-windows/cygpath"
+  # The logon session's account, as Windows hands it to Git Bash. Set here so
+  # the result does not depend on the runner's own environment.
+  export USERDOMAIN="FAKE-PC" USERNAME="fake user"
 }
 
 @test "daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up" {
@@ -551,12 +554,48 @@ EOF
   grep -Fq "$TEST_SKILL_DIR/run/install.db" "$AGMSGD_FAKE_CYGPATH_LOG"
   [ "$(od -An -tx1 -N2 "$capture" | tr -d ' \n')" = "fffe" ]
   iconv -f UTF-16LE -t UTF-8 "$capture" | grep -q 'encoding="UTF-16"'
+  # The LogonTrigger names the current user: without a <UserId> it means "at
+  # logon of any user", which a non-administrator cannot register (Access is
+  # denied, measured on Windows 11).
+  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq '<LogonTrigger><Enabled>true</Enabled><UserId>FAKE-PC\fake user</UserId></LogonTrigger>'
 
   PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_MARKER="$marker" \
     _run_with_deadline 15 bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$marker" ]
   [ ! -f "$TEST_SKILL_DIR/run/agmsgd-$(_unit_id).xml" ]
+}
+
+@test "daemon.sh Windows registration: escapes the task user and refuses to register without one" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  local capture marker
+  capture="$TEST_SKILL_DIR/fake-windows/captured.xml"
+  marker="$TEST_SKILL_DIR/fake-windows/registered"
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git Root"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+
+  # No user to name: an "any user" trigger is not written in its place.
+  USERDOMAIN="" PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -ne 0 ]
+  grep -q "cannot tell which Windows user" <<<"$output"
+  [ ! -f "$marker" ]
+  [ ! -f "$capture" ]
+
+  USERDOMAIN="A&B" USERNAME="<u>" PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  [ "$(od -An -tx1 -N2 "$capture" | tr -d ' \n')" = "fffe" ]
+  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq '<UserId>A&amp;B\&lt;u&gt;</UserId>'
+
+  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_MARKER="$marker" \
+    _run_with_deadline 15 bash "$DAEMON" disable
+  [ "$status" -eq 0 ]
+  [ ! -f "$marker" ]
 }
 
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
