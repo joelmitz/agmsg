@@ -1864,7 +1864,15 @@ class CodexBridge {
         encoding: "utf8",
         env: { ...process.env, CODEX_THREAD_ID: this.threadId },
       });
-      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox transport failed for ${pair.team}/${pair.name}`); continue; }
+      if (result.error || result.status !== 0) {
+        // A team can disappear after eligibility was resolved (upstream #1739).
+        // Skip that stale pair silently; other failures still deserve the
+        // bridge diagnostic.
+        if (!result.error && result.status === 1 &&
+            (result.stderr || "").trim() === `agmsg: team not found: ${pair.team}`) continue;
+        console.error(`codex-bridge: inbox transport failed for ${pair.team}/${pair.name}`);
+        continue;
+      }
       const lines = (result.stdout || "").split(/\r?\n/).filter(Boolean);
       const records = [];
       let invalid = false;

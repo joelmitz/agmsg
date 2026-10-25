@@ -2512,3 +2512,33 @@ fs.unlinkSync(leasefile);
 NODE
   [ "$status" -eq 0 ]
 }
+
+@test "codex-bridge: stale unknown team is skipped silently without dropping healthy inboxes (#1714)" {
+  # Eligibility can race a team removal. Keep that stale pair eligible here.
+  printf '#!/usr/bin/env bash\nprintf "missing-team\\talice\\nteam\\talice\\n"\n' > "$TYPES/codex/eligible-pairs.sh"
+  bash "$SCRIPTS/send.sh" team bob alice "healthy message" >/dev/null
+  run node - "$TYPES/codex/codex-bridge.js" "$PROJ" <<'JS'
+const fs = require("fs");
+const Module = require("module");
+const filename = process.argv[2];
+const loaded = new Module(filename, module);
+loaded.filename = filename;
+loaded.paths = Module._nodeModulePaths(require("path").dirname(filename));
+loaded._compile(fs.readFileSync(filename, "utf8") + "\nmodule.exports.CodexBridge = CodexBridge;", filename);
+// fork: the inline reader is readInboxForPrompts (peek/ack transport) and
+// returns one prompt per delivery; the property checked is the same.
+const context = Object.assign(Object.create(loaded.exports.CodexBridge.prototype), {
+  opts: { project: process.argv[3], type: "codex", inlineInbox: true },
+  identities: [{ team: "missing-team", name: "alice" }, { team: "team", name: "alice" }],
+  identity: { team: "team", name: "alice" },
+  threadId: "thread-1714",
+});
+const result = loaded.exports.CodexBridge.prototype.readInboxForPrompts.call(context).map((prompt) => prompt.text).join("\n\n");
+if (!result.includes("healthy message") || result.includes("team not found")) process.exit(1);
+console.log(result);
+JS
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"healthy message"* ]]
+  [[ "$output" != *"inbox.sh failed"* ]]
+  [[ "$output" != *"inbox transport failed"* ]]
+}

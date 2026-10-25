@@ -12,6 +12,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # shellcheck disable=SC1091
+source "$SCRIPTS_DIR/lib/validate.sh"
+# Same refusal as inbox.sh (upstream #1739): an unknown team is reported before
+# storage resolution, so the bridge can skip a team removed after eligibility.
+agmsg_validate_team_name "$TEAM" || exit 1
+if [ ! -f "$SCRIPTS_DIR/../teams/$TEAM/config.json" ]; then
+  echo "agmsg: team not found: $TEAM" >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
 source "$SCRIPTS_DIR/lib/storage.sh"
 agmsg_storage_load
 agmsg_bridge_guard_check "$TEAM" "$AGENT" || exit $?
