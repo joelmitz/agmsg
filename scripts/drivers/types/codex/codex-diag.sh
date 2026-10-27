@@ -147,7 +147,7 @@ probe_ss_pids() {
 }
 probe_posix_pids() {
   [ -n "$PORT" ] || return 1
-  ps -eo pid=,args= 2>/dev/null | awk -v p="--remote ws://127.0.0.1:$PORT" '$0 ~ /codex/ && $0 ~ p && $0 !~ /codex-bridge/ { print $1 }'
+  ps -ww -eo pid=,args= 2>/dev/null | awk -v p="--remote ws://127.0.0.1:$PORT" '$0 ~ /codex/ && $0 ~ p && $0 !~ /codex-bridge/ { print $1 }'
 }
 probe_windows_pids() {
   [ -n "$PORT" ] || return 1

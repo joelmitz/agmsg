@@ -30,7 +30,7 @@ pid_is_visible() {
 
 pid_args() {
   local args
-  args="$(ps -o args= -p "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | head -n 1 || true)"
+  args="$(ps -ww -o args= -p "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | head -n 1 || true)"
   printf '%s' "$args"
 }
 
