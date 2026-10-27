@@ -638,7 +638,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   _join_unnamed team alice
   _join_unnamed team bob
-  bash "$SKILL_DIR/scripts/inbox.sh" team alice >/dev/null 2>&1 || true
+  agmsg_inbox team alice >/dev/null 2>&1 || true
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
   before_mark="$(_mark team alice)"
   [ -n "$before_mark" ]

@@ -207,7 +207,7 @@ line3"
   grep -qx "      line3" <<<"$output"
   refute grep -qF 'line1\nline2' <<<"$output"
   # Still one message, marked read as one.
-  run bash "$SCRIPTS/inbox.sh" testteam bob
+  run agmsg_inbox testteam bob
   [[ "$output" =~ "No new messages" ]]
 }
 
