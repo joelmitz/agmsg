@@ -382,7 +382,11 @@ jobs:
     # (30m) leaves real headroom over that estimate, not merely over last
     # week's number. The 2 known intermittent reds (ubuntu 4/4's
     # `_wait_pidfile`, windows runtime #567) are unrelated to this cap.
-    timeout-minutes: 30
+    #
+    # fork: 30 -> 45 (上の 1800s/30m の見積りは変更前の履歴。現行の上限は下の値)。 同一ファイルが macOS ランナー次第で最大 3.5 倍遅くなり
+    # （実測 2026-10-28）、見積り約 26.3 分に対し 30 分の余裕は約 12% しかない
+    # （実測の最悪 29.3 分、cancelled も発生）。表の重みでは吸収できない揺れ。
+    timeout-minutes: 45
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
       # to sed/stat/mktemp/ps etc. whose flags differ between them.
