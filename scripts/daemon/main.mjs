@@ -21,6 +21,7 @@ import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
 import { createAntigravityObserveChannel } from "./channels/antigravity-observe.mjs";
+import { createAntigravityNudgeChannel } from "./channels/antigravity-nudge.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
 
@@ -41,6 +42,9 @@ export function createDefaultChannels({ db, installRoot, expectedOpGen }) {
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
     // Observation only and off unless run/observe-antigravity exists.
     createAntigravityObserveChannel({ db, installRoot }),
+    // Off unless run/agmsgd-antigravity-delivery exists; dry-run unless
+    // run/agmsgd-antigravity-live exists too.
+    createAntigravityNudgeChannel({ db, installRoot }),
   ];
 }
 

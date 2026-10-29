@@ -319,7 +319,7 @@ test('the channel has no way to send: its surface and its source', () => {
   assert.doesNotMatch(source, /\b(poke|nudge|send-keys|safe-poke|inboxNudge)\b/);
 });
 
-test('the default daemon channels include it last, and the daemon poll path records the seat only when enabled', async (t) => {
+test('the default daemon channels include the Antigravity channels last, and the daemon poll path records the seat only when enabled', async (t) => {
   const { root, db, enable } = fixture(t);
   // The default channel reads its storage location from the environment.
   const saved = { AGMSG_STORAGE_PATH: process.env.AGMSG_STORAGE_PATH, AGMSG_CONFIG: process.env.AGMSG_CONFIG };
@@ -328,7 +328,7 @@ test('the default daemon channels include it last, and the daemon poll path reco
   t.after(() => { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   const channels = createDefaultChannels({ db, installRoot: root, expectedOpGen: 0 });
   t.after(() => Promise.all(channels.map(channel => channel.stop())));
-  assert.deepEqual(channels.map(channel => channel.name), ['codex', 'claude-code', 'antigravity-observe']);
+  assert.deepEqual(channels.map(channel => channel.name), ['codex', 'claude-code', 'antigravity-observe', 'antigravity-nudge']);
   await pollChannelHooks(channels, () => {}, { installRoot: root });
   assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='beta_antigravity_seat'").get().n, 0);
   enable();

@@ -52,7 +52,7 @@ export function observeEnabled(installRoot) {
   }
 }
 
-function encodeName(value) {
+export function encodeName(value) {
   return [...Buffer.from(value, "utf8")].map((byte) => {
     const char = String.fromCharCode(byte);
     return /^[A-Za-z0-9._-]$/.test(char) ? char : `%${byte.toString(16).padStart(2, "0").toUpperCase()}`;
