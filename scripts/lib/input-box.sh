@@ -459,3 +459,64 @@ agmsg_input_box_draft_text() {
     i=$((i + 1))
   done
 }
+
+# ---- confirmation-screen guard (type.conf input_refuse_screen / input_max_trailing_lines) ----
+# A confirmation screen (permission / trust) is drawn BELOW the last rule line,
+# with no input box of its own. Judging by "where the box is" alone is not
+# enough: the last two rule lines may then enclose an old transcript line (an
+# echoed user message beginning with the marker), which reads as a real draft
+# by accident. These two checks are explicit and run BEFORE any box location.
+
+# agmsg_input_box_prompt_blocked <refuse-list> <screen>
+# <refuse-list>: "|"-separated literal prefixes (type.conf input_refuse_screen).
+# Returns 0 when any line BELOW the last 20+ rule line, left-trimmed and
+# style-stripped, starts with one of them; 1 otherwise (including no rule).
+agmsg_input_box_prompt_blocked() {
+  local list="$1" screen="$2" rule="$_AGMSG_INPUT_BOX_RULE20"
+  [ -n "$list" ] || return 1
+  local -a plain=()
+  local line n=0 last=-1
+  while IFS= read -r line; do
+    plain[n]="$(_agmsg_strip_ansi_sgr "$line")"
+    case "${plain[n]}" in "$rule"*) last=$n ;; esac
+    n=$((n + 1))
+  done <<<"$screen"
+  [ "$last" -ge 0 ] || return 1
+  local i=$((last + 1)) t rest entry
+  while [ "$i" -lt "$n" ]; do
+    t="${plain[$i]}"
+    t="${t#"${t%%[![:space:]]*}"}"
+    rest="$list"
+    while [ -n "$rest" ]; do
+      entry="${rest%%|*}"
+      if [ "$rest" = "$entry" ]; then rest=""; else rest="${rest#*|}"; fi
+      [ -n "$entry" ] || continue
+      case "$t" in "$entry"*) return 0 ;; esac
+    done
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# agmsg_input_box_trailing_ok <max> <screen>
+# Returns 0 when at most <max> non-blank lines follow the last 20+ rule line
+# (a live input box is followed only by a short footer). 1 when more, or when
+# there is no rule line at all.
+agmsg_input_box_trailing_ok() {
+  local max="$1" screen="$2" rule="$_AGMSG_INPUT_BOX_RULE20"
+  [ -n "$max" ] || return 0
+  local -a plain=()
+  local line n=0 last=-1
+  while IFS= read -r line; do
+    plain[n]="$(_agmsg_strip_ansi_sgr "$line")"
+    case "${plain[n]}" in "$rule"*) last=$n ;; esac
+    n=$((n + 1))
+  done <<<"$screen"
+  [ "$last" -ge 0 ] || return 1
+  local i=$((last + 1)) count=0
+  while [ "$i" -lt "$n" ]; do
+    case "${plain[$i]}" in *[![:space:]]*) count=$((count + 1)) ;; esac
+    i=$((i + 1))
+  done
+  [ "$count" -le "$max" ]
+}

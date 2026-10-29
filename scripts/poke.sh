@@ -176,11 +176,19 @@ agmsg_terminal_load "$TERMINAL" \
 # terminal_poke call, the same as before any of this existed.
 INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
+INPUT_REFUSE="$(agmsg_type_get "$TYPE" input_refuse_screen)"
+INPUT_MAX_TRAILING="$(agmsg_type_get "$TYPE" input_max_trailing_lines)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
 RC=0
 agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
-  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
+  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" \
+  --refuse-screen "$INPUT_REFUSE" --max-trailing "$INPUT_MAX_TRAILING" || RC=$?
+
+if [ "$RC" -eq 16 ]; then
+  echo "poke: '$TEAM/$NAME' is showing a confirmation screen (permission/trust) — refusing to type; a person must answer it first" >&2
+  exit 16
+fi
 
 if [ "$RC" -eq 14 ]; then
   echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
