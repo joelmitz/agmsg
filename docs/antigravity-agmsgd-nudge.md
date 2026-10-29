@@ -31,14 +31,19 @@ reachable; an environment aiming the terminal manager at another machine gives `
 After typing, for herdr on Windows (`AGMSG_AGY_NUDGE_ENTER=auto`) no Enter is sent. The wrapper looks for the line's
 token in the conversation (outside the located input box) and otherwise exits 23 with one reason word
 (`box_has_line`, `box_empty`, `box_mismatch`, `confirmation_screen`, `box_unlocated`, `peek_failed`,
-`enter_send_failed`), shown as `enter_unconfirmed:<word>`. A typed-but-unconfirmed line counts as notified and is never
-typed twice (a durable in-flight record is written before the run). `AGMSG_AGY_NUDGE_ENTER=always` additionally sends
+`enter_send_failed`), shown as `enter_unconfirmed:<word>`. Delivery is at-least-once, not exactly-once. Once the wrapper has printed its "typed" marker, the line counts as
+notified and is not typed again (a durable in-flight record is written before every live run). The marker is printed
+after the typing, so a run that is cut off without the marker having been seen cannot be told apart from one that
+never typed: if the daemon process that saw it is still the same one, the seat is retried (the line may then appear
+twice); after a daemon restart an in-flight record is treated as "may have been typed" and is not retried
+(`interrupted_unconfirmed`). `AGMSG_AGY_NUDGE_ENTER=always` additionally sends
 one Enter if the box holds exactly the line and no confirmation screen shows; `off` skips the check.
 
 ## Measured behaviour and limits
 
 Facts below were observed in October 2026 with Antigravity CLI 1.4.10, herdr 0.9.3 on Windows 11 (Git Bash), using a
-throwaway project, team and seat. Anything not observed is marked as a hypothesis.
+throwaway project, team and seat, started from one particular shell setup. Each "fact" holds for that setup only; they are
+not general statements about the products. Anything not observed is marked as a hypothesis.
 
 - Fact: `herdr agent prompt` on an agy pane submits by itself; the line appeared in the conversation and was answered.
   `herdr pane send-text` on an ordinary shell pane only places text; Enter is needed there.
@@ -50,14 +55,15 @@ throwaway project, team and seat. Anything not observed is marked as a hypothesi
   confirm the input box and backed off.
 - Fact: one nudge takes about 10 s on Windows (Git Bash start-up plus local terminal-manager calls), so the run limit
   is 25 s there and 10 s elsewhere. Through `herdr --machine`, one call took 13 to 22 s; remote panes are unsupported.
-- Fact: agy's default shell on Windows is PowerShell, so an agent may first try a bare `bash` and then retry with the
-  full path; each attempt asks for permission separately.
-- Fact: `inbox.sh` cannot detect the caller type inside agy (no strong session variable); use
-  `check-inbox.sh antigravity <project>`.
-- Fact: the notice says "Check your agmsg inbox"; an agent may run an `agmsg` command found on its PATH. On the test
-  machine that was an installed shim outside the throwaway setup. Pointing the agent's `HOME` at a throwaway directory
+- Fact (this setup): the agent ran commands through PowerShell, so in some runs it first tried a bare `bash`, failed, and
+  retried with the full path; each attempt asked for permission separately.
+- Fact (this setup): inside agy, `inbox.sh` could not detect the caller type automatically (it failed with "caller type not
+  detected from session env"); `check-inbox.sh antigravity <project>` passes the type explicitly and worked. Whether a
+  manually exported variable would also work was not tried.
+- Fact (this setup): the notice says "Check your agmsg inbox", and the agent ran an `agmsg` command found on its shell's
+  PATH, which on the test machine was an installed shim outside the throwaway setup. Pointing the agent's `HOME` at a throwaway directory
   that holds its own `bin/agmsg` isolated this (done in the test shell only).
-- Fact: agy lists skills from the workspace's `.agents/skills/` and `~/.gemini/...`; the installed agmsg skill under
-  `~/.agents/skills/` was not listed. Hypothesis: which skill wins on a name clash is not known.
+- Fact (this install): the agent's skill list showed the workspace's `.agents/skills/` entries and its built-in skills; the
+  installed agmsg skill under `~/.agents/skills/` was not listed. Hypothesis: which skill wins on a name clash is not known.
 - Not measured: an Enter on an empty agy input; other agy versions; other platforms for the Windows path; multi-seat
   hosts; a resident (Task Scheduler) daemon.
