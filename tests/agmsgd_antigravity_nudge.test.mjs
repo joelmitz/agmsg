@@ -828,7 +828,7 @@ test('B3 (deadline order): abort, then a late typed notice that cannot be writte
   assert.deepEqual([h.row().state, h.row().reason], ['blocked', 'interrupted_unconfirmed'], 'kept visible');
 });
 
-test('B3 (deadline order): a run cut off before it typed anything is retried normally', async (t) => {
+test('B3 (deadline order): a run cut off with no typed marker seen is retried normally (the marker comes after typing, so this narrows the doubt only)', async (t) => {
   const h = await deadlineHarness(t, () => ({ kind: 'cancelled', typed: false }));
   await h.poll(30);
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -836,7 +836,7 @@ test('B3 (deadline order): a run cut off before it typed anything is retried nor
   assert.ok(h.row().inflight_up_to);
   assert.equal(h.row().up_to, '', 'not counted as notified');
   await h.poll(2000);
-  assert.equal(h.calls.runs, 2, 'known not to have typed: nudged again');
+  assert.equal(h.calls.runs, 2, 'no typed marker was seen: nudged again');
   assert.deepEqual([h.row().state, h.row().reason, h.row().inflight_up_to], ['delivering', 'nudged', '']);
 });
 
@@ -848,7 +848,7 @@ test('B3 (restart): an in-flight record left by an earlier process is never type
   const first = make();
   await first.pollOnce(); await first.stop();
   assert.equal(runs, 1);
-  // A new process has no memory of what that run did: it must not guess "not typed".
+  // A new process has no memory of whether that run showed the typed marker: it must not guess.
   const second = make();
   await second.pollOnce(); await second.stop();
   assert.equal(runs, 1);

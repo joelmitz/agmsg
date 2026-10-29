@@ -369,12 +369,14 @@ export function createAntigravityNudgeChannel({
     const mode = live ? "live" : "dry";
     let prior = readRow(seat);
     // A live run that started in an earlier poll and never reported back (stopped, cut off by the
-    // deadline, or the daemon restarted) left an in-flight record. Unless this process knows that
-    // run had not typed anything, the line may be in the pane: count it as notified, never type it
+    // deadline, or the daemon restarted) left an in-flight record. Unless this process saw that
+    // run end without a typed marker, the line may be in the pane: count it as notified, never type it
     // again, and show it.
     if (prior?.inflight_up_to) {
       const known = outcomes.get(seat);
       outcomes.delete(seat);
+      // Only an interruption in THIS process with no typed marker seen is retried; the marker is printed
+      // after typing, so this narrows the doubt rather than removing it.
       if (known && known.upTo === prior.inflight_up_to && !known.typed) {
         save(seat, { inflight_up_to: "" });
         prior = readRow(seat);
@@ -437,7 +439,8 @@ export function createAntigravityNudgeChannel({
     });
     if (result.kind === "cancelled") {
       // The poll's scope is over: nothing can be written now. The in-flight record stays; remember in
-      // memory whether typing was seen, so the next poll can tell "typed" from "not typed".
+      // memory whether the typed marker was seen. Not seeing it does not prove nothing was typed (the
+      // marker comes after the typing); it is the only evidence this process has, and a restart loses it.
       if (live) outcomes.set(seat, { upTo: fresh.upTo, typed: Boolean(result.typed) });
       return;
     }
