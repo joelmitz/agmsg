@@ -13,21 +13,10 @@
 # 14 draft, 15 input box not confirmed, 16 confirmation screen showing, 10/12
 # the driver or pane is unreachable, 13 unsupported. Added here:
 # 20 no placement record, 21 the record or driver does not resolve,
-# 22 the seat is not an antigravity seat, 23 (live only) the line was typed but
-# the Enter that submits it could not be sent or confirmed.
-#
-# Enter: on Windows, herdr's `agent prompt` puts the text in the input box and does
-# not submit it (rules/agents/herdr.md; also seen with `pane send-text` on herdr
-# 0.9.3), so in live mode, after a successful typing, ONE Enter is sent with
-# `pane send-keys` (which works on any pane, agent-recognised or not). Only for herdr on Windows (AGMSG_AGY_NUDGE_ENTER=auto, the
-# default); off = never; always = herdr on any OS. Never in dry mode, never repeated,
-# and never retried here: whether an Enter on an already-empty agy input is harmless
-# has not been measured, and a failed or unconfirmed Enter leaves the line in the
-# box, which the daemon reports (exit 23) instead of typing the line a second time.
-# Just before the Enter the screen is read again and the Enter is sent only if no
-# confirmation screen shows and the input box holds exactly this line (else exit 23).
-# After typing, the line NUDGE-TYPED is printed so the caller knows typing happened
-# even if this script is later stopped.
+# 22 the seat is not an antigravity seat, 23 (live only, herdr) the line was typed but
+# its submission could not be confirmed; one reason word is printed first
+# (NUDGE-REASON:<word>, see the herdr block at the end). After typing, NUDGE-TYPED is printed
+# so the caller knows typing happened even if this script is later stopped.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -96,30 +85,72 @@ agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME
 [ "$MODE" = live ] || exit 0
 echo NUDGE-TYPED
 
-WANT_ENTER=0
+# herdr only. What happens after typing depends on the terminal driver's own poke:
+#  - tmux (and any driver that submits inside terminal_poke): nothing more to do here.
+#  - herdr: `agent prompt` submits by itself for agy (measured on Windows with herdr 0.9.3: the
+#    line was already in the conversation and answered, no Enter needed), so by default
+#    (AGMSG_AGY_NUDGE_ENTER=auto, herdr on Windows) NO Enter is sent. Instead the delivery is
+#    VERIFIED: the line's token shows in the CONVERSATION (on screen, outside the located input
+#    box; the agent merely being busy is not evidence). always = herdr on any OS, and in addition sends ONE Enter if
+#    the input box holds exactly this line AND no confirmation screen shows AND the structure is sane; off = no check at all.
+# Not confirmed -> exit 23 with one reason word on stdout (NUDGE-REASON:<word>), never a path
+# or text: box_has_line (still unsubmitted in the box), box_empty (nothing to see), box_mismatch
+# (another draft there), confirmation_screen, box_unlocated, peek_failed, enter_send_failed.
+WANT_CHECK=0
+SEND_ENTER=0
 case "${AGMSG_AGY_NUDGE_ENTER:-auto}" in
   off) exit 0 ;;
-  always) WANT_ENTER=1 ;;
-  *) case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) WANT_ENTER=1 ;; esac ;;
+  always) WANT_CHECK=1; SEND_ENTER=1 ;;
+  *) case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) WANT_CHECK=1 ;; esac ;;
 esac
-[ "$WANT_ENTER" -eq 1 ] && [ "$TERMINAL" = herdr ] || exit 0
-declare -F _herdr_cli >/dev/null 2>&1 && declare -F _herdr_bare_of >/dev/null 2>&1 || exit 23
+[ "$WANT_CHECK" -eq 1 ] && [ "$TERMINAL" = herdr ] || exit 0
+_agy_reason() { echo "NUDGE-REASON:$1"; exit 23; }
+declare -F _herdr_cli >/dev/null 2>&1 && declare -F _herdr_bare_of >/dev/null 2>&1 || _agy_reason peek_failed
 
-# The screen was judged BEFORE typing. Read it again now and send the Enter only when it
-# is still safe: not a confirmation screen, the input box located, and its whole content
-# exactly this notice line. Anything else (a screen that changed, another draft, an
-# already-empty box, a box that cannot be read) gets no Enter and is reported (23).
 _agy_nudge_norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
-sleep 1
-if declare -F terminal_peek_styled >/dev/null 2>&1; then
-  SCREEN_NOW="$(terminal_peek_styled "$BARE_ID" 2>/dev/null)" || exit 23
-else
-  SCREEN_NOW="$(terminal_peek "$BARE_ID" 2>/dev/null)" || exit 23
-fi
-if agmsg_input_box_prompt_blocked "$INPUT_REFUSE" "$SCREEN_NOW"; then exit 23; fi
-agmsg_input_box_trailing_ok "$INPUT_MAX_TRAILING" "$SCREEN_NOW" || exit 23
-REGION_NOW="$(agmsg_input_box_locate "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN_NOW")" || exit 23
-BOX_TEXT="$(agmsg_input_box_draft_text "$INPUT_MARKER" "$INPUT_BOXED" "$REGION_NOW")" || exit 23
-[ -n "$(_agy_nudge_norm "$BOX_TEXT")" ] && [ "$(_agy_nudge_norm "$BOX_TEXT")" = "$(_agy_nudge_norm "$TEXT")" ] || exit 23
-_herdr_cli "$BARE_ID" pane send-keys "$(_herdr_bare_of "$BARE_ID")" enter >/dev/null 2>&1 || exit 23
-exit 0
+TOKEN="${TEXT%%]*}]"
+ENTER_SENT=0
+REASON=box_empty
+for ATTEMPT in 1 2 3; do
+  sleep 1
+  if declare -F terminal_peek_styled >/dev/null 2>&1; then
+    SCREEN_NOW="$(terminal_peek_styled "$BARE_ID" 2>/dev/null)" || _agy_reason peek_failed
+  else
+    SCREEN_NOW="$(terminal_peek "$BARE_ID" 2>/dev/null)" || _agy_reason peek_failed
+  fi
+  BOX_TEXT=""; LOCATED=0; REGION_NOW=""
+  if REGION_NOW="$(agmsg_input_box_locate "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN_NOW")"; then
+    LOCATED=1
+    BOX_TEXT="$(agmsg_input_box_draft_text "$INPUT_MARKER" "$INPUT_BOXED" "$REGION_NOW")" || BOX_TEXT=""
+  fi
+  NORM_BOX="$(_agy_nudge_norm "$BOX_TEXT")"
+  BLOCKED=0; agmsg_input_box_prompt_blocked "$INPUT_REFUSE" "$SCREEN_NOW" && BLOCKED=1
+  TRAIL_OK=1; agmsg_input_box_trailing_ok "$INPUT_MAX_TRAILING" "$SCREEN_NOW" || TRAIL_OK=0
+  if [ "$LOCATED" -eq 1 ] && [ -n "$NORM_BOX" ] && [ "$NORM_BOX" = "$(_agy_nudge_norm "$TEXT")" ]; then
+    # The line is sitting in the box: not submitted (yet). A NEW key is sent only when the screen is a
+    # live input box: no confirmation screen, a sane structure, and the box holds exactly this line.
+    if [ "$SEND_ENTER" -eq 1 ] && [ "$ENTER_SENT" -eq 0 ] && [ "$BLOCKED" -eq 0 ] && [ "$TRAIL_OK" -eq 1 ]; then
+      ENTER_SENT=1
+      _herdr_cli "$BARE_ID" pane send-keys "$(_herdr_bare_of "$BARE_ID")" enter >/dev/null 2>&1 || _agy_reason enter_send_failed
+    fi
+    if [ "$BLOCKED" -eq 1 ]; then REASON=confirmation_screen; elif [ "$TRAIL_OK" -eq 0 ]; then REASON=box_unlocated; else REASON=box_has_line; fi
+    continue
+  fi
+  # Submitted = the token is in the CONVERSATION: on screen outside the input box that was located. Only
+  # with a located box can the two be told apart, so without one nothing is concluded from the token. This
+  # is an observation, not a key press, so it still holds when a confirmation screen has appeared since.
+  if [ "$LOCATED" -eq 1 ]; then
+    CONV=""
+    while IFS= read -r LINE; do
+      SKIP=0
+      while IFS= read -r RLINE; do [ "$LINE" = "$RLINE" ] && { SKIP=1; break; }; done <<<"$REGION_NOW"
+      [ "$SKIP" -eq 1 ] || CONV="$CONV$LINE"$'\n'
+    done <<<"$SCREEN_NOW"
+    if printf '%s' "$CONV" | grep -qF -- "$TOKEN"; then exit 0; fi
+  fi
+  if [ "$BLOCKED" -eq 1 ]; then REASON=confirmation_screen
+  elif [ "$LOCATED" -eq 0 ]; then REASON=box_unlocated
+  elif [ -n "$NORM_BOX" ]; then REASON=box_mismatch
+  else REASON=box_empty; fi
+done
+_agy_reason "$REASON"

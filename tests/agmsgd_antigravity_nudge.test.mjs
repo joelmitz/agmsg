@@ -47,13 +47,25 @@ terminal_poke() {
   # What the screen shows after the typing: the line in the box (default), a confirmation screen, or nothing new.
   case "\${FAKE_AFTER:-box}" in
     box) awk -v t="$2" 'index($0, "38;5;12m>") && !d { sub(/>/, "> " t); d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}' ;;
+    # What a real agy showed after agent prompt on Windows (herdr 0.9.3): the line already in the conversation, the box empty.
+    submitted) awk -v t="$2" 'index($0, "────") && !d { print "> " t; d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}' ;;
+    boxperm) awk -v t="$2" 'index($0, "38;5;12m>") && !d { sub(/>/, "> " t); d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}'; printf 'Requesting permission for:\\n   cmd\\nRun this command?\\n> 1. Yes\\n' >> '${path.join(root, 'screen.ansi')}' ;;
+    boxextra) awk -v t="$2 EXTRA" 'index($0, "38;5;12m>") && !d { sub(/>/, "> " t); d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}' ;;
+    submittedperm) awk -v t="$2" 'index($0, "────") && !d { print "> " t; d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}'; printf 'Requesting permission for:\\n   cmd\\nRun this command?\\n> 1. Yes\\n' >> '${path.join(root, 'screen.ansi')}' ;;
     perm) cp '${path.join(screens, 'perm.ansi')}' '${path.join(root, 'screen.ansi')}' ;;
     draft) cp '${path.join(screens, 'draft.ansi')}' '${path.join(root, 'screen.ansi')}' ;;
   esac
   echo ok; return 0
 }
 _herdr_bare_of() { printf '%s' "$1"; }
-_herdr_cli() { shift; echo "herdr $*" >> '${logFile}'; return "\${FAKE_HERDR_RC:-0}"; }
+_herdr_cli() {
+  shift; echo "herdr $*" >> '${logFile}'
+  case "$*" in
+    "agent get "*) [ -n "\${FAKE_AGENT_JSON:-}" ] && echo "$FAKE_AGENT_JSON" ;;
+    *"send-keys"*enter*) [ "\${FAKE_ENTER_SUBMITS:-}" = 1 ] && awk -v t="$(sed -n 's/^agent-prompt //p' '${logFile}' | tail -1)" 'index($0, "38;5;12m>") { sub(/> *[^\x1b]*/, ">") } index($0, "────") && !d { print "> " t; d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}' ;;
+  esac
+  return "\${FAKE_HERDR_RC:-0}"
+}
 `);
   }
   if (driver === 'faketerm') {
@@ -641,20 +653,49 @@ function enterFixture(t, { screen = 'idle', driver = 'herdr', extraEnv = {}, liv
 }
 const WIN = { FAKE_UNAME_S: 'MINGW64_NT-10.0-26300' };
 
-test('Enter: Windows + herdr, live: one prompt then exactly one Enter, in that order, and the seat is delivering', async (t) => {
-  const f = enterFixture(t, { extraEnv: WIN });
+const SUBMITTED_JSON = '{"result":{"agent":{"agent_status":"working"}}}';
+
+test('Windows + herdr, live: agent prompt submits by itself, so no Enter is sent, and the line showing in the conversation confirms the delivery', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'submitted' } });
   await f.channel.pollOnce();
   assert.equal(f.prompts().length, 1);
   assert.match(f.prompts()[0], /^agent-prompt \[agmsg:[A-Za-z0-9-]+\] New messages are waiting\./);
-  assert.deepEqual(f.enters(), ['herdr pane send-keys %1 enter']);
-  const calls = f.calls();
-  assert.ok(calls.findIndex(line => line.startsWith('agent-prompt')) < calls.findIndex(line => line.includes('send-keys')), 'Enter comes after typing');
+  assert.deepEqual(f.enters(), [], 'no Enter: it is not needed and a stray one is avoided');
   assert.deepEqual([f.row().state, f.row().reason], ['delivering', 'nudged']);
   await f.channel.pollOnce();
-  assert.equal(f.enters().length, 1, 'never repeated for the same unread');
+  assert.equal(f.prompts().length, 1);
 });
 
-test('Enter: dry-run types nothing and sends no Enter, even where Enter would be sent live', async (t) => {
+test('R1: herdr reporting the agent as working is not evidence for this notice (another turn can be running)', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'empty', FAKE_AGENT_JSON: SUBMITTED_JSON } });
+  await f.channel.pollOnce();
+  assert.deepEqual(f.enters(), []);
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed:box_empty']);
+});
+
+test('B2: the token only inside the input box (a changed draft) is not a submitted line; the token in the conversation is, even when a confirmation screen has appeared since', async (t) => {
+  const extra = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'boxextra' } });
+  await extra.channel.pollOnce();
+  assert.deepEqual([extra.row().state, extra.row().reason], ['blocked', 'enter_unconfirmed:box_mismatch']);
+  assert.deepEqual(extra.enters(), []);
+  const submittedPerm = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'submittedperm' } });
+  await submittedPerm.channel.pollOnce();
+  assert.deepEqual([submittedPerm.row().state, submittedPerm.row().reason], ['delivering', 'nudged']);
+  assert.deepEqual(submittedPerm.enters(), []);
+});
+
+test('B1: a new Enter is sent only to a live input box that holds exactly this line; a confirmation screen below it stops it', async (t) => {
+  const perm = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always', FAKE_AFTER: 'boxperm', FAKE_ENTER_SUBMITS: '1' } });
+  await perm.channel.pollOnce();
+  assert.deepEqual(perm.enters(), [], 'no key sent toward a confirmation screen');
+  assert.equal(perm.row().reason, 'enter_unconfirmed:confirmation_screen');
+  const ok = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always', FAKE_AFTER: 'box', FAKE_ENTER_SUBMITS: '1' } });
+  await ok.channel.pollOnce();
+  assert.equal(ok.enters().length, 1);
+  assert.equal(ok.row().state, 'delivering');
+});
+
+test('Enter: dry-run types nothing and checks nothing, whatever the setting', async (t) => {
   for (const mode of ['auto', 'always']) {
     const f = enterFixture(t, { extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: mode }, live: false });
     await f.channel.pollOnce();
@@ -663,21 +704,22 @@ test('Enter: dry-run types nothing and sends no Enter, even where Enter would be
   }
 });
 
-test('Enter: not on Windows (auto), not with another terminal, and "off" send none', async (t) => {
+test('Enter: other environments are unchanged (not Windows, another terminal, off) and "always" still sends one Enter for a line left in the box', async (t) => {
   const linux = enterFixture(t);
   await linux.channel.pollOnce();
-  assert.deepEqual([linux.prompts().length, linux.enters()], [1, []]);
+  assert.deepEqual([linux.prompts().length, linux.enters(), linux.calls().filter(line => line.startsWith('herdr agent get'))], [1, [], []]);
   assert.equal(linux.row().state, 'delivering');
   const tmux = enterFixture(t, { driver: 'tmux', extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: 'always' } });
   await tmux.channel.pollOnce();
-  assert.deepEqual(tmux.enters(), [], 'tmux submits through its own driver; no herdr Enter');
+  assert.deepEqual(tmux.enters(), [], 'tmux submits through its own driver; the herdr block does not run');
   const off = enterFixture(t, { extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: 'off' } });
   await off.channel.pollOnce();
   assert.deepEqual([off.prompts().length, off.enters()], [1, []]);
   assert.equal(off.row().state, 'delivering');
-  const forced = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always' } });
+  const forced = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always', FAKE_ENTER_SUBMITS: '1' } });
   await forced.channel.pollOnce();
-  assert.deepEqual(forced.enters(), ['herdr pane send-keys %1 enter'], 'always: herdr on any OS');
+  assert.deepEqual(forced.enters(), ['herdr pane send-keys %1 enter'], 'always: herdr on any OS, the line was in the box');
+  assert.equal(forced.row().state, 'delivering');
 });
 
 test('Enter: a refused typing (draft, confirmation screen) sends neither the line nor an Enter', async (t) => {
@@ -688,33 +730,43 @@ test('Enter: a refused typing (draft, confirmation screen) sends neither the lin
   }
 });
 
-test('Enter failed: counted as notified (never typed again), shown as enter_unconfirmed, kept until a later notice goes through', async (t) => {
-  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_HERDR_RC: '1' } });
+test('a line left in the box is not delivered: counted as notified, shown with its reason, never typed again, and no Enter by default', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'box' } });
   await f.channel.pollOnce();
   assert.equal(f.prompts().length, 1);
-  assert.equal(f.enters().length, 1);
+  assert.deepEqual(f.enters(), []);
   const row = f.row();
-  assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', 'enter_unconfirmed', 0, null]);
-  assert.ok(row.up_to && row.last_nudge_at, 'the typed line counts as the notice');
-  await f.channel.pollOnce();
-  await f.channel.pollOnce();
-  assert.equal(f.prompts().length, 1, 'no second line, no second Enter');
-  assert.equal(f.enters().length, 1);
-  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed']);
+  assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', 'enter_unconfirmed:box_has_line', 0, null]);
+  assert.ok(row.up_to && row.last_nudge_at);
+  await f.channel.pollOnce(); await f.channel.pollOnce();
+  assert.equal(f.prompts().length, 1);
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed:box_has_line']);
 });
 
-test('Enter failed shows in status, with the line counted as the last nudge', async (t) => {
-  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_HERDR_RC: '1' } });
+test('always: a failing Enter is reported as enter_send_failed, once', async (t) => {
+  const f = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always', FAKE_HERDR_RC: '1', FAKE_AFTER: 'box' } });
+  await f.channel.pollOnce();
+  assert.equal(f.enters().length, 1);
+  assert.equal(f.row().reason, 'enter_unconfirmed:enter_send_failed');
+  await f.channel.pollOnce();
+  assert.equal(f.enters().length, 1);
+  assert.equal(f.prompts().length, 1);
+});
+
+test('the reason is a single word in status, with the line counted as the last nudge', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: 'box' } });
   await f.channel.pollOnce();
   f.db.close();
   const text = execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', statusScript, f.root], { encoding: 'utf8' });
-  assert.match(text, /Antigravity test\/agy: agmsgd delivering: blocked \(enter_unconfirmed\); last nudge \d+[smh] ago/);
+  assert.match(text, /Antigravity test\/agy: agmsgd delivering: blocked \(enter_unconfirmed:box_has_line\); last nudge \d+[smh] ago/);
 });
 
 test('a run cut short after typing is treated like an unconfirmed Enter; one cut short before typing is not', async (t) => {
   for (const [result, expected, advanced] of [
     [{ kind: 'timeout', typed: true }, 'enter_unconfirmed', true],
     [{ kind: 'exit', code: 23, typed: true }, 'enter_unconfirmed', true],
+    [{ kind: 'exit', code: 23, typed: true, reasonWord: 'box_empty' }, 'enter_unconfirmed:box_empty', true],
+    [{ kind: 'exit', code: 23, typed: true, reasonWord: '/tmp/secret' }, 'enter_unconfirmed', true],
     [{ kind: 'timeout', typed: false }, 'nudge_timeout', false],
     [{ kind: 'exit', code: 12, typed: false }, 'pane_unreachable', false],
   ]) {
@@ -738,21 +790,29 @@ test('runNudge reports typing that happened before a stop (the wrapper prints on
   assert.deepEqual(await runNudge({ script: path.join(dir, 'hang.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 400 }), { kind: 'timeout', typed: false });
 });
 
-test('B1: the screen is read again before the Enter; a confirmation screen, another draft or an empty box gets no Enter and is reported', async (t) => {
-  for (const after of ['perm', 'draft', 'empty']) {
+test('after typing, a confirmation screen, another draft or an empty box is reported with its own reason word, and nothing is typed twice', async (t) => {
+  for (const [after, word] of [['perm', 'confirmation_screen'], ['draft', 'box_mismatch'], ['empty', 'box_empty']]) {
     const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: after } });
     await f.channel.pollOnce();
     assert.equal(f.prompts().length, 1, `${after}: the line was typed`);
     assert.deepEqual(f.enters(), [], `${after}: no Enter`);
     const row = f.row();
-    assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', 'enter_unconfirmed', 0, null], after);
+    assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', `enter_unconfirmed:${word}`, 0, null], after);
     assert.ok(row.up_to && row.last_nudge_at, `${after}: counted as notified`);
     await f.channel.pollOnce();
     assert.equal(f.prompts().length, 1, `${after}: never typed a second time`);
   }
-  const ok = enterFixture(t, { extraEnv: WIN });
-  await ok.channel.pollOnce();
-  assert.equal(ok.enters().length, 1, 'the box holding exactly this line gets its Enter');
+});
+
+test('runNudge reads the reason word even when it is split across chunks, and ignores a word it does not know', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-reason-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'a.sh'), "echo NUDGE-TYPED\nprintf 'NUDGE-REA'\nsleep 0.2\nprintf 'SON:box_em'\nsleep 0.2\nprintf 'pty\\n'\nexit 23\n");
+  writeFileSync(path.join(dir, 'b.sh'), "echo NUDGE-TYPED\necho 'NUDGE-REASON:/tmp/secret'\nexit 23\n");
+  const a = await runNudge({ script: path.join(dir, 'a.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000 });
+  assert.deepEqual([a.kind, a.code, a.typed, a.reasonWord], ['exit', 23, true, 'box_empty']);
+  const b = await runNudge({ script: path.join(dir, 'b.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000 });
+  assert.equal(b.reasonWord, undefined);
 });
 
 test('B2: a typed marker split across stdout chunks is still recognised (timeout and abnormal exit)', async (t) => {

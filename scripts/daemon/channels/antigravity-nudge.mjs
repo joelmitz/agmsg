@@ -42,6 +42,8 @@ const NUDGE_TIMEOUT_MS = 10_000;
 // and several local terminal-manager calls), so it gets a longer bound there; it
 // stays under the 30 s channel deadline.
 const NUDGE_TIMEOUT_WINDOWS_MS = 25_000;
+// The one-word reasons agy-nudge.sh may give when it typed the line but cannot confirm it was submitted.
+export const SUBMIT_REASONS = new Set(["box_has_line", "box_empty", "box_mismatch", "confirmation_screen", "box_unlocated", "peek_failed", "enter_send_failed"]);
 export const nudgeTimeoutFor = (platform) => (platform === "win32" ? NUDGE_TIMEOUT_WINDOWS_MS : NUDGE_TIMEOUT_MS);
 const KILL_GRACE_MS = 1_000;
 const BACKOFF_FIRST_MS = 5_000;
@@ -289,22 +291,27 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     signal?.addEventListener("abort", onAbort, { once: true });
     timers.push(setTimeout(() => hardStop("timeout"), limitMs));
     let typed = false;
+    let reasonWord = "";
     let tail = "";
     // stdout is dropped except for one marker, which the wrapper prints right after typing.
     // A short tail is kept so a marker split across chunks is still found. onTyped runs once,
     // while the run is still going, so the fact "typed" is recorded before any later stop.
     child.stdout?.on("data", (chunk) => {
-      if (typed) return;
-      tail = (tail + String(chunk)).slice(-40);
-      if (tail.includes("NUDGE-TYPED")) { typed = true; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+      tail = (tail + String(chunk)).slice(-120);
+      const word = /NUDGE-REASON:([a-z_]{1,24})/.exec(tail);
+      if (word && SUBMIT_REASONS.has(word[1]) && /NUDGE-REASON:[a-z_]+\n/.test(tail)) reasonWord = word[1];
+      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; try { onTyped?.(); } catch { /* the run result still reports it */ } }
     });
     child.stderr?.on("data", () => {});
     child.once("error", () => finish({ kind: "failed" }));
-    child.once("close", (code) => finish(stopping ? { kind: stopping, typed } : code === null ? { kind: "failed", typed } : { kind: "exit", code, typed }));
+    child.once("close", (code) => finish(stopping ? { kind: stopping, typed } : code === null ? { kind: "failed", typed } : { kind: "exit", code, typed, ...(reasonWord ? { reasonWord } : {}) }));
     child.stdin?.on("error", () => {});
     child.stdin?.end(text);
   });
 }
+
+export const unconfirmedReason = (word) => (word && SUBMIT_REASONS.has(word) ? `enter_unconfirmed:${word}` : "enter_unconfirmed");
+const isUnconfirmed = (reason) => reason === "interrupted_unconfirmed" || String(reason).startsWith("enter_unconfirmed");
 
 function backoffMs(attempts) {
   return Math.min(BACKOFF_FIRST_MS * 2 ** Math.max(0, attempts - 1), BACKOFF_MAX_MS);
@@ -414,7 +421,7 @@ export function createAntigravityNudgeChannel({
     if (!fresh.unread) {
       // Nothing new since the last notice (or nothing unread at all).
       // An unconfirmed Enter stays visible until a later notice goes through.
-      if (prior?.reason === "enter_unconfirmed" || prior?.reason === "interrupted_unconfirmed") { save(seat, { ...reset, state: "blocked", reason: prior.reason, mode, unread, attempts: 0, next_try_at: null }); return; }
+      if (isUnconfirmed(prior?.reason)) { save(seat, { ...reset, state: "blocked", reason: prior.reason, mode, unread, attempts: 0, next_try_at: null }); return; }
       const state = prior?.state === "delivering" && unread ? "delivering" : "idle";
       save(seat, { ...reset, state, reason: state === "idle" ? "" : prior.reason, mode, unread, attempts: 0, next_try_at: null });
       return;
@@ -450,7 +457,7 @@ export function createAntigravityNudgeChannel({
     // Live, typed, but not confirmed submitted (Enter failed, or the run was cut short after
     // typing): count it as notified so the line is never typed a second time, and say so.
     if (live && !exit.sent && (exit.typed || result.typed)) {
-      save(seat, { state: "blocked", reason: "enter_unconfirmed", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
+      save(seat, { state: "blocked", reason: unconfirmedReason(result.reasonWord), mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
       return;
     }
     if (exit.sent) {
