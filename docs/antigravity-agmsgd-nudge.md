@@ -31,12 +31,13 @@ reachable; an environment aiming the terminal manager at another machine gives `
 After typing, for herdr on Windows (`AGMSG_AGY_NUDGE_ENTER=auto`) no Enter is sent. The wrapper looks for the line's
 token in the conversation (outside the located input box) and otherwise exits 23 with one reason word
 (`box_has_line`, `box_empty`, `box_mismatch`, `confirmation_screen`, `box_unlocated`, `peek_failed`,
-`enter_send_failed`), shown as `enter_unconfirmed:<word>`. Delivery is at-least-once, not exactly-once. Once the wrapper has printed its "typed" marker, the line counts as
-notified and is not typed again (a durable in-flight record is written before every live run). The marker is printed
-after the typing, so a run that is cut off without the marker having been seen cannot be told apart from one that
-never typed: if the daemon process that saw it is still the same one, the seat is retried (the line may then appear
-twice); after a daemon restart an in-flight record is treated as "may have been typed" and is not retried
-(`interrupted_unconfirmed`). `AGMSG_AGY_NUDGE_ENTER=always` additionally sends
+`enter_send_failed`), shown as `enter_unconfirmed:<word>`. Delivery is best-effort: neither exactly-once nor at-least-once is guaranteed, so a notice can appear twice or not at
+all. Once the daemon has observed the wrapper's "typed" marker, the line counts as notified and is not typed again (a
+durable in-flight record is written before every live run). The marker is printed after the typing, so a run that is cut
+off before the daemon has seen it cannot be told apart from one that never typed: if the daemon process that saw the
+interruption is still the same one, the seat is retried (the line may then appear twice); after a daemon restart an
+in-flight record is treated as "may have been typed", the cursor moves on and it is not retried
+(`interrupted_unconfirmed`), so a notice that was never typed is lost until the next message arrives. `AGMSG_AGY_NUDGE_ENTER=always` additionally sends
 one Enter if the box holds exactly the line and no confirmation screen shows; `off` skips the check.
 
 ## Measured behaviour and limits
