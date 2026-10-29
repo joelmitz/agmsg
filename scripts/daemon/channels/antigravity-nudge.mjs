@@ -20,8 +20,8 @@
 // is reachable: the terminal driver talks to the local terminal manager, and a
 // daemon environment that points the manager at another machine is refused.
 
-import { lstatSync, realpathSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { assertPollActive } from "../poll-deadline.mjs";
 import { logLine, deliveryEvent } from "../log.mjs";
@@ -79,14 +79,71 @@ export function remoteTargetConfigured(env) {
   return Object.keys(env).some((key) => /^(AGMSG_)?HERDR_(MACHINE|REMOTE)/i.test(key) && env[key]);
 }
 
-export function chosenAgmsgd(installRoot, projects) {
+// Windows spells one folder several ways: C:\a\b, C:/a/b, /c/a/b (Git Bash).
+// delivery-choice is written by Git Bash (`pwd -P`, /c/...) while a registration
+// may hold another spelling. Only the SPELLING is normalized, and only for an
+// absolute drive path: a drive-relative "C:" or "C:x", a UNC name or a relative
+// path is refused (null). Case is kept except for the drive letter, because a
+// Windows directory can be case-sensitive; an unverifiable match is a non-match.
+export function toNativeWindowsPath(path) {
+  if (typeof path !== "string") return null;
+  let value = path.replace(/\\/g, "/");
+  const gitBash = value.match(/^\/([A-Za-z])(\/.*)?$/);
+  if (gitBash) value = `${gitBash[1]}:${gitBash[2] ?? "/"}`;
+  const drive = value.match(/^([A-Za-z]):\/(.*)$/);
+  if (!drive) return null;
+  const rest = drive[2].replace(/\/+/g, "/").replace(/\/$/, "");
+  return `${drive[1].toUpperCase()}:/${rest}`;
+}
+export const normalizeWindowsProject = toNativeWindowsPath;
+
+function readChoiceLines(installRoot) {
+  try { return readFileSync(join(installRoot, "run", "delivery-choice"), "utf8").split(/\r?\n/).map((line) => line.split("\t")); } catch { return []; }
+}
+
+export function chosenAgmsgd(installRoot, projects, platform = process.platform) {
   if (!projects.length) return false;
+  if (platform === "win32") {
+    const lines = readChoiceLines(installRoot).filter(([type, , value]) => type === TYPE && /^[a-z]+$/.test(value ?? ""));
+    return projects.every((project) => {
+      if (typeof project !== "string" || !project) return false;
+      const wanted = toNativeWindowsPath(project);
+      if (!wanted) return false;
+      // A line that names the folder with different letter case might be the same
+      // folder (the usual Windows case) or another one (a case-sensitive folder),
+      // and which is not checked here. Either way it could be a later opt-out, so
+      // such a conflict is refused rather than skipped.
+      const folded = wanted.toLowerCase();
+      const alias = lines.some(([, path]) => { const native = toNativeWindowsPath(path); return native && native !== wanted && native.toLowerCase() === folded; });
+      if (alias) return false;
+      // As readDeliveryChoice: the last matching line is the choice.
+      const matching = lines.filter(([, path]) => toNativeWindowsPath(path) === wanted);
+      return matching.length > 0 && matching[matching.length - 1][2] === "agmsgd";
+    });
+  }
   return projects.every((project) => {
     if (typeof project !== "string" || !project) return false;
     const names = new Set([project]);
     try { names.add(realpathSync(project)); } catch { /* an unreachable project keeps its literal name */ }
     return [...names].some((name) => readDeliveryChoice(installRoot, TYPE, name) === "agmsgd");
   });
+}
+
+// The rule file's mode where an unreadable file must NOT read as "not monitor":
+// the project folder must exist and the file must be readable or plainly absent
+// (ENOENT). Anything else is "unreadable", which the gate refuses.
+const MONITOR_MARKER = "<!-- agmsg:antigravity:monitor -->";
+export function readDeliveryModeStrict(projects, { readFile = readFileSync, isDirectory = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } } } = {}) {
+  let mode = "none";
+  for (const project of projects) {
+    if (!isDirectory(project)) return "unreadable";
+    try {
+      const text = readFile(join(project, ".agent", "rules", "agmsg.md"), "utf8");
+      if (String(text).split(/\r?\n/).includes(MONITOR_MARKER)) return "monitor";
+      mode = "turn";
+    } catch (error) { if (error?.code !== "ENOENT") return "unreadable"; }
+  }
+  return mode;
 }
 
 // Any trace of a supervisor reservation for this seat, in either file format
@@ -101,11 +158,21 @@ export function reservationTrace(runDir, team, agent) {
 }
 
 // Reads only. Returns "" when the seat may be nudged, else a fixed reason.
-export function ineligibleReason({ installRoot, registration, env }) {
+export function ineligibleReason({ installRoot, registration, env, platform = process.platform, readMode = platform === "win32" ? readDeliveryModeStrict : readDeliveryMode }) {
   if (remoteTargetConfigured(env)) return "remote_pane_unsupported";
-  if (!chosenAgmsgd(installRoot, registration.projects)) return "delivery_not_chosen";
+  if (!chosenAgmsgd(installRoot, registration.projects, platform)) return "delivery_not_chosen";
   if (reservationTrace(join(installRoot, "run"), registration.team, registration.agent)) return "supervisor_present";
-  if (readDeliveryMode(registration.projects) === "monitor") return "monitor_mode";
+  // Node reads the rule file itself, and Git Bash's path conversion does not apply to
+  // Node: on Windows every registration is turned into a native absolute path first,
+  // and one that cannot be is not guessed at.
+  let projects = registration.projects;
+  if (platform === "win32") {
+    projects = registration.projects.map(toNativeWindowsPath);
+    if (projects.some((project) => !project)) return "project_path_unresolved";
+  }
+  const mode = readMode(projects);
+  if (mode === "unreadable") return "rule_unreadable";
+  if (mode === "monitor") return "monitor_mode";
   return "";
 }
 
@@ -125,21 +192,73 @@ export function classifyExit(code) {
   }
 }
 
-function killGroup(child, signal) {
+// The bash that runs agy-nudge.sh. On Windows a bare `bash` on PATH can be WSL's
+// launcher in System32, not Git Bash, so it is named by an absolute path and
+// every candidate is checked, wherever it came from (AGMSG_BASH, EXEPATH, a Git
+// bin directory on PATH, Program Files): an absolute drive path ending in
+// \bash.exe, not under the Windows directory, System32/SysWOW64 or WindowsApps
+// (also after resolving links), a regular file, and sitting beside an MSYS
+// runtime (usr\bin\msys-2.0.dll, as Git for Windows installs). null means "no
+// usable bash": nothing is run.
+const FORBIDDEN = /\\(system32|syswow64|windowsapps|windows)\\/i;
+function acceptBash(candidate, env, { isFile, realpath }) {
+  if (typeof candidate !== "string") return null;
+  const path = candidate.replace(/\//g, "\\");
+  if (!/^[A-Za-z]:\\/.test(path) || !/\\bash\.exe$/i.test(path) || FORBIDDEN.test(path)) return null;
+  const windowsDir = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir ?? env.WINDIR;
+  const under = (value) => windowsDir && value.toLowerCase().startsWith(`${windowsDir.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase()}\\`);
+  if (under(path) || !isFile(path)) return null;
+  let real = path;
+  try { real = String(realpath(path)).replace(/\//g, "\\"); } catch { return null; }
+  if (FORBIDDEN.test(real) || under(real) || !/\\bash\.exe$/i.test(real)) return null;
+  const dir = real.slice(0, real.lastIndexOf("\\"));
+  const runtime = /\\usr\\bin$/i.test(dir) ? `${dir}\\msys-2.0.dll` : /\\bin$/i.test(dir) ? `${dir.slice(0, -4)}\\usr\\bin\\msys-2.0.dll` : null;
+  return runtime && isFile(runtime) ? path : null;
+}
+
+export function resolveBash({ platform = process.platform, env = process.env, isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } }, realpath = realpathSync } = {}) {
+  if (platform !== "win32") return "bash";
+  const candidates = [];
+  if (env.AGMSG_BASH) candidates.push(env.AGMSG_BASH);
+  if (env.EXEPATH) candidates.push(`${env.EXEPATH}\\bin\\bash.exe`);
+  for (const dir of String(env.PATH ?? env.Path ?? "").split(";")) {
+    if (/\\Git\\(usr\\)?bin\\?$/i.test(dir)) candidates.push(`${dir.replace(/\\$/, "")}\\bash.exe`);
+  }
+  for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]]) if (root) candidates.push(`${root}\\Git\\bin\\bash.exe`);
+  for (const candidate of candidates) {
+    const accepted = acceptBash(candidate, env, { isFile, realpath });
+    if (accepted) return accepted;
+  }
+  return null;
+}
+
+// Git Bash reads C:\a\b as a path with a stray backslash in $0; hand it /c/a/b.
+export function toPosixScriptPath(path, platform = process.platform) {
+  if (platform !== "win32") return path;
+  const value = String(path).replace(/\\/g, "/");
+  return value.replace(/^([A-Za-z]):\//, (_, drive) => `/${drive.toLowerCase()}/`);
+}
+
+// Windows has no process groups here: end the whole tree of the shell.
+function killTreeWindows(pid) {
+  try { execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, timeout: 3000, stdio: "ignore" }); } catch { /* already gone */ }
+}
+
+function killGroup(child, signal, platform = process.platform, killTree = killTreeWindows) {
   try {
-    if (process.platform === "win32") child.kill(signal);
+    if (platform === "win32") { killTree(child.pid); child.kill(signal); }
     else process.kill(-child.pid, signal);
   } catch { try { child.kill(signal); } catch { /* already gone */ } }
 }
 
 // Runs agy-nudge.sh with the line on stdin. Output is read and dropped: it can
 // carry paths and is never stored or logged.
-export function runNudge({ script, mode, team, agent, text, timeoutMs = NUDGE_TIMEOUT_MS, signal, spawnProcess = spawn, env = process.env }) {
+export function runNudge({ script, mode, team, agent, text, timeoutMs = NUDGE_TIMEOUT_MS, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
     let child;
     try {
-      child = spawnProcess("bash", [script, mode, team, agent, "--body", "-"], { env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true });
+      child = spawnProcess(bash, [toPosixScriptPath(script, platform), mode, team, agent, "--body", "-"], { env, stdio: ["pipe", "pipe", "pipe"], detached: platform !== "win32", windowsHide: true });
     } catch { resolve({ kind: "failed" }); return; }
     let done = false;
     let stopping = null;
@@ -153,8 +272,8 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs = NUDGE_TI
     };
     const hardStop = (kind) => {
       stopping ??= kind;
-      killGroup(child, "SIGTERM");
-      timers.push(setTimeout(() => { killGroup(child, "SIGKILL"); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind }); }, KILL_GRACE_MS));
+      killGroup(child, "SIGTERM", platform, killTree);
+      timers.push(setTimeout(() => { killGroup(child, "SIGKILL", platform, killTree); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind }); }, KILL_GRACE_MS));
     };
     const onAbort = () => hardStop("cancelled");
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -184,6 +303,8 @@ export function createAntigravityNudgeChannel({
   readSnapshot = readUnreadSnapshot,
   run = runNudge,
   hostPlatform = process.platform,
+  findBash = resolveBash,
+  readMode,
 }) {
   let stopped = false;
   let activePoll = null;
@@ -228,9 +349,10 @@ export function createAntigravityNudgeChannel({
     const prior = readRow(seat);
     const reset = { up_to: prior?.up_to ?? "", dry_up_to: prior?.dry_up_to ?? "" };
 
-    const why = ineligibleReason({ installRoot, registration, env });
+    const why = ineligibleReason({ installRoot, registration, env, platform: hostPlatform, ...(readMode ? { readMode } : {}) });
     if (why) { save(seat, { ...reset, state: "ineligible", reason: why, mode, unread: 0, attempts: 0, next_try_at: null }); return; }
-    if (hostPlatform === "win32") { save(seat, { ...reset, state: "unaddressable", reason: "platform_unsupported", mode, next_try_at: null }); return; }
+    const bash = findBash({ platform: hostPlatform, env });
+    if (!bash) { save(seat, { ...reset, state: "unaddressable", reason: "bash_unavailable", mode, next_try_at: null }); return; }
 
     let driver;
     try { driver = readDriver(paths.configPath); } catch { driver = { state: "unreadable", reason: "storage_config_unreadable" }; }
@@ -263,7 +385,7 @@ export function createAntigravityNudgeChannel({
     // overtaken by a run started from the earlier value.
     if (!deliveryEnabled(installRoot) || liveEnabled(installRoot) !== live) return;
     const text = inboxNudge(newNonce());
-    const result = await run({ script, mode, team, agent, text, signal, env });
+    const result = await run({ script, mode, team, agent, text, signal, env, platform: hostPlatform, bash });
     if (result.kind === "cancelled") return;
     const exit = result.kind === "exit" ? classifyExit(result.code)
       : result.kind === "timeout" ? { state: "blocked", reason: "nudge_timeout", backoff: true }

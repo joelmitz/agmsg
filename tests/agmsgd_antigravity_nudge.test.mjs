@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, symlinkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -390,4 +390,204 @@ test('a switch removed after the seat was read but before the run is not overtak
   await channel.pollOnce();
   await channel.stop();
   assert.deepEqual(modes, [], 'the run was not started from the earlier live value');
+});
+
+// ---- Windows (Git Bash) path: exercised here with an injected platform; the real
+// ---- machine is a separate, approved measurement.
+import { chosenAgmsgd, ineligibleReason, readDeliveryModeStrict, resolveBash, toNativeWindowsPath, toPosixScriptPath } from '../scripts/daemon/channels/antigravity-nudge.mjs';
+
+const WIN_PROJECT = '/c/Users/Me/proj';
+function winFixture(t, { readMode } = {}) {
+  const f = fixture(t);
+  writeFileSync(path.join(f.root, 'teams', 'test', 'config.json'), JSON.stringify({ agents: { agy: { registrations: [{ type: 'antigravity', project: WIN_PROJECT }] } } }));
+  writeFileSync(path.join(f.root, 'run', 'delivery-choice'), `antigravity\t${WIN_PROJECT}\tagmsgd\r\n`);
+  f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+  const seen = [];
+  const run = async (options) => { seen.push(options); return runNudge({ ...options, platform: 'linux', bash: 'bash' }); };
+  const make = (extra = {}) => createAntigravityNudgeChannel({
+    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {}, hostPlatform: 'win32',
+    findBash: () => 'C:\\Program Files\\Git\\bin\\bash.exe', ...(readMode ? { readMode } : {}), ...extra,
+  });
+  return { ...f, seen, make, run };
+}
+
+test('B2: Windows project spellings are one absolute drive path; relative, drive-relative and UNC forms are refused; the root keeps its separator', () => {
+  const forms = ['C:\\Users\\Me\\proj', 'C:/Users/Me/proj', '/c/Users/Me/proj', 'c:/Users/Me/proj/', '/C/Users/Me//proj'];
+  assert.deepEqual([...new Set(forms.map(toNativeWindowsPath))], ['C:/Users/Me/proj']);
+  assert.equal(toNativeWindowsPath('C:/'), 'C:/');
+  assert.equal(toNativeWindowsPath('/c/'), 'C:/');
+  assert.equal(toNativeWindowsPath('/c'), 'C:/');
+  for (const bad of ['C:', 'C:proj', 'proj', 'relative\\path', '\\\\server\\share\\x', '//server/share/x', '/home/u/x', '', undefined, 42]) assert.equal(toNativeWindowsPath(bad), null, String(bad));
+  assert.notEqual(toNativeWindowsPath('/c/Users/Me/proj'), toNativeWindowsPath('/c/Users/Me/PROJ'), 'case is kept: a directory can be case-sensitive');
+  assert.notEqual(toNativeWindowsPath('/c/Users/Me/proj'), toNativeWindowsPath('/d/Users/Me/proj'));
+});
+
+test('B2: the Windows delivery choice needs the same absolute path; the drive root choice never covers "C:"; the last line wins; only an explicit agmsgd counts', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-win-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(path.join(root, 'run'));
+  const write = (text) => writeFileSync(path.join(root, 'run', 'delivery-choice'), text);
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\r\n');
+  assert.equal(chosenAgmsgd(root, ['C:\\Users\\Me\\proj'], 'win32'), true);
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/PROJ'], 'win32'), false, 'a different case is not assumed to be the same folder');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/other'], 'win32'), false);
+  assert.equal(chosenAgmsgd(root, [], 'win32'), false);
+  write('antigravity\tC:/\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:'], 'win32'), false, 'drive-relative C: is not the root');
+  assert.equal(chosenAgmsgd(root, ['C:/'], 'win32'), true);
+  assert.equal(chosenAgmsgd(root, ['C:/Users'], 'win32'), false);
+  write('antigravity\tC:\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:/'], 'win32'), false, 'a drive-relative choice line is refused too');
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\nantigravity\t/c/Users/Me/proj\tmonitor\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false, 'a later monitor choice overrides');
+  // A later opt-out spelled with different letter case is never skipped as "another project".
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\nantigravity\t/c/users/me/proj\tmonitor\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false);
+  assert.equal(chosenAgmsgd(root, ['C:/users/me/proj'], 'win32'), false);
+  write('antigravity\t/c/users/me/proj\tmonitor\nantigravity\t/c/Users/Me/proj\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false, 'order does not matter');
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\nantigravity\t/c/users/me/proj\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false, 'two case-different entries (possibly two folders) are not told apart');
+  // Different folders stay independent.
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\nantigravity\t/c/Users/Me/other\tmonitor\nantigravity\t/d/Users/Me/proj\tmonitor\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), true);
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj', 'C:/Users/Me/other'], 'win32'), false, 'every project of the seat must have chosen agmsgd');
+  write('claude-code\t/c/Users/Me/proj\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false, 'another type does not count');
+  rmSync(path.join(root, 'run', 'delivery-choice'));
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'win32'), false);
+  write('antigravity\t/c/Users/Me/proj\tagmsgd\n');
+  assert.equal(chosenAgmsgd(root, ['C:/Users/Me/proj'], 'linux'), false, 'the POSIX rule is unchanged');
+});
+
+test('B1: only an absolute, real, non-WSL Git/MSYS bash.exe is accepted, wherever the candidate came from', () => {
+  const files = new Set([
+    'C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\msys-2.0.dll',
+    'C:\\Windows\\System32\\bash.exe', 'C:\\Windows\\System32\\usr\\bin\\msys-2.0.dll',
+    'C:\\Users\\Me\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe',
+    'D:\\Tools\\Git\\usr\\bin\\bash.exe', 'D:\\Tools\\Git\\usr\\bin\\msys-2.0.dll',
+    'C:\\Users\\Me\\custom\\bin\\bash.exe', 'C:\\Users\\Me\\custom\\usr\\bin\\msys-2.0.dll',
+    'E:\\nodll\\bin\\bash.exe', 'C:\\Users\\Me\\link\\bash.exe',
+  ]);
+  const dirs = new Set(['C:\\Program Files\\Git\\bin\\notafile.exe']);
+  const isFile = (p) => files.has(p) && !dirs.has(p);
+  const links = { 'C:\\Users\\Me\\link\\bash.exe': 'C:\\Windows\\System32\\bash.exe' };
+  const realpath = (p) => links[p] ?? p;
+  const env = (extra) => ({ SystemRoot: 'C:\\Windows', ...extra });
+  const pick = (extra) => resolveBash({ platform: 'win32', env: env(extra), isFile, realpath });
+  assert.equal(resolveBash({ platform: 'linux' }), 'bash');
+  assert.equal(resolveBash({ platform: 'darwin' }), 'bash');
+  assert.equal(pick({ ProgramFiles: 'C:\\Program Files', PATH: 'C:\\Windows\\System32' }), 'C:\\Program Files\\Git\\bin\\bash.exe');
+  assert.equal(pick({ PATH: 'C:\\Windows\\System32;D:\\Tools\\Git\\usr\\bin\\' }), 'D:\\Tools\\Git\\usr\\bin\\bash.exe');
+  assert.equal(pick({ AGMSG_BASH: 'C:/Users/Me/custom/bin/bash.exe' }), 'C:\\Users\\Me\\custom\\bin\\bash.exe', 'a custom Git/MSYS install is allowed when it passes every check');
+  // The inputs from the review, each now refused:
+  for (const refused of ['bash', 'bash.exe', 'C:/Windows/System32/bash.exe', 'C:\\Windows\\System32\\bash.exe', 'c:/windows/system32/bash.exe',
+    'C:/Users/Me/AppData/Local/Microsoft/WindowsApps/bash.exe', '\\\\server\\share\\bin\\bash.exe', 'C:\\Program Files\\Git\\bin\\notafile.exe',
+    'C:/Users/Me/link/bash.exe', 'E:/nodll/bin/bash.exe', 'C:\\Program Files\\Git\\bin', '']) {
+    assert.equal(pick({ AGMSG_BASH: refused }), null, `AGMSG_BASH=${refused}`);
+  }
+  assert.equal(resolveBash({ platform: 'win32', env: env({ AGMSG_BASH: 'C:/Program Files/Git/bin/bash.exe' }), isFile: () => true, realpath: () => { throw new Error('unresolvable'); } }), null, 'a path that cannot be resolved is refused');
+  assert.equal(pick({ PATH: 'C:\\Windows\\System32' }), null, 'nothing named: no bash');
+  assert.equal(resolveBash({ platform: 'win32', env: { ProgramFiles: 'C:\\Windows\\Git' }, isFile: () => true, realpath: (p) => p }), null, 'under the Windows directory');
+});
+
+test('the script path is handed to Git Bash in /c/... form on Windows and untouched elsewhere', () => {
+  assert.equal(toPosixScriptPath('C:\\Users\\Me\\agmsg\\scripts\\daemon\\agy-nudge.sh', 'win32'), '/c/Users/Me/agmsg/scripts/daemon/agy-nudge.sh');
+  assert.equal(toPosixScriptPath('D:/x/y.sh', 'win32'), '/d/x/y.sh');
+  assert.equal(toPosixScriptPath('/home/u/y.sh', 'win32'), '/home/u/y.sh');
+  assert.equal(toPosixScriptPath('/home/u/y.sh', 'linux'), '/home/u/y.sh');
+});
+
+test('B3: on Windows the rule file is read from the native path of the registration, and an unreadable rule never passes the gate', () => {
+  const asked = [];
+  const base = { installRoot: '/unused', env: {}, platform: 'win32' };
+  const registration = { team: 't', agent: 'a', projects: [WIN_PROJECT] };
+  // delivery-choice is not consulted in this unit: stub the gate order by giving a root with a choice.
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-win-rule-'));
+  mkdirSync(path.join(root, 'run'));
+  writeFileSync(path.join(root, 'run', 'delivery-choice'), `antigravity\t${WIN_PROJECT}\tagmsgd\n`);
+  try {
+    const reason = (readMode) => ineligibleReason({ ...base, installRoot: root, registration, readMode });
+    assert.equal(reason((projects) => { asked.push(projects); return 'turn'; }), '');
+    assert.deepEqual(asked, [['C:/Users/Me/proj']], 'the rule is read from C:/Users/Me/proj, not C:/c/Users/Me/proj');
+    assert.equal(reason(() => 'monitor'), 'monitor_mode');
+    assert.equal(reason(() => 'unreadable'), 'rule_unreadable');
+    assert.equal(ineligibleReason({ ...base, installRoot: root, registration: { ...registration, projects: ['relative'] }, readMode: () => 'turn' }), 'delivery_not_chosen');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  // The strict reader: marker found, plain turn rule, absent file, unreadable file, missing folder.
+  const files = { 'C:/p/.agent/rules/agmsg.md': '<!-- agmsg:antigravity:monitor -->\r\n# x\n' };
+  const readFile = (file) => { if (file in files) return files[file]; const error = new Error('x'); error.code = file.includes('denied') ? 'EACCES' : 'ENOENT'; throw error; };
+  const isDirectory = (dir) => dir !== 'C:/gone';
+  const strict = (projects) => readDeliveryModeStrict(projects, { readFile, isDirectory });
+  assert.equal(strict(['C:/p']), 'monitor', 'CRLF marker line is recognised');
+  assert.equal(strict(['C:/q']), 'none');
+  assert.equal(strict(['C:/gone']), 'unreadable');
+  assert.equal(strict(['C:/denied']), 'unreadable');
+  files['C:/turn/.agent/rules/agmsg.md'] = '# agmsg\n';
+  assert.equal(strict(['C:/turn']), 'turn');
+  assert.equal(strict(['C:/turn', 'C:/p']), 'monitor');
+});
+
+test('B3 end to end: a Windows-style registration whose rule file holds the monitor marker is never run, because the native path is read', async (t) => {
+  const asked = [];
+  const f = winFixture(t, { readMode: (projects) => { asked.push(projects); return projects[0] === 'C:/Users/Me/proj' ? 'monitor' : 'none'; } });
+  const channel = f.make();
+  await channel.pollOnce();
+  await channel.stop();
+  assert.deepEqual(asked, [['C:/Users/Me/proj']]);
+  assert.deepEqual([f.row().state, f.row().reason], ['ineligible', 'monitor_mode']);
+  assert.deepEqual(f.calls(), []);
+  assert.equal(f.seen.length, 0);
+});
+
+test('windows host: an unreadable rule folder (the default strict reader on a missing path) is refused and nothing runs', async (t) => {
+  const f = winFixture(t);
+  const channel = f.make();
+  await channel.pollOnce();
+  await channel.stop();
+  assert.deepEqual([f.row().state, f.row().reason], ['ineligible', 'rule_unreadable']);
+  assert.deepEqual(f.calls(), []);
+});
+
+test('windows host: no usable Git Bash means unaddressable and nothing runs', async (t) => {
+  const f = winFixture(t, { readMode: () => 'turn' });
+  const channel = f.make({ findBash: () => null, run: async () => { throw new Error('must not run'); } });
+  await channel.pollOnce();
+  await channel.stop();
+  assert.deepEqual([f.row().state, f.row().reason], ['unaddressable', 'bash_unavailable']);
+  assert.deepEqual(f.calls(), []);
+});
+
+test('windows host end to end: resolved bash, /c/... script path via the spawn, no process group, and the gates still apply', async (t) => {
+  const f = winFixture(t, { readMode: () => 'turn' });
+  const spawned = [];
+  const run = (options) => runNudge({
+    ...options,
+    spawnProcess: (command, args, opts) => { spawned.push({ command, args, detached: opts.detached }); return spawn('bash', args, opts); },
+  });
+  await f.make({ run }).pollOnce();
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].command, 'C:\\Program Files\\Git\\bin\\bash.exe');
+  assert.equal(spawned[0].detached, false);
+  assert.deepEqual(spawned[0].args.slice(1), ['live', 'test', 'agy', '--body', '-']);
+  assert.equal(f.sent().length, 2);
+  assert.equal(f.row().state, 'delivering');
+  addMessage(f.root, 'm2');
+  const before = spawned.length;
+  await f.make({ run, readMode: () => 'monitor' }).pollOnce();
+  assert.equal(spawned.length, before);
+  assert.equal(f.row().reason, 'monitor_mode');
+});
+
+test('windows host: a hung nudge ends the process tree and is reported', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-wkill-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'slow.sh'), 'sleep 30\n');
+  const killed = [];
+  const result = await runNudge({
+    script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 150, platform: 'win32',
+    killTree: (pid) => { killed.push(pid); try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } },
+  });
+  assert.deepEqual(result, { kind: 'timeout' });
+  assert.ok(killed.length >= 1 && Number.isInteger(killed[0]));
 });

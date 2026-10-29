@@ -45,7 +45,8 @@ IFS=$'\t' read -r REF _PROJ _TYPE _FENCE < "$REC" || true
 [ -n "$REF" ] || exit 21
 # The roster, not the record, says what this seat is (#1391): never type into a
 # pane whose seat is not registered as antigravity.
-[ "$(agmsg_registered_type "$TEAM" "$NAME" 2>/dev/null || true)" = antigravity ] || exit 22
+# (tr: a native sqlite3 on Windows ends its lines with CR)
+[ "$(agmsg_registered_type "$TEAM" "$NAME" 2>/dev/null | tr -d '\r' || true)" = antigravity ] || exit 22
 
 TERMINAL="$(agmsg_terminal_ref_terminal "$REF")" || exit 21
 BARE_ID="$(agmsg_terminal_ref_id "$REF")" || exit 21
