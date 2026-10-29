@@ -63,6 +63,16 @@ _agmsg_safe_poke_read_box() {
     _AGMSG_SAFE_POKE_IB_RC="$peek_rc"
     return 0
   fi
+  # Explicit confirmation-screen guard (16) and structure guard (15), BEFORE
+  # locating the box: see input-box.sh "agy permission guard".
+  if agmsg_input_box_prompt_blocked "${_AGMSG_SAFE_POKE_REFUSE:-}" "$screen"; then
+    _AGMSG_SAFE_POKE_IB_RC=16
+    return 0
+  fi
+  if ! agmsg_input_box_trailing_ok "${_AGMSG_SAFE_POKE_MAX_TRAILING:-}" "$screen"; then
+    _AGMSG_SAFE_POKE_IB_RC=15
+    return 0
+  fi
   region="$(agmsg_input_box_locate "$marker" "$boxed" "$screen")" || region_rc=$?
   if [ "$region_rc" -ne 0 ]; then
     # Cannot confirm where the box even is (transient redraw, alternate
@@ -388,8 +398,11 @@ agmsg_safe_poke() {
   local id="$1" text="$2" marker="$3" boxed="$4" team="$5" name="$6"
   shift 6
   local retries=0 retry_delay=2 backoff=exponential
+  _AGMSG_SAFE_POKE_REFUSE="" _AGMSG_SAFE_POKE_MAX_TRAILING=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --refuse-screen) _AGMSG_SAFE_POKE_REFUSE="${2:-}"; shift 2 ;;
+      --max-trailing) _AGMSG_SAFE_POKE_MAX_TRAILING="${2:-}"; shift 2 ;;
       --retries) retries="${2:-0}"; shift 2 ;;
       --retry-delay) retry_delay="${2:-2}"; shift 2 ;;
       --backoff) backoff="${2:-exponential}"; shift 2 ;;
