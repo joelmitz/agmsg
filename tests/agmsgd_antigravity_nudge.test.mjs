@@ -33,6 +33,29 @@ function fixture(t, { screen = 'idle', wal = false, driver = 'tmux', agents = ['
   writeFileSync(path.join(root, 'teams', 'test', 'config.json'), JSON.stringify({ agents: Object.fromEntries(agents.map(name => [name, { registrations: [{ type: 'antigravity', project }] }])) }));
   writeFileSync(path.join(project, '.agent', 'rules', 'agmsg.md'), '# agmsg Integration Rule\n## PostToolUse\nAfter each tool call, check the inbox.\n');
   for (const name of agents) writeFileSync(path.join(root, 'run', `spawn.test__${name}`), `${driver}:%1\t${project}\tantigravity\t\n`);
+  if (driver === 'herdr') {
+    // A stand-in for the herdr driver: tmux's reads (against the fake tmux), but typing and the
+    // CLI are logged only, like `agent prompt` (types, does not submit) and `pane send-keys`.
+    const base = path.join(root, 'scripts', 'drivers', 'terminals');
+    rmSync(path.join(base, 'herdr'), { recursive: true, force: true });
+    cpSync(path.join(base, 'tmux'), path.join(base, 'herdr'), { recursive: true });
+    writeFileSync(path.join(base, 'herdr', 'terminal.conf'), readFileSync(path.join(base, 'tmux', 'terminal.conf'), 'utf8').replace('name=tmux', 'name=herdr'));
+    const logFile = path.join(root, 'tmux.log');
+    writeFileSync(path.join(base, 'herdr', 'ops.sh'), `${readFileSync(path.join(base, 'tmux', 'ops.sh'), 'utf8')}
+terminal_poke() {
+  echo "agent-prompt $2" >> '${logFile}'
+  # What the screen shows after the typing: the line in the box (default), a confirmation screen, or nothing new.
+  case "\${FAKE_AFTER:-box}" in
+    box) awk -v t="$2" 'index($0, "38;5;12m>") && !d { sub(/>/, "> " t); d = 1 } 1' '${path.join(root, 'screen.ansi')}' > '${path.join(root, 'screen.tmp')}' && mv '${path.join(root, 'screen.tmp')}' '${path.join(root, 'screen.ansi')}' ;;
+    perm) cp '${path.join(screens, 'perm.ansi')}' '${path.join(root, 'screen.ansi')}' ;;
+    draft) cp '${path.join(screens, 'draft.ansi')}' '${path.join(root, 'screen.ansi')}' ;;
+  esac
+  echo ok; return 0
+}
+_herdr_bare_of() { printf '%s' "$1"; }
+_herdr_cli() { shift; echo "herdr $*" >> '${logFile}'; return "\${FAKE_HERDR_RC:-0}"; }
+`);
+  }
   if (driver === 'faketerm') {
     // tmux's driver plus a focus signal and the draft-recovery writers, each logging its call.
     const base = path.join(root, 'scripts', 'drivers', 'terminals');
@@ -59,6 +82,8 @@ case "$1" in capture-pane) if [ "$2" = -e ]; then cat '${screenFile}'; else sed 
 exit 0
 `);
   chmodSync(path.join(root, 'bin', 'tmux'), 0o755);
+  writeFileSync(path.join(root, 'bin', 'uname'), '#!/bin/sh\nif [ "$1" = -s ] && [ -n "$FAKE_UNAME_S" ]; then echo "$FAKE_UNAME_S"; else exec /usr/bin/uname "$@"; fi\n');
+  chmodSync(path.join(root, 'bin', 'uname'), 0o755);
   const env = { PATH: `${path.join(root, 'bin')}:${process.env.PATH}`, HOME: process.env.HOME, AGMSG_STORAGE_PATH: path.join(root, 'db'), AGMSG_CONFIG: path.join(root, 'config.json') };
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
   const clock = { ms: Date.UTC(2026, 9, 29) };
@@ -268,10 +293,10 @@ test('a hung or cancelled nudge is killed and reported without output', async (t
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(path.join(dir, 'slow.sh'), 'sleep 30\n');
   const started = Date.now();
-  assert.deepEqual(await runNudge({ script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 200 }), { kind: 'timeout' });
+  assert.deepEqual(await runNudge({ script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 200 }), { kind: 'timeout', typed: false });
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 100);
-  assert.deepEqual(await runNudge({ script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 10_000, signal: controller.signal }), { kind: 'cancelled' });
+  assert.deepEqual(await runNudge({ script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 10_000, signal: controller.signal }), { kind: 'cancelled', typed: false });
   assert.ok(Date.now() - started < 8000);
 });
 
@@ -322,7 +347,11 @@ test('the sources have no way to reach another machine or message content', () =
   assert.doesNotMatch(channel, /\b(writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|unlink|unlinkSync|rm|rmSync|mkdir|mkdirSync|chmod|copyFile|symlink)\b/);
   assert.doesNotMatch(channel, /--machine|node:net|node:http|\bssh\b/);
   const wrapper = readFileSync(path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh'), 'utf8').replace(/^\s*#.*$/gm, '');
-  assert.doesNotMatch(wrapper, /--machine|\bssh\b|send-keys|\btmux\b|\bherdr\b|send\.sh|\/poke\.sh/);
+  assert.doesNotMatch(wrapper, /--machine|\bssh\b|\btmux\b|send\.sh|\/poke\.sh/);
+  // The one key it can send is the Enter after typing: herdr only, live only, once.
+  assert.equal((wrapper.match(/send-keys/g) ?? []).length, 1);
+  assert.match(wrapper, /pane send-keys "\$\(_herdr_bare_of "\$BARE_ID"\)" enter/);
+  assert.ok(wrapper.indexOf('send-keys') > wrapper.indexOf('[ "$MODE" = live ] || exit 0'));
   assert.equal(remoteTargetConfigured({ HERDR_MACHINE: 'x' }), true);
   assert.equal(remoteTargetConfigured({ HERDR_MACHINE: '' }), false);
   assert.equal(remoteTargetConfigured({ PATH: '/bin' }), false);
@@ -588,7 +617,7 @@ test('windows host: a hung nudge ends the process tree and is reported', async (
     script: path.join(dir, 'slow.sh'), mode: 'dry', team: 't', agent: 'a', text: 'x', timeoutMs: 150, platform: 'win32',
     killTree: (pid) => { killed.push(pid); try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } },
   });
-  assert.deepEqual(result, { kind: 'timeout' });
+  assert.deepEqual(result, { kind: 'timeout', typed: false });
   assert.ok(killed.length >= 1 && Number.isInteger(killed[0]));
 });
 
@@ -597,4 +626,238 @@ test('a nudge gets a longer bound on Windows (about 10 s there), still under the
   assert.equal(nudgeTimeoutFor('darwin'), 10_000);
   assert.equal(nudgeTimeoutFor('win32'), 25_000);
   assert.ok(nudgeTimeoutFor('win32') < 30_000);
+});
+
+// ---- Enter after typing (Windows + herdr): every path is pinned with a stand-in herdr driver.
+function enterFixture(t, { screen = 'idle', driver = 'herdr', extraEnv = {}, live = true } = {}) {
+  const f = fixture(t, { screen, driver });
+  f.flag('agmsgd-antigravity-delivery');
+  if (live) f.flag('agmsgd-antigravity-live');
+  const channel = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: { ...f.env, ...extraEnv }, now: () => f.clock.ms, log: () => {} });
+  t.after(() => channel.stop());
+  const prompts = () => f.calls().filter(line => line.startsWith('agent-prompt'));
+  const enters = () => f.calls().filter(line => /^herdr pane send-keys .* enter$/.test(line));
+  return { ...f, channel, prompts, enters };
+}
+const WIN = { FAKE_UNAME_S: 'MINGW64_NT-10.0-26300' };
+
+test('Enter: Windows + herdr, live: one prompt then exactly one Enter, in that order, and the seat is delivering', async (t) => {
+  const f = enterFixture(t, { extraEnv: WIN });
+  await f.channel.pollOnce();
+  assert.equal(f.prompts().length, 1);
+  assert.match(f.prompts()[0], /^agent-prompt \[agmsg:[A-Za-z0-9-]+\] New messages are waiting\./);
+  assert.deepEqual(f.enters(), ['herdr pane send-keys %1 enter']);
+  const calls = f.calls();
+  assert.ok(calls.findIndex(line => line.startsWith('agent-prompt')) < calls.findIndex(line => line.includes('send-keys')), 'Enter comes after typing');
+  assert.deepEqual([f.row().state, f.row().reason], ['delivering', 'nudged']);
+  await f.channel.pollOnce();
+  assert.equal(f.enters().length, 1, 'never repeated for the same unread');
+});
+
+test('Enter: dry-run types nothing and sends no Enter, even where Enter would be sent live', async (t) => {
+  for (const mode of ['auto', 'always']) {
+    const f = enterFixture(t, { extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: mode }, live: false });
+    await f.channel.pollOnce();
+    assert.deepEqual([f.prompts(), f.enters()], [[], []]);
+    assert.deepEqual([f.row().state, f.row().reason], ['dry_run', 'would_send']);
+  }
+});
+
+test('Enter: not on Windows (auto), not with another terminal, and "off" send none', async (t) => {
+  const linux = enterFixture(t);
+  await linux.channel.pollOnce();
+  assert.deepEqual([linux.prompts().length, linux.enters()], [1, []]);
+  assert.equal(linux.row().state, 'delivering');
+  const tmux = enterFixture(t, { driver: 'tmux', extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: 'always' } });
+  await tmux.channel.pollOnce();
+  assert.deepEqual(tmux.enters(), [], 'tmux submits through its own driver; no herdr Enter');
+  const off = enterFixture(t, { extraEnv: { ...WIN, AGMSG_AGY_NUDGE_ENTER: 'off' } });
+  await off.channel.pollOnce();
+  assert.deepEqual([off.prompts().length, off.enters()], [1, []]);
+  assert.equal(off.row().state, 'delivering');
+  const forced = enterFixture(t, { extraEnv: { AGMSG_AGY_NUDGE_ENTER: 'always' } });
+  await forced.channel.pollOnce();
+  assert.deepEqual(forced.enters(), ['herdr pane send-keys %1 enter'], 'always: herdr on any OS');
+});
+
+test('Enter: a refused typing (draft, confirmation screen) sends neither the line nor an Enter', async (t) => {
+  for (const screen of ['draft', 'perm']) {
+    const f = enterFixture(t, { screen, extraEnv: WIN });
+    await f.channel.pollOnce();
+    assert.deepEqual([f.prompts(), f.enters()], [[], []], screen);
+  }
+});
+
+test('Enter failed: counted as notified (never typed again), shown as enter_unconfirmed, kept until a later notice goes through', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_HERDR_RC: '1' } });
+  await f.channel.pollOnce();
+  assert.equal(f.prompts().length, 1);
+  assert.equal(f.enters().length, 1);
+  const row = f.row();
+  assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', 'enter_unconfirmed', 0, null]);
+  assert.ok(row.up_to && row.last_nudge_at, 'the typed line counts as the notice');
+  await f.channel.pollOnce();
+  await f.channel.pollOnce();
+  assert.equal(f.prompts().length, 1, 'no second line, no second Enter');
+  assert.equal(f.enters().length, 1);
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed']);
+});
+
+test('Enter failed shows in status, with the line counted as the last nudge', async (t) => {
+  const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_HERDR_RC: '1' } });
+  await f.channel.pollOnce();
+  f.db.close();
+  const text = execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', statusScript, f.root], { encoding: 'utf8' });
+  assert.match(text, /Antigravity test\/agy: agmsgd delivering: blocked \(enter_unconfirmed\); last nudge \d+[smh] ago/);
+});
+
+test('a run cut short after typing is treated like an unconfirmed Enter; one cut short before typing is not', async (t) => {
+  for (const [result, expected, advanced] of [
+    [{ kind: 'timeout', typed: true }, 'enter_unconfirmed', true],
+    [{ kind: 'exit', code: 23, typed: true }, 'enter_unconfirmed', true],
+    [{ kind: 'timeout', typed: false }, 'nudge_timeout', false],
+    [{ kind: 'exit', code: 12, typed: false }, 'pane_unreachable', false],
+  ]) {
+    const f = fixture(t);
+    f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+    const channel = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {}, run: async () => result });
+    await channel.pollOnce();
+    await channel.stop();
+    assert.equal(f.row().reason, expected, JSON.stringify(result));
+    assert.equal(Boolean(f.row().up_to), advanced, JSON.stringify(result));
+  }
+  assert.deepEqual(classifyExit(23), { state: 'blocked', reason: 'enter_unconfirmed', typed: true });
+});
+
+test('runNudge reports typing that happened before a stop (the wrapper prints one marker after typing)', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-typed-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'typed-then-hang.sh'), 'echo NUDGE-TYPED\nsleep 30\n');
+  writeFileSync(path.join(dir, 'hang.sh'), 'sleep 30\n');
+  assert.deepEqual(await runNudge({ script: path.join(dir, 'typed-then-hang.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 400 }), { kind: 'timeout', typed: true });
+  assert.deepEqual(await runNudge({ script: path.join(dir, 'hang.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 400 }), { kind: 'timeout', typed: false });
+});
+
+test('B1: the screen is read again before the Enter; a confirmation screen, another draft or an empty box gets no Enter and is reported', async (t) => {
+  for (const after of ['perm', 'draft', 'empty']) {
+    const f = enterFixture(t, { extraEnv: { ...WIN, FAKE_AFTER: after } });
+    await f.channel.pollOnce();
+    assert.equal(f.prompts().length, 1, `${after}: the line was typed`);
+    assert.deepEqual(f.enters(), [], `${after}: no Enter`);
+    const row = f.row();
+    assert.deepEqual([row.state, row.reason, row.attempts, row.next_try_at], ['blocked', 'enter_unconfirmed', 0, null], after);
+    assert.ok(row.up_to && row.last_nudge_at, `${after}: counted as notified`);
+    await f.channel.pollOnce();
+    assert.equal(f.prompts().length, 1, `${after}: never typed a second time`);
+  }
+  const ok = enterFixture(t, { extraEnv: WIN });
+  await ok.channel.pollOnce();
+  assert.equal(ok.enters().length, 1, 'the box holding exactly this line gets its Enter');
+});
+
+test('B2: a typed marker split across stdout chunks is still recognised (timeout and abnormal exit)', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-split-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const split of [1, 3, 5, 6, 10]) {
+    for (const tail of ['sleep 30', 'exit 9']) {
+      const marker = 'NUDGE-TYPED';
+      writeFileSync(path.join(dir, 's.sh'), `printf '%s' '${marker.slice(0, split)}'\nsleep 0.2\nprintf '%s\\n' '${marker.slice(split)}'\n${tail}\n`);
+      let typedCalls = 0;
+      const result = await runNudge({ script: path.join(dir, 's.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 900, onTyped: () => { typedCalls += 1; } });
+      assert.equal(result.typed, true, `split ${split} / ${tail}`);
+      assert.equal(typedCalls, 1, 'onTyped runs once');
+      assert.equal(result.kind, tail === 'exit 9' ? 'exit' : 'timeout');
+    }
+  }
+  writeFileSync(path.join(dir, 'n.sh'), "printf '%s' 'NUDGE-'\nsleep 0.2\nprintf '%s\\n' 'OTHER'\nsleep 30\n");
+  assert.equal((await runNudge({ script: path.join(dir, 'n.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 700 })).typed, false);
+});
+
+test('B3: a stop after typing leaves the notice counted and unconfirmed, and the next poll does not type again', async (t) => {
+  const f = fixture(t);
+  f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+  let runs = 0;
+  const make = (run) => createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {}, run });
+  const after = make(async (options) => { runs += 1; options.onTyped(); return { kind: 'cancelled', typed: true }; });
+  await after.pollOnce(); await after.stop();
+  assert.deepEqual([f.row().state, f.row().reason, f.row().inflight_up_to], ['blocked', 'enter_unconfirmed', '']);
+  assert.ok(f.row().up_to && f.row().last_nudge_at);
+  const again = make(async () => { runs += 1; return { kind: 'exit', code: 0, typed: true }; });
+  await again.pollOnce(); await again.pollOnce(); await again.stop();
+  assert.equal(runs, 1, 'the typed line is not typed again');
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed']);
+});
+
+// The review's reproduction: the real deadline, a run that only learns it typed after the deadline passed.
+async function deadlineHarness(t, runAfterAbort) {
+  const f = fixture(t);
+  f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+  const { pollChannelHooks } = await import('../scripts/daemon/main.mjs');
+  const calls = { runs: 0, typedThrew: 0 };
+  const channel = createAntigravityNudgeChannel({
+    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {},
+    run: async (options) => {
+      calls.runs += 1;
+      if (calls.runs > 1) return { kind: 'exit', code: 0, typed: true };
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+      return runAfterAbort(options, calls);
+    },
+  });
+  t.after(() => channel.stop());
+  const poll = (timeoutMs) => pollChannelHooks([channel], () => {}, { timeoutMs, installRoot: f.root });
+  return { ...f, channel, calls, poll };
+}
+
+test('B3 (deadline order): abort, then a late typed notice that cannot be written, then cancelled: the next poll does not type again', async (t) => {
+  const h = await deadlineHarness(t, (options, calls) => {
+    try { options.onTyped(); } catch { calls.typedThrew += 1; }
+    return { kind: 'cancelled', typed: true };
+  });
+  await h.poll(30);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(h.calls.runs, 1);
+  assert.equal(h.calls.typedThrew, 1, 'the late write was refused: the expired scope is not relaxed');
+  assert.ok(h.row().inflight_up_to, 'the in-flight record written before the run is still there');
+  await h.poll(2000);
+  assert.equal(h.calls.runs, 1, 'the same unread is not typed again');
+  const row = h.row();
+  assert.deepEqual([row.state, row.reason, row.inflight_up_to], ['blocked', 'interrupted_unconfirmed', '']);
+  assert.ok(row.up_to && row.last_nudge_at);
+  await h.poll(2000);
+  assert.equal(h.calls.runs, 1);
+  assert.deepEqual([h.row().state, h.row().reason], ['blocked', 'interrupted_unconfirmed'], 'kept visible');
+});
+
+test('B3 (deadline order): a run cut off before it typed anything is retried normally', async (t) => {
+  const h = await deadlineHarness(t, () => ({ kind: 'cancelled', typed: false }));
+  await h.poll(30);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(h.calls.runs, 1);
+  assert.ok(h.row().inflight_up_to);
+  assert.equal(h.row().up_to, '', 'not counted as notified');
+  await h.poll(2000);
+  assert.equal(h.calls.runs, 2, 'known not to have typed: nudged again');
+  assert.deepEqual([h.row().state, h.row().reason, h.row().inflight_up_to], ['delivering', 'nudged', '']);
+});
+
+test('B3 (restart): an in-flight record left by an earlier process is never typed again, and the table gains the column if it predates it', async (t) => {
+  const f = fixture(t);
+  f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+  let runs = 0;
+  const make = () => createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {}, run: async () => { runs += 1; return { kind: 'cancelled', typed: false }; } });
+  const first = make();
+  await first.pollOnce(); await first.stop();
+  assert.equal(runs, 1);
+  // A new process has no memory of what that run did: it must not guess "not typed".
+  const second = make();
+  await second.pollOnce(); await second.stop();
+  assert.equal(runs, 1);
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'interrupted_unconfirmed']);
+  // A table created before the column existed is migrated.
+  f.db.exec('DROP TABLE beta_antigravity_nudge');
+  f.db.exec("CREATE TABLE beta_antigravity_nudge (seat TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'dry', up_to TEXT NOT NULL DEFAULT '', dry_up_to TEXT NOT NULL DEFAULT '', last_nudge_at TEXT, last_dry_at TEXT, would_send TEXT, unread INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_try_at TEXT, checked_at TEXT NOT NULL)");
+  const third = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {}, run: async () => ({ kind: 'exit', code: 0, typed: true }) });
+  await third.pollOnce(); await third.stop();
+  assert.ok(f.db.prepare('PRAGMA table_info(beta_antigravity_nudge)').all().some((column) => column.name === 'inflight_up_to'));
+  assert.equal(f.row().state, 'delivering');
 });

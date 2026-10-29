@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS beta_antigravity_nudge (
   unread INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
   next_try_at TEXT,
-  checked_at TEXT NOT NULL
+  checked_at TEXT NOT NULL,
+  inflight_up_to TEXT NOT NULL DEFAULT ''
 );
 `;
 
@@ -193,6 +194,9 @@ export function classifyExit(code) {
     case 20: return { state: "unaddressable", reason: "no_placement", backoff: true };
     case 21: return { state: "unaddressable", reason: "placement_unresolved", backoff: true };
     case 22: return { state: "blocked", reason: "seat_type_mismatch", backoff: true };
+    // Typed, but the Enter that submits it is not confirmed: the line may be sitting in the
+    // input box. Counted as notified (never typed a second time) and shown, not retried.
+    case 23: return { state: "blocked", reason: "enter_unconfirmed", typed: true };
     default: return { state: "blocked", reason: "nudge_failed", backoff: true };
   }
 }
@@ -258,7 +262,7 @@ function killGroup(child, signal, platform = process.platform, killTree = killTr
 
 // Runs agy-nudge.sh with the line on stdin. Output is read and dropped: it can
 // carry paths and is never stored or logged.
-export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows }) {
+export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
     const limitMs = timeoutMs ?? nudgeTimeoutFor(platform);
@@ -279,15 +283,24 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     const hardStop = (kind) => {
       stopping ??= kind;
       killGroup(child, "SIGTERM", platform, killTree);
-      timers.push(setTimeout(() => { killGroup(child, "SIGKILL", platform, killTree); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind }); }, KILL_GRACE_MS));
+      timers.push(setTimeout(() => { killGroup(child, "SIGKILL", platform, killTree); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind, typed }); }, KILL_GRACE_MS));
     };
     const onAbort = () => hardStop("cancelled");
     signal?.addEventListener("abort", onAbort, { once: true });
     timers.push(setTimeout(() => hardStop("timeout"), limitMs));
-    child.stdout?.on("data", () => {});
+    let typed = false;
+    let tail = "";
+    // stdout is dropped except for one marker, which the wrapper prints right after typing.
+    // A short tail is kept so a marker split across chunks is still found. onTyped runs once,
+    // while the run is still going, so the fact "typed" is recorded before any later stop.
+    child.stdout?.on("data", (chunk) => {
+      if (typed) return;
+      tail = (tail + String(chunk)).slice(-40);
+      if (tail.includes("NUDGE-TYPED")) { typed = true; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+    });
     child.stderr?.on("data", () => {});
     child.once("error", () => finish({ kind: "failed" }));
-    child.once("close", (code) => finish(stopping ? { kind: stopping } : code === null ? { kind: "failed" } : { kind: "exit", code }));
+    child.once("close", (code) => finish(stopping ? { kind: stopping, typed } : code === null ? { kind: "failed", typed } : { kind: "exit", code, typed }));
     child.stdin?.on("error", () => {});
     child.stdin?.end(text);
   });
@@ -316,6 +329,8 @@ export function createAntigravityNudgeChannel({
   let activePoll = null;
   let schemaReady = false;
   const lastSeen = new Map();
+  // In memory only (it is lost on a restart): what the last interrupted live run for a seat is known to have done.
+  const outcomes = new Map();
   const lifetime = new AbortController();
   const script = join(installRoot, "scripts", "daemon", "agy-nudge.sh");
 
@@ -327,13 +342,13 @@ export function createAntigravityNudgeChannel({
     const row = { ...(readRow(seat) ?? {}), ...fields };
     withImmediateTransaction(db, () => {
       db.prepare(`
-        INSERT INTO beta_antigravity_nudge (seat, state, reason, mode, up_to, dry_up_to, last_nudge_at, last_dry_at, would_send, unread, attempts, next_try_at, checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO beta_antigravity_nudge (seat, state, reason, mode, up_to, dry_up_to, last_nudge_at, last_dry_at, would_send, unread, attempts, next_try_at, checked_at, inflight_up_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(seat) DO UPDATE SET state=excluded.state, reason=excluded.reason, mode=excluded.mode, up_to=excluded.up_to, dry_up_to=excluded.dry_up_to,
           last_nudge_at=excluded.last_nudge_at, last_dry_at=excluded.last_dry_at, would_send=excluded.would_send, unread=excluded.unread,
-          attempts=excluded.attempts, next_try_at=excluded.next_try_at, checked_at=excluded.checked_at
+          attempts=excluded.attempts, next_try_at=excluded.next_try_at, checked_at=excluded.checked_at, inflight_up_to=excluded.inflight_up_to
       `).run(seat, row.state, row.reason, row.mode ?? "dry", row.up_to ?? "", row.dry_up_to ?? "", row.last_nudge_at ?? null, row.last_dry_at ?? null,
-        row.would_send ?? null, row.unread ?? 0, row.attempts ?? 0, row.next_try_at ?? null, iso(now()));
+        row.would_send ?? null, row.unread ?? 0, row.attempts ?? 0, row.next_try_at ?? null, iso(now()), row.inflight_up_to ?? "");
     });
     const signature = `${row.state}|${row.reason}|${row.mode}`;
     if (lastSeen.get(seat) !== signature) {
@@ -352,7 +367,22 @@ export function createAntigravityNudgeChannel({
     const { team, agent, teamConfig, projects } = registration;
     const seat = seatKey(team, agent);
     const mode = live ? "live" : "dry";
-    const prior = readRow(seat);
+    let prior = readRow(seat);
+    // A live run that started in an earlier poll and never reported back (stopped, cut off by the
+    // deadline, or the daemon restarted) left an in-flight record. Unless this process knows that
+    // run had not typed anything, the line may be in the pane: count it as notified, never type it
+    // again, and show it.
+    if (prior?.inflight_up_to) {
+      const known = outcomes.get(seat);
+      outcomes.delete(seat);
+      if (known && known.upTo === prior.inflight_up_to && !known.typed) {
+        save(seat, { inflight_up_to: "" });
+        prior = readRow(seat);
+      } else {
+        save(seat, { state: "blocked", reason: "interrupted_unconfirmed", mode, up_to: prior.inflight_up_to, last_nudge_at: prior.last_nudge_at ?? iso(now()), would_send: null, attempts: 0, next_try_at: null, inflight_up_to: "" });
+        return;
+      }
+    }
     const reset = { up_to: prior?.up_to ?? "", dry_up_to: prior?.dry_up_to ?? "" };
 
     const why = ineligibleReason({ installRoot, registration, env, platform: hostPlatform, ...(readMode ? { readMode } : {}) });
@@ -381,6 +411,8 @@ export function createAntigravityNudgeChannel({
     const unread = any.unread ? 1 : 0;
     if (!fresh.unread) {
       // Nothing new since the last notice (or nothing unread at all).
+      // An unconfirmed Enter stays visible until a later notice goes through.
+      if (prior?.reason === "enter_unconfirmed" || prior?.reason === "interrupted_unconfirmed") { save(seat, { ...reset, state: "blocked", reason: prior.reason, mode, unread, attempts: 0, next_try_at: null }); return; }
       const state = prior?.state === "delivering" && unread ? "delivering" : "idle";
       save(seat, { ...reset, state, reason: state === "idle" ? "" : prior.reason, mode, unread, attempts: 0, next_try_at: null });
       return;
@@ -391,14 +423,36 @@ export function createAntigravityNudgeChannel({
     // overtaken by a run started from the earlier value.
     if (!deliveryEnabled(installRoot) || liveEnabled(installRoot) !== live) return;
     const text = inboxNudge(newNonce());
-    const result = await run({ script, mode, team, agent, text, signal, env, platform: hostPlatform, bash });
-    if (result.kind === "cancelled") return;
+    // Durable, before anything can be typed (and while the poll is still active): "this cursor may be
+    // typed now". Cleared when the run reports back; a later poll reconciles it if it never does.
+    if (live) save(seat, { state: prior?.state ?? "idle", reason: prior?.reason ?? "", mode, inflight_up_to: fresh.upTo });
+    const result = await run({
+      script, mode, team, agent, text, signal, env, platform: hostPlatform, bash,
+      // Live only: the moment the line is typed, count it as notified and mark it unconfirmed. This
+      // is written while the poll is still active, so a stop or deadline after typing cannot lose it.
+      ...(live ? { onTyped: () => {
+        outcomes.set(seat, { upTo: fresh.upTo, typed: true });
+        save(seat, { state: "blocked", reason: "enter_unconfirmed", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
+      } } : {}),
+    });
+    if (result.kind === "cancelled") {
+      // The poll's scope is over: nothing can be written now. The in-flight record stays; remember in
+      // memory whether typing was seen, so the next poll can tell "typed" from "not typed".
+      if (live) outcomes.set(seat, { upTo: fresh.upTo, typed: Boolean(result.typed) });
+      return;
+    }
     const exit = result.kind === "exit" ? classifyExit(result.code)
       : result.kind === "timeout" ? { state: "blocked", reason: "nudge_timeout", backoff: true }
         : { state: "blocked", reason: "nudge_failed", backoff: true };
+    // Live, typed, but not confirmed submitted (Enter failed, or the run was cut short after
+    // typing): count it as notified so the line is never typed a second time, and say so.
+    if (live && !exit.sent && (exit.typed || result.typed)) {
+      save(seat, { state: "blocked", reason: "enter_unconfirmed", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
+      return;
+    }
     if (exit.sent) {
       const at = iso(now());
-      if (live) save(seat, { state: "delivering", reason: "nudged", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: at, would_send: null, unread, attempts: 0, next_try_at: null });
+      if (live) save(seat, { state: "delivering", reason: "nudged", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: at, would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
       else save(seat, { state: "dry_run", reason: "would_send", mode, up_to: reset.up_to, dry_up_to: fresh.upTo, last_dry_at: at, would_send: text, unread, attempts: 0, next_try_at: null });
       return;
     }
@@ -406,7 +460,7 @@ export function createAntigravityNudgeChannel({
     let { state, reason } = exit;
     if (exit.counts && attempts >= UNCONFIRMED_LIMIT) { state = "blocked"; reason = "input_box_unconfirmed"; }
     const wait = exit.recheckMs ?? (exit.backoff ? backoffMs(attempts) : 0);
-    save(seat, { ...reset, state, reason, mode, unread, attempts, next_try_at: wait ? iso(now() + wait) : null });
+    save(seat, { ...reset, state, reason, mode, unread, attempts, next_try_at: wait ? iso(now() + wait) : null, inflight_up_to: "" });
   }
 
   async function pollOnce({ signal } = {}) {
@@ -418,7 +472,13 @@ export function createAntigravityNudgeChannel({
       if (roster.state !== "ok") { log(`channel: Antigravity roster unavailable (${roster.reason})`); return; }
       if (!schemaReady) {
         assertPollActive();
-        withImmediateTransaction(db, () => db.exec(ANTIGRAVITY_NUDGE_SCHEMA));
+        withImmediateTransaction(db, () => {
+          db.exec(ANTIGRAVITY_NUDGE_SCHEMA);
+          // A table made before the in-flight record existed gains the column.
+          if (!db.prepare("PRAGMA table_info(beta_antigravity_nudge)").all().some((column) => column.name === "inflight_up_to")) {
+            db.exec("ALTER TABLE beta_antigravity_nudge ADD COLUMN inflight_up_to TEXT NOT NULL DEFAULT ''");
+          }
+        });
         schemaReady = true;
       }
       const paths = {

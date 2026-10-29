@@ -13,7 +13,21 @@
 # 14 draft, 15 input box not confirmed, 16 confirmation screen showing, 10/12
 # the driver or pane is unreachable, 13 unsupported. Added here:
 # 20 no placement record, 21 the record or driver does not resolve,
-# 22 the seat is not an antigravity seat.
+# 22 the seat is not an antigravity seat, 23 (live only) the line was typed but
+# the Enter that submits it could not be sent or confirmed.
+#
+# Enter: on Windows, herdr's `agent prompt` puts the text in the input box and does
+# not submit it (rules/agents/herdr.md; also seen with `pane send-text` on herdr
+# 0.9.3), so in live mode, after a successful typing, ONE Enter is sent with
+# `pane send-keys` (which works on any pane, agent-recognised or not). Only for herdr on Windows (AGMSG_AGY_NUDGE_ENTER=auto, the
+# default); off = never; always = herdr on any OS. Never in dry mode, never repeated,
+# and never retried here: whether an Enter on an already-empty agy input is harmless
+# has not been measured, and a failed or unconfirmed Enter leaves the line in the
+# box, which the daemon reports (exit 23) instead of typing the line a second time.
+# Just before the Enter the screen is read again and the Enter is sent only if no
+# confirmation screen shows and the input box holds exactly this line (else exit 23).
+# After typing, the line NUDGE-TYPED is printed so the caller knows typing happened
+# even if this script is later stopped.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,4 +91,35 @@ INPUT_MAX_TRAILING="$(agmsg_type_get antigravity input_max_trailing_lines)"
 RC=0
 agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
   --retries 0 --refuse-screen "$INPUT_REFUSE" --max-trailing "$INPUT_MAX_TRAILING" >/dev/null 2>&1 || RC=$?
-exit "$RC"
+[ "$RC" -eq 0 ] || exit "$RC"
+# A dry run ends here: it typed nothing and sends no Enter.
+[ "$MODE" = live ] || exit 0
+echo NUDGE-TYPED
+
+WANT_ENTER=0
+case "${AGMSG_AGY_NUDGE_ENTER:-auto}" in
+  off) exit 0 ;;
+  always) WANT_ENTER=1 ;;
+  *) case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) WANT_ENTER=1 ;; esac ;;
+esac
+[ "$WANT_ENTER" -eq 1 ] && [ "$TERMINAL" = herdr ] || exit 0
+declare -F _herdr_cli >/dev/null 2>&1 && declare -F _herdr_bare_of >/dev/null 2>&1 || exit 23
+
+# The screen was judged BEFORE typing. Read it again now and send the Enter only when it
+# is still safe: not a confirmation screen, the input box located, and its whole content
+# exactly this notice line. Anything else (a screen that changed, another draft, an
+# already-empty box, a box that cannot be read) gets no Enter and is reported (23).
+_agy_nudge_norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
+sleep 1
+if declare -F terminal_peek_styled >/dev/null 2>&1; then
+  SCREEN_NOW="$(terminal_peek_styled "$BARE_ID" 2>/dev/null)" || exit 23
+else
+  SCREEN_NOW="$(terminal_peek "$BARE_ID" 2>/dev/null)" || exit 23
+fi
+if agmsg_input_box_prompt_blocked "$INPUT_REFUSE" "$SCREEN_NOW"; then exit 23; fi
+agmsg_input_box_trailing_ok "$INPUT_MAX_TRAILING" "$SCREEN_NOW" || exit 23
+REGION_NOW="$(agmsg_input_box_locate "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN_NOW")" || exit 23
+BOX_TEXT="$(agmsg_input_box_draft_text "$INPUT_MARKER" "$INPUT_BOXED" "$REGION_NOW")" || exit 23
+[ -n "$(_agy_nudge_norm "$BOX_TEXT")" ] && [ "$(_agy_nudge_norm "$BOX_TEXT")" = "$(_agy_nudge_norm "$TEXT")" ] || exit 23
+_herdr_cli "$BARE_ID" pane send-keys "$(_herdr_bare_of "$BARE_ID")" enter >/dev/null 2>&1 || exit 23
+exit 0
