@@ -32,6 +32,15 @@ export async function prepareClaimWithCodexSchema(prepareClaim) {
   return prepared;
 }
 
+// The channels a daemon runs when the caller supplies none. One place, so a
+// test can state exactly which channels a default start brings up.
+export function createDefaultChannels({ db, installRoot, expectedOpGen }) {
+  return [
+    createCodexQueueChannel({ db, installRoot, expectedOpGen }),
+    createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
+  ];
+}
+
 export async function pollChannelHooks(channelHooks, log = () => {}, { timeoutMs = CHANNEL_DEADLINE_MS, signal, installRoot } = {}) {
   for (const [index, hook] of channelHooks.entries()) {
     if (signal?.aborted) break;
@@ -241,10 +250,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   }
   gen = started.gen;
   controlHandle = started.controlHandle;
-  channelHooks.push(...(createChannels ? createChannels({ db, installRoot, expectedOpGen }) : [
-    createCodexQueueChannel({ db, installRoot, expectedOpGen }),
-    createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
-  ]));
+  channelHooks.push(...((createChannels ?? createDefaultChannels)({ db, installRoot, expectedOpGen })));
 
   process.on("SIGTERM", () => doStop("normal"));
 
