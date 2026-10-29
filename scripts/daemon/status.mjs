@@ -27,6 +27,7 @@ import { isAlive } from "./executor.mjs";
 import { openInstallDb } from "./db.mjs";
 import { PROTOCOL_VERSION } from "./control.mjs";
 import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
+import { readAntigravityObservation, formatAntigravitySeats } from "./channels/antigravity-observe.mjs";
 
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
@@ -167,7 +168,8 @@ export function readOwnerAndIntentReadOnly(installRoot) {
       owner.state === "none" || owner.executor_pid == null
         ? null
         : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
-    return { owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt };
+    const antigravityObserve = readAntigravityObservation(db, installRoot);
+    return { owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt, antigravityObserve };
   } finally {
     db.close();
   }
@@ -210,9 +212,9 @@ async function main() {
     process.stderr.write("usage: status.mjs <installRoot>\n");
     process.exit(2);
   }
-  let owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt;
+  let owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt, antigravityObserve;
   try {
-    ({ owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt } = readOwnerAndIntentReadOnly(installRoot));
+    ({ owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt, antigravityObserve } = readOwnerAndIntentReadOnly(installRoot));
   } catch (error) {
     // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
@@ -239,7 +241,7 @@ async function main() {
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, antigravity_observe: antigravityObserve, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatAntigravitySeats(antigravityObserve)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }
