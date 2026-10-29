@@ -1,0 +1,63 @@
+# agmsgd notices for Antigravity (agy): observation and nudge channels
+
+Status: experimental, off by default. Both channels are additions; the Claude Code and Codex channels, `agmsg delivery`
+for those types, and the Antigravity monitor / turn modes are unchanged.
+
+agmsgd never delivers message bodies. For an Antigravity seat it can type ONE fixed line into the seat's pane
+(`[agmsg:<nonce>] New messages are waiting. Check your agmsg inbox.`); the agent reads its own inbox, and that read marks
+messages read. agmsgd does not write the message store, read cursors, role-session records or rule files.
+
+## Switches (files under `run/`)
+
+| File | Effect |
+|---|---|
+| `observe-antigravity` | The observation channel records each Antigravity seat (delivery mode, supervisor presence and phase) and `agmsg daemon status` shows it. Types nothing. |
+| `agmsgd-antigravity-delivery` | The nudge channel runs in **dry-run**: every check reads the real screen, nothing is typed, and the line that would have been typed is recorded. `agmsg daemon offer antigravity` also stops saying "unavailable". |
+| `agmsgd-antigravity-live` | Together with the delivery file, the nudge channel really types. The live file alone does nothing. |
+
+A seat is nudged only when all of these hold (re-read on every poll): its project explicitly chose `agmsgd` in
+`run/delivery-choice`; no supervisor reservation exists (either file format, even a stale one); its rule file is not the
+monitor marker; the delivery file exists. `agmsg delivery agmsgd --type antigravity` writes the turn rule (never the
+monitor rule, which tells agy not to read its inbox) and refuses while a monitor runs or a batch is unresolved.
+
+## What the daemon does with the pane
+
+It runs `scripts/daemon/agy-nudge.sh`, which uses the same pane path as `poke.sh` (placement record, terminal driver,
+`safe-poke` with the confirmation-screen guard) without poke's agmsg-message fallback. Exit codes become seat states:
+14 draft and 15 input box not confirmed back off (15 blocks after 10 in a row); 16 confirmation screen is not retried
+(re-judged once a minute); 10/12/13 and a missing placement are `unaddressable`. Only a pane on the daemon's own host is
+reachable; an environment aiming the terminal manager at another machine gives `remote_pane_unsupported`.
+
+After typing, for herdr on Windows (`AGMSG_AGY_NUDGE_ENTER=auto`) no Enter is sent. The wrapper looks for the line's
+token in the conversation (outside the located input box) and otherwise exits 23 with one reason word
+(`box_has_line`, `box_empty`, `box_mismatch`, `confirmation_screen`, `box_unlocated`, `peek_failed`,
+`enter_send_failed`), shown as `enter_unconfirmed:<word>`. A typed-but-unconfirmed line counts as notified and is never
+typed twice (a durable in-flight record is written before the run). `AGMSG_AGY_NUDGE_ENTER=always` additionally sends
+one Enter if the box holds exactly the line and no confirmation screen shows; `off` skips the check.
+
+## Measured behaviour and limits
+
+Facts below were observed in October 2026 with Antigravity CLI 1.4.10, herdr 0.9.3 on Windows 11 (Git Bash), using a
+throwaway project, team and seat. Anything not observed is marked as a hypothesis.
+
+- Fact: `herdr agent prompt` on an agy pane submits by itself; the line appeared in the conversation and was answered.
+  `herdr pane send-text` on an ordinary shell pane only places text; Enter is needed there.
+- Fact (live, 3 runs each): idle 3/3 delivered and read; a draft in the box 3/3 not typed; a permission screen showing
+  3/3 not typed; no mixed-in text, no duplicate notice.
+- Fact: with a long answer being generated, two runs typed the line while generation was in progress (agy queued it and
+  handled it afterwards). Two runs where the live file was already present delivered after generation ended, about 45 s
+  after the message arrived, with no state change logged in between. Hypothesis: the poll during generation could not
+  confirm the input box and backed off.
+- Fact: one nudge takes about 10 s on Windows (Git Bash start-up plus local terminal-manager calls), so the run limit
+  is 25 s there and 10 s elsewhere. Through `herdr --machine`, one call took 13 to 22 s; remote panes are unsupported.
+- Fact: agy's default shell on Windows is PowerShell, so an agent may first try a bare `bash` and then retry with the
+  full path; each attempt asks for permission separately.
+- Fact: `inbox.sh` cannot detect the caller type inside agy (no strong session variable); use
+  `check-inbox.sh antigravity <project>`.
+- Fact: the notice says "Check your agmsg inbox"; an agent may run an `agmsg` command found on its PATH. On the test
+  machine that was an installed shim outside the throwaway setup. Pointing the agent's `HOME` at a throwaway directory
+  that holds its own `bin/agmsg` isolated this (done in the test shell only).
+- Fact: agy lists skills from the workspace's `.agents/skills/` and `~/.gemini/...`; the installed agmsg skill under
+  `~/.agents/skills/` was not listed. Hypothesis: which skill wins on a name clash is not known.
+- Not measured: an Enter on an empty agy input; other agy versions; other platforms for the Windows path; multi-seat
+  hosts; a resident (Task Scheduler) daemon.
