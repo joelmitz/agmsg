@@ -247,8 +247,6 @@ export function createClaudeCodeQueueChannel({
       result = { state: "failed", reason: `send_error:${error?.code ?? error?.message ?? String(error)}` };
     }
     if (result.state !== "sent") {
-      // fork: agmsgd.log is the only record of a nudge, so log the outcome.
-      log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} send failed (${result.reason})`);
       setQueueState(db, id, "expired");
       if (result.reason === "socket_error:ENOENT" || result.reason === "messaging_socket_missing") {
         saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
@@ -257,7 +255,6 @@ export function createClaudeCodeQueueChannel({
       }
       return;
     }
-    log(`channel: Claude Code seat ${team}/${agent} nudge ${nonce} sent`);
     // A completed socket write is delivery. Keep the snapshot cursor on the
     // existing confirmed row; neither inbox reads nor transcript evidence gate
     // later nudges for unread messages beyond that cursor.

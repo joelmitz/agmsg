@@ -35,11 +35,11 @@ function channelFixture(t, hostPlatform = 'linux') {
   ensureClaudeCodeChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
   t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
-  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, sequence: 1, hours: 0, alive: { state: 'ok' }, logs: [] };
+  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, sequence: 1, hours: 0, alive: { state: 'ok' } };
   const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
-    log: (message) => { state.logs.push(message); },
+    log: () => {},
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'alice', teamConfig: { agents: { alice: { registrations: [{ type: 'claude-code', project: root }] } } } }] }),
     readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: state.session, ...state.record } }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
@@ -301,19 +301,6 @@ for (const reason of ['socket_error:ENOENT', 'messaging_socket_missing', 'connec
     await channel.stop();
   });
 }
-
-// fork: agmsgd.log is the only record of a nudge, so each send and each failed
-// send is logged once -- not on every poll.
-test('each nudge send and each failed send is logged once', async (t) => {
-  const { state } = channelFixture(t);
-  let calls = 0;
-  const channel = createClaudeCodeQueueChannel({ ...state.options, send: async () => ++calls === 1 ? { state: 'failed', reason: 'send_timeout' } : { state: 'sent' } });
-  for (let i = 0; i < 4; i += 1) await channel.pollOnce();
-  assert.equal(calls, 2);
-  assert.equal(state.logs.filter((line) => / send failed \(send_timeout\)$/.test(line)).length, 1);
-  assert.equal(state.logs.filter((line) => / sent$/.test(line)).length, 1);
-  await channel.stop();
-});
 
 // Only on a Windows machine: a real pipe, probed by the preflight, then nudged.
 test('Windows pipe: the preflight makes no connection, and an authenticated nudge is delivered', { skip: process.platform !== 'win32' }, async (t) => {
