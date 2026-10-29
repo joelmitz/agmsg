@@ -51,8 +51,9 @@ not general statements about the products. Anything not observed is marked as a 
 - Fact (live, 3 runs each): idle 3/3 delivered and read; a draft in the box 3/3 not typed; a permission screen showing
   3/3 not typed; no mixed-in text, no duplicate notice.
 - Fact: with a long answer being generated, two runs typed the line while generation was in progress (agy queued it and
-  handled it afterwards). Two runs where the live file was already present delivered after generation ended, about 45 s
-  after the message arrived, with no state change logged in between. Hypothesis: the poll during generation could not
+  handled it afterwards). In two runs where the live file was already present, the line was typed only after generation had ended: about
+  45 s or more after the end of generation, and roughly 65 to 75 s after the message arrived (times read from
+  screen captures taken every 10 to 15 s, so approximate), with no state change logged in between. Hypothesis: the poll during generation could not
   confirm the input box and backed off.
 - Fact: one nudge takes about 10 s on Windows (Git Bash start-up plus local terminal-manager calls), so the run limit
   is 25 s there and 10 s elsewhere. Through `herdr --machine`, one call took 13 to 22 s; remote panes are unsupported.
