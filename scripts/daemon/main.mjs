@@ -20,6 +20,8 @@ import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
+import { createAntigravityObserveChannel } from "./channels/antigravity-observe.mjs";
+import { createAntigravityNudgeChannel } from "./channels/antigravity-nudge.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
 
@@ -30,6 +32,20 @@ export async function prepareClaimWithCodexSchema(prepareClaim) {
   ensureCodexChannelSchema(prepared.db);
   ensureClaudeCodeChannelSchema(prepared.db);
   return prepared;
+}
+
+// The channels a daemon runs when the caller supplies none. One place, so a
+// test can state exactly which channels a default start brings up.
+export function createDefaultChannels({ db, installRoot, expectedOpGen }) {
+  return [
+    createCodexQueueChannel({ db, installRoot, expectedOpGen }),
+    createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
+    // Observation only and off unless run/observe-antigravity exists.
+    createAntigravityObserveChannel({ db, installRoot }),
+    // Off unless run/agmsgd-antigravity-delivery exists; dry-run unless
+    // run/agmsgd-antigravity-live exists too.
+    createAntigravityNudgeChannel({ db, installRoot }),
+  ];
 }
 
 export async function pollChannelHooks(channelHooks, log = () => {}, { timeoutMs = CHANNEL_DEADLINE_MS, signal, installRoot } = {}) {
@@ -241,10 +257,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   }
   gen = started.gen;
   controlHandle = started.controlHandle;
-  channelHooks.push(...(createChannels ? createChannels({ db, installRoot, expectedOpGen }) : [
-    createCodexQueueChannel({ db, installRoot, expectedOpGen }),
-    createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
-  ]));
+  channelHooks.push(...((createChannels ?? createDefaultChannels)({ db, installRoot, expectedOpGen })));
 
   process.on("SIGTERM", () => doStop("normal"));
 

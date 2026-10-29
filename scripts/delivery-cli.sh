@@ -121,6 +121,13 @@ case "$ACTION" in
     if [ "$TYPE" = claude-code ]; then
       bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT" >/dev/null
       echo "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it."
+    elif [ "$TYPE" = antigravity ]; then
+      # Not monitor: its rule file tells agy never to read its inbox, so an agmsgd
+      # notice could not be acted on. The turn rule lets agy read it. Setting it
+      # refuses while a monitor is running or has an unresolved batch, and nothing
+      # is recorded then.
+      bash "$SCRIPT_DIR/delivery.sh" set turn "$TYPE" "$PROJECT" || { echo "agmsg delivery: this project's delivery is unchanged" >&2; exit 1; }
+      echo "agmsgd delivers to this Antigravity project. Restart agy so it reads the updated rule file."
     else
       echo "This session keeps its current delivery until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
       bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"

@@ -1025,6 +1025,14 @@ cmd_offer() {
   local type="${1:-}" desired node_path found
   case "$type" in
     claude-code|codex) ;;
+    # Antigravity is offered only while the install has turned its delivery on
+    # (run/agmsgd-antigravity-delivery, off by default). Without it the answer
+    # is the one every other type gets.
+    antigravity)
+      if [ ! -f "$SKILL_DIR/run/agmsgd-antigravity-delivery" ] || [ -L "$SKILL_DIR/run/agmsgd-antigravity-delivery" ]; then
+        echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0
+      fi
+      ;;
     *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
   esac
   desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | tr -d '\r' || true)"
