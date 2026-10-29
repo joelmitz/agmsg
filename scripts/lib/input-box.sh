@@ -460,7 +460,7 @@ agmsg_input_box_draft_text() {
   done
 }
 
-# ---- agy permission guard (proposal) -------------------------------------
+# ---- confirmation-screen guard (type.conf input_refuse_screen / input_max_trailing_lines) ----
 # A confirmation screen (permission / trust) is drawn BELOW the last rule line,
 # with no input box of its own. Judging by "where the box is" alone is not
 # enough: the last two rule lines may then enclose an old transcript line (an

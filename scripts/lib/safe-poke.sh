@@ -38,9 +38,18 @@ _AGMSG_SAFE_POKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #                                  same finding as "found it, and it looks
 #                                  like someone is typing", and conflating
 #                                  them into one code and message hid which
-#                                  one actually happened); anything else = a
-#                                  driver-level terminal_peek failure,
-#                                  propagate as-is
+#                                  one actually happened); 16 = a
+#                                  confirmation screen (permission/trust) is
+#                                  showing, so nothing may be typed -- NOT a
+#                                  driver failure, and never retried (the
+#                                  caller must wait for a person to answer
+#                                  it); anything else = a driver-level
+#                                  terminal_peek failure, propagate as-is.
+#                                  16 and the extra 15 case (more non-blank
+#                                  lines below the last rule than the type's
+#                                  input_max_trailing_lines) come from the
+#                                  optional guards, see agmsg_safe_poke's
+#                                  --refuse-screen / --max-trailing
 #   _AGMSG_SAFE_POKE_IB_SNAPSHOT  normalized comparison key, meaningful only
 #                                  when _AGMSG_SAFE_POKE_IB_RC = 0
 #   _AGMSG_SAFE_POKE_IB_REGION    the located STYLED region, set whenever
@@ -367,6 +376,7 @@ _agmsg_safe_poke_recover() {
 # agmsg_safe_poke <id> <text> <input_marker> <input_boxed> <team> <name>
 #                 [--retries N] [--retry-delay SECONDS]
 #                 [--backoff fixed|exponential]
+#                 [--refuse-screen LIST] [--max-trailing N]
 #
 # Types <text> into pane <id> and submits it via terminal_poke, after the
 # input-box safety check above (#1321/#1322: two snapshots ~1s apart, a
@@ -381,12 +391,24 @@ _agmsg_safe_poke_recover() {
 # fact each caller already has cheaply in scope. An empty marker means: no
 # check, one unconditional terminal_poke call.
 #
+# Optional guards (a type opts in through its manifest; poke.sh passes them):
+#   --refuse-screen "<a|b|c>"  "|"-separated literal line prefixes
+#       (type.conf input_refuse_screen). A line BELOW the last rule line that
+#       starts with one of them means a confirmation screen is showing:
+#       return 16, type nothing. 16 is NOT retried (only 14 and 15 are).
+#   --max-trailing N  (type.conf input_max_trailing_lines) more than N
+#       non-blank lines below the last rule line is not a live input box:
+#       return 15, which keeps its usual retry behaviour.
+# Both are checked before the box is located. Empty/absent = no guard, so
+# every other type behaves exactly as before.
+#
 # <team>/<name> are used only for the #1384 draft file's name and its
 # diagnostic messages; a caller with no natural (team, name) pair may pass
 # empty strings for both.
 #
-# Return value is terminal_poke's OWN convention, extended by two codes this
-# file's own input-box check owns: 0 delivered, 14 refused (a real draft with
+# Return value is terminal_poke's OWN convention, extended by three codes this
+# file's own input-box check owns: 0 delivered, 16 refused (a confirmation
+# screen is showing; not retried, not a driver failure), 14 refused (a real draft with
 # no safe way through), 15 refused (the box's own structure could not be
 # confirmed on this read -- #1391/#1402, distinct from 14: "could not
 # locate" is not "found it and it looks occupied"), anything else the
