@@ -394,7 +394,7 @@ test('a switch removed after the seat was read but before the run is not overtak
 
 // ---- Windows (Git Bash) path: exercised here with an injected platform; the real
 // ---- machine is a separate, approved measurement.
-import { chosenAgmsgd, ineligibleReason, readDeliveryModeStrict, resolveBash, toNativeWindowsPath, toPosixScriptPath } from '../scripts/daemon/channels/antigravity-nudge.mjs';
+import { nudgeTimeoutFor, chosenAgmsgd, ineligibleReason, readDeliveryModeStrict, resolveBash, toNativeWindowsPath, toPosixScriptPath } from '../scripts/daemon/channels/antigravity-nudge.mjs';
 
 const WIN_PROJECT = '/c/Users/Me/proj';
 function winFixture(t, { readMode } = {}) {
@@ -590,4 +590,11 @@ test('windows host: a hung nudge ends the process tree and is reported', async (
   });
   assert.deepEqual(result, { kind: 'timeout' });
   assert.ok(killed.length >= 1 && Number.isInteger(killed[0]));
+});
+
+test('a nudge gets a longer bound on Windows (about 10 s there), still under the 30 s channel deadline', () => {
+  assert.equal(nudgeTimeoutFor('linux'), 10_000);
+  assert.equal(nudgeTimeoutFor('darwin'), 10_000);
+  assert.equal(nudgeTimeoutFor('win32'), 25_000);
+  assert.ok(nudgeTimeoutFor('win32') < 30_000);
 });

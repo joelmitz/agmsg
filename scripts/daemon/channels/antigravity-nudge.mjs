@@ -38,6 +38,11 @@ export const LIVE_FLAG = "agmsgd-antigravity-live";
 export const CHANNEL_NAME = "antigravity-nudge";
 const TYPE = "antigravity";
 const NUDGE_TIMEOUT_MS = 10_000;
+// A nudge on Windows takes about 10 s (measured on a real machine: Git Bash start-up
+// and several local terminal-manager calls), so it gets a longer bound there; it
+// stays under the 30 s channel deadline.
+const NUDGE_TIMEOUT_WINDOWS_MS = 25_000;
+export const nudgeTimeoutFor = (platform) => (platform === "win32" ? NUDGE_TIMEOUT_WINDOWS_MS : NUDGE_TIMEOUT_MS);
 const KILL_GRACE_MS = 1_000;
 const BACKOFF_FIRST_MS = 5_000;
 const BACKOFF_MAX_MS = 300_000;
@@ -253,9 +258,10 @@ function killGroup(child, signal, platform = process.platform, killTree = killTr
 
 // Runs agy-nudge.sh with the line on stdin. Output is read and dropped: it can
 // carry paths and is never stored or logged.
-export function runNudge({ script, mode, team, agent, text, timeoutMs = NUDGE_TIMEOUT_MS, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows }) {
+export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
+    const limitMs = timeoutMs ?? nudgeTimeoutFor(platform);
     let child;
     try {
       child = spawnProcess(bash, [toPosixScriptPath(script, platform), mode, team, agent, "--body", "-"], { env, stdio: ["pipe", "pipe", "pipe"], detached: platform !== "win32", windowsHide: true });
@@ -277,7 +283,7 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs = NUDGE_TI
     };
     const onAbort = () => hardStop("cancelled");
     signal?.addEventListener("abort", onAbort, { once: true });
-    timers.push(setTimeout(() => hardStop("timeout"), timeoutMs));
+    timers.push(setTimeout(() => hardStop("timeout"), limitMs));
     child.stdout?.on("data", () => {});
     child.stderr?.on("data", () => {});
     child.once("error", () => finish({ kind: "failed" }));
