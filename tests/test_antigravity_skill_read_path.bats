@@ -38,6 +38,8 @@ teardown() { teardown_test_env; }
   grep -qF 'Do not fall back to `history.sh`' "$OUT"
   grep -qF 'do not repeat it in a loop' "$OUT"
   grep -qF 'do not pass a team or a role' "$OUT"
+  grep -qF 'replaces the shared default'"'"'s per-TEAM `inbox.sh` loop and runs once for the project' "$OUT"
+  grep -qF 'do not run the shared default inbox read before the monitor check below' "$OUT"
 }
 
 @test "antigravity skill: the monitor prohibition is kept and the read is conditional on no monitor" {
