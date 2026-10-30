@@ -855,9 +855,9 @@ async function deadlineHarness(t, runAfterAbort) {
   const f = fixture(t);
   f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
   const { pollChannelHooks } = await import('../scripts/daemon/main.mjs');
-  const calls = { runs: 0, typedThrew: 0 };
+  const calls = { runs: 0, typedThrew: 0, lines: [] };
   const channel = createAntigravityNudgeChannel({
-    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {},
+    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: (line) => calls.lines.push(line),
     run: async (options) => {
       calls.runs += 1;
       if (calls.runs > 1) return { kind: 'exit', code: 0, typed: true };
@@ -987,3 +987,28 @@ test('a confirmed run is recorded too (nudged), and a refused one carries its re
   }
 });
 
+test('B1: a run that ends with an error after the poll deadline writes no nudge_run line (an expired scope cannot publish late writes)', async (t) => {
+  const h = await deadlineHarness(t, () => ({ kind: 'failed' }));
+  await h.poll(30);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(h.calls.runs, 1);
+  assert.deepEqual(h.calls.lines.filter((line) => line.includes('"nudge_run"')), [], 'no diagnostic line after the deadline');
+  // the same run inside a live scope is recorded
+  const g = await deadlineHarness(t, () => ({ kind: 'failed' }));
+  g.calls.runs = 1; // second call onward returns a confirmed exit (the harness's later-poll behaviour)
+  await g.poll(2000);
+  assert.equal(g.calls.lines.filter((line) => line.includes('"nudge_run"')).length, 1, 'inside an active poll the run is recorded');
+});
+
+test('stage markers that arrive in one chunk are not ordered by the clock: typing is first, every event of the chunk shares one time, duplicates count once', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-chunk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'one-chunk.sh'), "printf 'NUDGE-TYPED\\nNUDGE-CHECK:1\\nNUDGE-CHECK:1\\nNUDGE-CHECK:2\\n'\nexit 0\n");
+  let ticks = 0;
+  const stages = {};
+  const result = await runNudge({ script: path.join(dir, 'one-chunk.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages, clock: () => { ticks += 1; return ticks; } });
+  assert.deepEqual([result.kind, result.code], ['exit', 0]);
+  assert.equal(stages.checks, 2, 'a duplicate marker is counted once');
+  assert.ok(stages.typedMs <= stages.lastCheckMs, `typing is never later than a check: ${JSON.stringify(stages)}`);
+  assert.ok(stages.lastCheckMs <= stages.totalMs, JSON.stringify(stages));
+});

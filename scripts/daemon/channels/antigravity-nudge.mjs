@@ -266,7 +266,7 @@ function killGroup(child, signal, platform = process.platform, killTree = killTr
 // carry paths and is never stored or logged.
 // `stages`, when given, is filled in as the run goes (milliseconds since the spawn): typedMs (the marker was seen), checks (how many delivery checks
 // the wrapper reported starting, from NUDGE-CHECK:<n>), lastCheckMs, and totalMs (when the run ended). Numbers only, never text.
-export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped, stages, clock = Date.now }) {
+export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped, stages, clock = () => performance.now() }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
     const limitMs = timeoutMs ?? nudgeTimeoutFor(platform);
@@ -305,14 +305,17 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
       tail = (tail + String(chunk)).slice(-120);
       const word = /NUDGE-REASON:([a-z_]{1,24})/.exec(tail);
       if (word && SUBMIT_REASONS.has(word[1]) && /NUDGE-REASON:[a-z_]+\n/.test(tail)) reasonWord = word[1];
+      // One timestamp per chunk: events that arrive in the same chunk are not ordered against each other by the clock.
+      // The wrapper prints NUDGE-TYPED before any NUDGE-CHECK, so typing is taken first.
+      const at = since();
+      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
       if (stages) {
         // The wrapper prints NUDGE-CHECK:<n> when delivery check n starts; only the number is read.
         for (const match of tail.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
           const n = Number(match[1]);
-          if (n > (stages.checks ?? 0)) { stages.checks = n; stages.lastCheckMs = since(); }
+          if (n > (stages.checks ?? 0)) { stages.checks = n; stages.lastCheckMs = at; }
         }
       }
-      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = since(); try { onTyped?.(); } catch { /* the run result still reports it */ } }
     });
     child.stderr?.on("data", () => {});
     child.once("error", () => finish({ kind: "failed" }));
@@ -475,6 +478,8 @@ export function createAntigravityNudgeChannel({
     // never the notice, a path or any message text.
     const record = (reason) => {
       try {
+        // An expired poll scope cannot publish late writes: a diagnostic line is a write too.
+        assertPollActive();
         log(JSON.stringify({ event: "nudge_run", channel: CHANNEL_NAME, seat, mode, result: result.kind, code: Number.isInteger(result.code) ? result.code : null, typed_ms: stages.typedMs ?? null, checks: stages.checks ?? 0, last_check_ms: stages.lastCheckMs ?? null, total_ms: stages.totalMs ?? null, reason }));
       } catch { /* the record is an observation; it never changes the outcome */ }
     };
