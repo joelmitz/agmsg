@@ -1180,7 +1180,14 @@ test('clock choice: epoch when available, GNU-style date next, a pinned clock th
   t.after(() => rmSync(bin, { recursive: true, force: true }));
   writeFileSync(path.join(bin, 'date'), '#!/bin/sh\nprintf "%s\\n" "1730000000123"\n', { mode: 0o755 });
   const body = '_AGY_CLOCK=; _AGY_T0=; _agy_pick_clock || true; _agy_now_ms && _AGY_T0=$_AGY_NOW || true\necho "[$_AGY_CLOCK] [$_AGY_T0]"';
-  assert.match(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'auto' }, body), /^\[epoch\] \[\d{13}\]$/);
+  // The default choice depends on this machine's bash and date (macOS: bash 3.2 and BSD date give seconds), so the
+  // expectation is derived from what the machine can do, not assumed.
+  const hasEpoch = execFileSync('bash', ['-c', 'printf %s "${EPOCHREALTIME:-}"'], { encoding: 'utf8' }) !== '';
+  const hasGnuDate = /^\d+$/.test(execFileSync('bash', ['-c', 'date +%s%3N 2>/dev/null || true'], { encoding: 'utf8' }).trim());
+  const auto = clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'auto' }, body);
+  assert.match(auto, hasEpoch ? /^\[epoch\] \[\d{13}\]$/ : hasGnuDate ? /^\[date\] \[\d{13}\]$/ : /^\[seconds\] \[0\]$/, auto);
+  if (hasEpoch) assert.match(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'epoch' }, body), /^\[epoch\] \[\d{13}\]$/);
+  else assert.equal(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'epoch' }, body), '[] []', 'pinned epoch without $EPOCHREALTIME gives no clock');
   assert.equal(clockSnippet({ PATH: `${bin}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: 'date' }, body), '[date] [1730000000123]');
   assert.equal(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'none' }, body), '[] []');
   const bad = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-baddate-'));
