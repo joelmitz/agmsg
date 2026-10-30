@@ -20,6 +20,33 @@
 # prints NUDGE-CHECK:<n> (n = 1..3) when it starts, so the daemon can tell how far a run got.
 set -euo pipefail
 
+# Stage timing for the daemon's nudge_run record. Origin: this statement, so the time Git Bash itself needed to
+# start before it is NOT included (the daemon's own clock sees that part, see antigravity-nudge.mjs). The clock is
+# the wall clock: $EPOCHREALTIME when bash has it (no process is started), else `date +%s%3N` (one external
+# process per reading, a cost not yet measured). A wall clock can be stepped by a time correction. Marks go to fd 7
+# (a copy of stdout kept from here on), never to stdout inside a command substitution, and carry only a fixed stage
+# name and a number: no notice text, path, token or nonce.
+_AGY_T0=""
+_AGY_NOW=""
+_agy_now_ms() {
+  local us v
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    us="${EPOCHREALTIME//[.,]/}"
+    case "$us" in ''|*[!0-9]*) return 1 ;; esac
+    _AGY_NOW=$((10#$us / 1000)); return 0
+  fi
+  v="$(date +%s%3N 2>/dev/null)" || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  _AGY_NOW=$v
+}
+{ exec 7>&1; } 2>/dev/null || true
+_agy_now_ms && _AGY_T0=$_AGY_NOW || true
+_agy_mark() {   # <fixed stage name>
+  [ -n "$_AGY_T0" ] || return 0
+  _agy_now_ms || return 0
+  printf 'NUDGE-STAGE:%s:%s\n' "$1" "$((_AGY_NOW - _AGY_T0))" >&7 2>/dev/null || true
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC2034  # used by actas-lock.sh and safe-poke.sh
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -35,6 +62,7 @@ source "$SCRIPT_DIR/lib/compat.sh"
 source "$SCRIPT_DIR/lib/safe-poke.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+_agy_mark libs
 
 MODE="${1:-}"; TEAM="${2:-}"; NAME="${3:-}"
 [ "$MODE" = live ] || [ "$MODE" = dry ] || { echo "usage: agy-nudge.sh <live|dry> <team> <name> --body -" >&2; exit 2; }
@@ -77,6 +105,22 @@ INPUT_REFUSE="$(agmsg_type_get antigravity input_refuse_screen)"
 INPUT_MAX_TRAILING="$(agmsg_type_get antigravity input_max_trailing_lines)"
 # A seat with no input-box rules must not be typed into blindly.
 [ -n "$INPUT_MARKER" ] && [ "$TERMINAL" != plain ] || exit 13
+
+_agy_mark resolved
+
+# Observe safe-poke's reads and the poke WITHOUT changing the shared safe-poke.sh: it looks these functions up by
+# name at call time, so each is wrapped here. A wrapper calls the original with the same arguments and returns its
+# exit status and stdout untouched (stdout is a command substitution's value); the mark goes to fd 7. Every
+# terminal_peek* call is marked "peek" (in order: safe-poke's two reads, then the delivery checks), the poke "poked".
+# A refusal before the second read (a draft, a confirmation screen, an unclear structure) simply has fewer marks.
+_agy_wrap() {   # <function name> <stage name>
+  declare -F "$1" >/dev/null 2>&1 || return 0
+  eval "_agy_orig_$(declare -f "$1")"
+  eval "$1() { local _rc=0; _agy_orig_$1 \"\$@\" || _rc=\$?; _agy_mark $2; return \"\$_rc\"; }"
+}
+_agy_wrap terminal_peek_styled peek
+_agy_wrap terminal_peek peek
+_agy_wrap terminal_poke poked
 
 RC=0
 agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
