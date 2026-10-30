@@ -264,8 +264,27 @@ function killGroup(child, signal, platform = process.platform, killTree = killTr
 
 // Runs agy-nudge.sh with the line on stdin. Output is read and dropped: it can
 // carry paths and is never stored or logged.
-// `stages`, when given, is filled in as the run goes (milliseconds since the spawn): typedMs (the marker was seen), checks (how many delivery checks
-// the wrapper reported starting, from NUDGE-CHECK:<n>), lastCheckMs, and totalMs (when the run ended). Numbers only, never text.
+// `stages`, when given, is filled in as the run goes. Parent clock (monotonic, milliseconds since the spawn): typedMs (the marker was seen), checks
+// (how many delivery checks the wrapper reported starting, from NUDGE-CHECK:<n>), lastCheckMs, totalMs (when the run ended), seenMs (when each wrapper
+// stage mark was seen: libs, resolved, poked) and peekSeenMs (each peek mark). Wrapper clock (wall clock, milliseconds since the wrapper's first statement,
+// so the time Git Bash needed to start is not in it): wrapperMs (libs, resolved, poked) and peeksMs (each terminal peek, in order). The two clocks have
+// different origins and are never subtracted from each other here. Numbers only, never text.
+// Wrapper stage marks: one line `NUDGE-STAGE:<name>:<milliseconds>`; only these names and plain numbers are read.
+export const STAGE_NAMES = new Set(["libs", "resolved", "peek", "poked"]);
+const MAX_PEEKS = 12;
+function readStageLine(stages, line, at) {
+  const match = /^NUDGE-STAGE:([a-z]{1,12}):(\d{1,9})$/.exec(line);
+  if (!match || !STAGE_NAMES.has(match[1])) return;
+  const value = Number(match[2]);
+  if (match[1] === "peek") {
+    stages.peeksMs ??= []; stages.peekSeenMs ??= [];
+    if (stages.peeksMs.length < MAX_PEEKS) { stages.peeksMs.push(value); stages.peekSeenMs.push(at); }
+    return;
+  }
+  stages.wrapperMs ??= {}; stages.seenMs ??= {};
+  if (!(match[1] in stages.wrapperMs)) { stages.wrapperMs[match[1]] = value; stages.seenMs[match[1]] = at; }
+}
+
 export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped, stages, clock = () => performance.now() }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
@@ -298,20 +317,36 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     let typed = false;
     let reasonWord = "";
     let tail = "";
+    let lineBuffer = "";
     // stdout is dropped except for one marker, which the wrapper prints right after typing.
     // A short tail is kept so a marker split across chunks is still found. onTyped runs once,
     // while the run is still going, so the fact "typed" is recorded before any later stop.
     child.stdout?.on("data", (chunk) => {
-      tail = (tail + String(chunk)).slice(-120);
-      const word = /NUDGE-REASON:([a-z_]{1,24})/.exec(tail);
-      if (word && SUBMIT_REASONS.has(word[1]) && /NUDGE-REASON:[a-z_]+\n/.test(tail)) reasonWord = word[1];
+      // Everything received in this event is searched, plus the short carry-over for a marker split across events.
+      // Only the carry-over is bounded (after the search), so a large event (several marks in one pipe read) can never
+      // push a control marker out of view before it is looked at.
+      const seen = tail + String(chunk);
+      tail = seen.slice(-120);
+      for (const match of seen.matchAll(/NUDGE-REASON:([a-z_]{1,24})\n/g)) {
+        if (SUBMIT_REASONS.has(match[1])) reasonWord = match[1];
+      }
       // One timestamp per chunk: events that arrive in the same chunk are not ordered against each other by the clock.
       // The wrapper prints NUDGE-TYPED before any NUDGE-CHECK, so typing is taken first.
       const at = since();
-      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+      if (stages) {
+        // Whole lines only, each read once (the carry-over above overlaps between events).
+        lineBuffer += String(chunk);
+        let newline;
+        while ((newline = lineBuffer.indexOf("\n")) >= 0) {
+          readStageLine(stages, lineBuffer.slice(0, newline).replace(/\r$/, ""), at);
+          lineBuffer = lineBuffer.slice(newline + 1);
+        }
+        if (lineBuffer.length > 200) lineBuffer = "";
+      }
+      if (!typed && seen.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
       if (stages) {
         // The wrapper prints NUDGE-CHECK:<n> when delivery check n starts; only the number is read.
-        for (const match of tail.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
+        for (const match of seen.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
           const n = Number(match[1]);
           if (n > (stages.checks ?? 0)) { stages.checks = n; stages.lastCheckMs = at; }
         }
@@ -480,7 +515,7 @@ export function createAntigravityNudgeChannel({
       try {
         // An expired poll scope cannot publish late writes: a diagnostic line is a write too.
         assertPollActive();
-        log(JSON.stringify({ event: "nudge_run", channel: CHANNEL_NAME, seat, mode, result: result.kind, code: Number.isInteger(result.code) ? result.code : null, typed_ms: stages.typedMs ?? null, checks: stages.checks ?? 0, last_check_ms: stages.lastCheckMs ?? null, total_ms: stages.totalMs ?? null, reason }));
+        log(JSON.stringify({ event: "nudge_run", channel: CHANNEL_NAME, seat, mode, result: result.kind, code: Number.isInteger(result.code) ? result.code : null, typed_ms: stages.typedMs ?? null, checks: stages.checks ?? 0, last_check_ms: stages.lastCheckMs ?? null, total_ms: stages.totalMs ?? null, wrapper_ms: stages.wrapperMs ?? {}, peeks_ms: stages.peeksMs ?? [], seen_ms: stages.seenMs ?? {}, peek_seen_ms: stages.peekSeenMs ?? [], reason }));
       } catch { /* the record is an observation; it never changes the outcome */ }
     };
     const exit = result.kind === "exit" ? classifyExit(result.code)
