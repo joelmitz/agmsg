@@ -322,14 +322,19 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     // A short tail is kept so a marker split across chunks is still found. onTyped runs once,
     // while the run is still going, so the fact "typed" is recorded before any later stop.
     child.stdout?.on("data", (chunk) => {
-      tail = (tail + String(chunk)).slice(-120);
-      const word = /NUDGE-REASON:([a-z_]{1,24})/.exec(tail);
-      if (word && SUBMIT_REASONS.has(word[1]) && /NUDGE-REASON:[a-z_]+\n/.test(tail)) reasonWord = word[1];
+      // Everything received in this event is searched, plus the short carry-over for a marker split across events.
+      // Only the carry-over is bounded (after the search), so a large event (several marks in one pipe read) can never
+      // push a control marker out of view before it is looked at.
+      const seen = tail + String(chunk);
+      tail = seen.slice(-120);
+      for (const match of seen.matchAll(/NUDGE-REASON:([a-z_]{1,24})\n/g)) {
+        if (SUBMIT_REASONS.has(match[1])) reasonWord = match[1];
+      }
       // One timestamp per chunk: events that arrive in the same chunk are not ordered against each other by the clock.
       // The wrapper prints NUDGE-TYPED before any NUDGE-CHECK, so typing is taken first.
       const at = since();
       if (stages) {
-        // Whole lines only, each read once (the tail above overlaps between chunks).
+        // Whole lines only, each read once (the carry-over above overlaps between events).
         lineBuffer += String(chunk);
         let newline;
         while ((newline = lineBuffer.indexOf("\n")) >= 0) {
@@ -338,10 +343,10 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
         }
         if (lineBuffer.length > 200) lineBuffer = "";
       }
-      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+      if (!typed && seen.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
       if (stages) {
         // The wrapper prints NUDGE-CHECK:<n> when delivery check n starts; only the number is read.
-        for (const match of tail.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
+        for (const match of seen.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
           const n = Number(match[1]);
           if (n > (stages.checks ?? 0)) { stages.checks = n; stages.lastCheckMs = at; }
         }

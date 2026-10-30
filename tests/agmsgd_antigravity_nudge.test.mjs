@@ -9,6 +9,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
@@ -1103,4 +1104,54 @@ test('the wrapper keeps the shared safe-poke.sh untouched, sends marks to a copi
   assert.match(wrapper, /EPOCHREALTIME/);
   assert.match(wrapper, /date \+%s%3N/);
   assert.ok(!readFileSync(path.join(repo, 'scripts', 'lib', 'safe-poke.sh'), 'utf8').includes('NUDGE-STAGE'), 'no mark is added inside the shared file');
+});
+
+// ---- The typed / check / reason decisions must not depend on how the pipe cuts the output, or on stage lines being there.
+function pipeChild(pieces, { closeCode = null } = {}) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = Object.assign(new EventEmitter(), { destroy() {} }); child.stderr = Object.assign(new EventEmitter(), { destroy() {} });
+    child.stdin = { on() {}, end() {} };
+    child.kill = () => {}; child.unref = () => {};
+    setImmediate(async () => {
+      for (const piece of pieces) { child.stdout.emit('data', Buffer.from(piece)); await new Promise((resolve) => setImmediate(resolve)); }
+      if (closeCode !== null) child.emit('close', closeCode);
+    });
+    return child;
+  };
+}
+const WRAPPER_OUTPUT = (withStages) => [
+  'NUDGE-TYPED', 'NUDGE-CHECK:1', ...(withStages ? ['NUDGE-STAGE:peek:19000'] : []), 'NUDGE-CHECK:2',
+  ...(withStages ? ['NUDGE-STAGE:peek:20000', 'NUDGE-STAGE:poked:18500'] : []), 'NUDGE-REASON:box_empty', '',
+].join('\n');
+const splitsOf = (text) => [[text], ...Array.from({ length: text.length - 1 }, (_, i) => [text.slice(0, i + 1), text.slice(i + 1)]), [...text]];
+
+test('B1: the typed marker, the checks and the reason are found in one large pipe read and at every split point, with or without stage lines and a stages object', async () => {
+  for (const withStages of [false, true]) {
+    for (const keepStages of [false, true]) {
+      for (const pieces of splitsOf(WRAPPER_OUTPUT(withStages))) {
+        let typedCalls = 0;
+        const stages = keepStages ? {} : undefined;
+        const result = await runNudge({ script: '/x/agy-nudge.sh', mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages, onTyped: () => { typedCalls += 1; }, spawnProcess: pipeChild(pieces, { closeCode: 23 }) });
+        const label = `stages=${withStages} object=${keepStages} pieces=${pieces.length}`;
+        assert.deepEqual([result.kind, result.code, result.typed, result.reasonWord], ['exit', 23, true, 'box_empty'], label);
+        assert.equal(typedCalls, 1, `onTyped exactly once: ${label}`);
+        if (keepStages) assert.equal(stages.checks, 2, `both checks counted once: ${label}`);
+      }
+    }
+  }
+});
+
+test('B1: an abort after a large pipe read still reports that it typed, with or without stage lines (so the next poll never types again)', async () => {
+  for (const withStages of [false, true]) {
+    for (const pieces of [[WRAPPER_OUTPUT(withStages)], [...splitsOf(WRAPPER_OUTPUT(withStages))[40]]]) {
+      let typedCalls = 0;
+      const controller = new AbortController();
+      const run = runNudge({ script: '/x/agy-nudge.sh', mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 60000, signal: controller.signal, stages: {}, onTyped: () => { typedCalls += 1; }, spawnProcess: pipeChild(pieces) });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      controller.abort();
+      const result = await run;
+      assert.deepEqual([result.kind, result.typed, result.reasonWord, typedCalls], ['cancelled', true, 'box_empty', 1], `stages=${withStages} pieces=${pieces.length}`);
+    }
+  }
 });
