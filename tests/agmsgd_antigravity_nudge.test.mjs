@@ -435,7 +435,7 @@ test('a switch removed after the seat was read but before the run is not overtak
 
 // ---- Windows (Git Bash) path: exercised here with an injected platform; the real
 // ---- machine is a separate, approved measurement.
-import { nudgeTimeoutFor, chosenAgmsgd, ineligibleReason, readDeliveryModeStrict, resolveBash, toNativeWindowsPath, toPosixScriptPath } from '../scripts/daemon/channels/antigravity-nudge.mjs';
+import { unconfirmedReason, nudgeTimeoutFor, chosenAgmsgd, ineligibleReason, readDeliveryModeStrict, resolveBash, toNativeWindowsPath, toPosixScriptPath } from '../scripts/daemon/channels/antigravity-nudge.mjs';
 
 const WIN_PROJECT = '/c/Users/Me/proj';
 function winFixture(t, { readMode } = {}) {
@@ -763,7 +763,9 @@ test('the reason is a single word in status, with the line counted as the last n
 
 test('a run cut short after typing is treated like an unconfirmed Enter; one cut short before typing is not', async (t) => {
   for (const [result, expected, advanced] of [
-    [{ kind: 'timeout', typed: true }, 'enter_unconfirmed', true],
+    [{ kind: 'timeout', typed: true }, 'enter_unconfirmed:timeout', true],
+    [{ kind: 'timeout', typed: true, reasonWord: 'box_empty' }, 'enter_unconfirmed:timeout:box_empty', true],
+    [{ kind: 'timeout', typed: true, reasonWord: '/tmp/secret' }, 'enter_unconfirmed:timeout', true],
     [{ kind: 'exit', code: 23, typed: true }, 'enter_unconfirmed', true],
     [{ kind: 'exit', code: 23, typed: true, reasonWord: 'box_empty' }, 'enter_unconfirmed:box_empty', true],
     [{ kind: 'exit', code: 23, typed: true, reasonWord: '/tmp/secret' }, 'enter_unconfirmed', true],
@@ -853,9 +855,9 @@ async function deadlineHarness(t, runAfterAbort) {
   const f = fixture(t);
   f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
   const { pollChannelHooks } = await import('../scripts/daemon/main.mjs');
-  const calls = { runs: 0, typedThrew: 0 };
+  const calls = { runs: 0, typedThrew: 0, lines: [] };
   const channel = createAntigravityNudgeChannel({
-    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: () => {},
+    db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: (line) => calls.lines.push(line),
     run: async (options) => {
       calls.runs += 1;
       if (calls.runs > 1) return { kind: 'exit', code: 0, typed: true };
@@ -920,4 +922,93 @@ test('B3 (restart): an in-flight record left by an earlier process is never type
   await third.pollOnce(); await third.stop();
   assert.ok(f.db.prepare('PRAGMA table_info(beta_antigravity_nudge)').all().some((column) => column.name === 'inflight_up_to'));
   assert.equal(f.row().state, 'delivering');
+});
+
+test('unconfirmedReason tells a finished check apart from a run stopped at its time limit, and keeps a word already printed', () => {
+  assert.equal(unconfirmedReason(undefined, 'exit'), 'enter_unconfirmed');
+  assert.equal(unconfirmedReason('box_has_line', 'exit'), 'enter_unconfirmed:box_has_line');
+  assert.equal(unconfirmedReason('box_has_line'), 'enter_unconfirmed:box_has_line');
+  assert.equal(unconfirmedReason(undefined, 'timeout'), 'enter_unconfirmed:timeout');
+  assert.equal(unconfirmedReason('box_empty', 'timeout'), 'enter_unconfirmed:timeout:box_empty');
+  assert.equal(unconfirmedReason('/tmp/secret', 'timeout'), 'enter_unconfirmed:timeout');
+  assert.equal(unconfirmedReason('/tmp/secret', 'exit'), 'enter_unconfirmed');
+});
+
+test('runNudge keeps a reason word that was printed before the time limit, and records the stages as numbers', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-stages-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'word-then-hang.sh'), 'echo NUDGE-TYPED\necho NUDGE-CHECK:1\necho NUDGE-REASON:box_empty\nsleep 30\n');
+  writeFileSync(path.join(dir, 'checks.sh'), "echo NUDGE-TYPED\nprintf 'NUDGE-CH'\nsleep 0.1\nprintf 'ECK:1\\n'\nsleep 0.1\necho NUDGE-CHECK:2\nsleep 0.1\necho NUDGE-CHECK:3\nexit 0\n");
+  const stages = {};
+  const result = await runNudge({ script: path.join(dir, 'word-then-hang.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 600, stages });
+  assert.deepEqual(result, { kind: 'timeout', typed: true, reasonWord: 'box_empty' });
+  assert.equal(stages.checks, 1);
+  assert.ok(stages.typedMs >= 0 && stages.typedMs <= stages.lastCheckMs && stages.lastCheckMs <= stages.totalMs, JSON.stringify(stages));
+  const ok = {};
+  const done = await runNudge({ script: path.join(dir, 'checks.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages: ok });
+  assert.deepEqual([done.kind, done.code], ['exit', 0]);
+  assert.equal(ok.checks, 3, 'a check marker split across chunks is still counted, and each is counted once');
+  assert.ok(ok.typedMs <= ok.lastCheckMs && ok.lastCheckMs <= ok.totalMs, JSON.stringify(ok));
+  // without a stages object nothing changes
+  assert.deepEqual(await runNudge({ script: path.join(dir, 'word-then-hang.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 400 }), { kind: 'timeout', typed: true, reasonWord: 'box_empty' });
+});
+
+test('a finished run is recorded as one nudge_run line with numbers and fixed words only, and a time-limit stop shows as its own reason', async (t) => {
+  const f = fixture(t);
+  f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+  const lines = [];
+  const channel = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: (m) => lines.push(m), run: async (options) => {
+    Object.assign(options.stages, { typedMs: 17000, checks: 2, lastCheckMs: 19500, totalMs: 25300 });
+    return { kind: 'timeout', typed: true };
+  } });
+  await channel.pollOnce();
+  await channel.stop();
+  assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed:timeout']);
+  const runs = lines.filter((line) => line.includes('"nudge_run"')).map((line) => JSON.parse(line));
+  assert.equal(runs.length, 1);
+  assert.deepEqual(Object.keys(runs[0]).sort(), ['channel', 'checks', 'code', 'event', 'last_check_ms', 'mode', 'reason', 'result', 'seat', 'total_ms', 'typed_ms']);
+  assert.deepEqual([runs[0].result, runs[0].code, runs[0].typed_ms, runs[0].checks, runs[0].last_check_ms, runs[0].total_ms, runs[0].reason, runs[0].mode],
+    ['timeout', null, 17000, 2, 19500, 25300, 'enter_unconfirmed:timeout', 'live']);
+  assert.ok(!lines.some((line) => line.includes('New messages are waiting')), 'the notice text is never logged');
+  assert.ok(lines.some((line) => line.includes('"live:enter_unconfirmed:timeout"') || line.includes('live:enter_unconfirmed:timeout')), 'the seat_state line carries the new reason');
+});
+
+test('a confirmed run is recorded too (nudged), and a refused one carries its reason', async (t) => {
+  for (const [result, reason] of [[{ kind: 'exit', code: 0, typed: true }, 'nudged'], [{ kind: 'exit', code: 14, typed: false }, 'draft']]) {
+    const f = fixture(t);
+    f.flag('agmsgd-antigravity-delivery'); f.flag('agmsgd-antigravity-live');
+    const lines = [];
+    const channel = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: f.env, now: () => f.clock.ms, log: (m) => lines.push(m), run: async (options) => { options.stages.totalMs = 12000; return result; } });
+    await channel.pollOnce();
+    await channel.stop();
+    const run = lines.filter((line) => line.includes('"nudge_run"')).map((line) => JSON.parse(line));
+    assert.equal(run.length, 1);
+    assert.deepEqual([run[0].reason, run[0].result, run[0].code, run[0].total_ms, run[0].typed_ms], [reason, 'exit', result.code, 12000, null]);
+  }
+});
+
+test('B1: a run that ends with an error after the poll deadline writes no nudge_run line (an expired scope cannot publish late writes)', async (t) => {
+  const h = await deadlineHarness(t, () => ({ kind: 'failed' }));
+  await h.poll(30);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(h.calls.runs, 1);
+  assert.deepEqual(h.calls.lines.filter((line) => line.includes('"nudge_run"')), [], 'no diagnostic line after the deadline');
+  // the same run inside a live scope is recorded
+  const g = await deadlineHarness(t, () => ({ kind: 'failed' }));
+  g.calls.runs = 1; // second call onward returns a confirmed exit (the harness's later-poll behaviour)
+  await g.poll(2000);
+  assert.equal(g.calls.lines.filter((line) => line.includes('"nudge_run"')).length, 1, 'inside an active poll the run is recorded');
+});
+
+test('stage markers that arrive in one chunk are not ordered by the clock: typing is first, every event of the chunk shares one time, duplicates count once', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-chunk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'one-chunk.sh'), "printf 'NUDGE-TYPED\\nNUDGE-CHECK:1\\nNUDGE-CHECK:1\\nNUDGE-CHECK:2\\n'\nexit 0\n");
+  let ticks = 0;
+  const stages = {};
+  const result = await runNudge({ script: path.join(dir, 'one-chunk.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages, clock: () => { ticks += 1; return ticks; } });
+  assert.deepEqual([result.kind, result.code], ['exit', 0]);
+  assert.equal(stages.checks, 2, 'a duplicate marker is counted once');
+  assert.ok(stages.typedMs <= stages.lastCheckMs, `typing is never later than a check: ${JSON.stringify(stages)}`);
+  assert.ok(stages.lastCheckMs <= stages.totalMs, JSON.stringify(stages));
 });

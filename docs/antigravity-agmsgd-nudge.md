@@ -31,7 +31,14 @@ reachable; an environment aiming the terminal manager at another machine gives `
 After typing, for herdr on Windows (`AGMSG_AGY_NUDGE_ENTER=auto`) no Enter is sent. The wrapper looks for the line's
 token in the conversation (outside the located input box) and otherwise exits 23 with one reason word
 (`box_has_line`, `box_empty`, `box_mismatch`, `confirmation_screen`, `box_unlocated`, `peek_failed`,
-`enter_send_failed`), shown as `enter_unconfirmed:<word>`. Delivery is best-effort: neither exactly-once nor at-least-once is guaranteed, so a notice can appear twice or not at
+`enter_send_failed`), shown as `enter_unconfirmed:<word>`. A run that is stopped at its time limit after typing (25 s on
+Windows, 10 s elsewhere) is shown as `enter_unconfirmed:timeout`, or `enter_unconfirmed:timeout:<word>` if the wrapper had
+already printed a word; a plain `enter_unconfirmed` means typed with the outcome unknown (for example the run was cut off by
+a stop). `enter_unconfirmed` is a statement about the check, not about delivery: the agent may well have received the
+line (the check can be cut short while the agent is already working). Each run that ends inside its poll also writes one `nudge_run` line
+to the daemon log (a run cancelled by the poll's deadline or a stop is not recorded: an expired poll cannot publish late
+writes, so a missing `nudge_run` is not evidence that nothing ran) with fixed words and milliseconds since the spawn only (`result`, `code`, `typed_ms`, `checks` = how many
+delivery checks started, `last_check_ms`, `total_ms`, `reason`), never the notice or any message text. Delivery is best-effort: neither exactly-once nor at-least-once is guaranteed, so a notice can appear twice or not at
 all. Once the daemon has observed the wrapper's "typed" marker, the line counts as notified and is not typed again (a
 durable in-flight record is written before every live run). The marker is printed after the typing, so a run that is cut
 off before the daemon has seen it cannot be told apart from one that never typed: if the daemon process that saw the

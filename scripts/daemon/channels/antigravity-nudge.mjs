@@ -264,7 +264,9 @@ function killGroup(child, signal, platform = process.platform, killTree = killTr
 
 // Runs agy-nudge.sh with the line on stdin. Output is read and dropped: it can
 // carry paths and is never stored or logged.
-export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped }) {
+// `stages`, when given, is filled in as the run goes (milliseconds since the spawn): typedMs (the marker was seen), checks (how many delivery checks
+// the wrapper reported starting, from NUDGE-CHECK:<n>), lastCheckMs, and totalMs (when the run ended). Numbers only, never text.
+export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, spawnProcess = spawn, env = process.env, platform = process.platform, bash = "bash", killTree = killTreeWindows, onTyped, stages, clock = () => performance.now() }) {
   return new Promise((resolve) => {
     if (signal?.aborted) { resolve({ kind: "cancelled" }); return; }
     const limitMs = timeoutMs ?? nudgeTimeoutFor(platform);
@@ -272,12 +274,15 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     try {
       child = spawnProcess(bash, [toPosixScriptPath(script, platform), mode, team, agent, "--body", "-"], { env, stdio: ["pipe", "pipe", "pipe"], detached: platform !== "win32", windowsHide: true });
     } catch { resolve({ kind: "failed" }); return; }
+    const startedAt = clock();
+    const since = () => Math.max(0, clock() - startedAt);
     let done = false;
     let stopping = null;
     const timers = [];
     const finish = (value) => {
       if (done) return;
       done = true;
+      if (stages) stages.totalMs = since();
       timers.forEach(clearTimeout);
       signal?.removeEventListener("abort", onAbort);
       resolve(value);
@@ -285,7 +290,7 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
     const hardStop = (kind) => {
       stopping ??= kind;
       killGroup(child, "SIGTERM", platform, killTree);
-      timers.push(setTimeout(() => { killGroup(child, "SIGKILL", platform, killTree); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind, typed }); }, KILL_GRACE_MS));
+      timers.push(setTimeout(() => { killGroup(child, "SIGKILL", platform, killTree); child.stdout?.destroy(); child.stderr?.destroy(); child.unref?.(); finish({ kind, typed, ...(reasonWord ? { reasonWord } : {}) }); }, KILL_GRACE_MS));
     };
     const onAbort = () => hardStop("cancelled");
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -300,17 +305,34 @@ export function runNudge({ script, mode, team, agent, text, timeoutMs, signal, s
       tail = (tail + String(chunk)).slice(-120);
       const word = /NUDGE-REASON:([a-z_]{1,24})/.exec(tail);
       if (word && SUBMIT_REASONS.has(word[1]) && /NUDGE-REASON:[a-z_]+\n/.test(tail)) reasonWord = word[1];
-      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+      // One timestamp per chunk: events that arrive in the same chunk are not ordered against each other by the clock.
+      // The wrapper prints NUDGE-TYPED before any NUDGE-CHECK, so typing is taken first.
+      const at = since();
+      if (!typed && tail.includes("NUDGE-TYPED")) { typed = true; if (stages) stages.typedMs = at; try { onTyped?.(); } catch { /* the run result still reports it */ } }
+      if (stages) {
+        // The wrapper prints NUDGE-CHECK:<n> when delivery check n starts; only the number is read.
+        for (const match of tail.matchAll(/NUDGE-CHECK:([1-9])\n/g)) {
+          const n = Number(match[1]);
+          if (n > (stages.checks ?? 0)) { stages.checks = n; stages.lastCheckMs = at; }
+        }
+      }
     });
     child.stderr?.on("data", () => {});
     child.once("error", () => finish({ kind: "failed" }));
-    child.once("close", (code) => finish(stopping ? { kind: stopping, typed } : code === null ? { kind: "failed", typed } : { kind: "exit", code, typed, ...(reasonWord ? { reasonWord } : {}) }));
+    child.once("close", (code) => finish(stopping ? { kind: stopping, typed, ...(reasonWord ? { reasonWord } : {}) } : code === null ? { kind: "failed", typed } : { kind: "exit", code, typed, ...(reasonWord ? { reasonWord } : {}) }));
     child.stdin?.on("error", () => {});
     child.stdin?.end(text);
   });
 }
 
-export const unconfirmedReason = (word) => (word && SUBMIT_REASONS.has(word) ? `enter_unconfirmed:${word}` : "enter_unconfirmed");
+// `enter_unconfirmed` (no word): typed, outcome unknown. `enter_unconfirmed:<word>`: the wrapper finished its checks and said why it
+// could not confirm. `enter_unconfirmed:timeout[:<word>]`: the run was stopped at its time limit before it finished (a word the wrapper
+// had already printed is kept, not dropped).
+export const unconfirmedReason = (word, kind) => {
+  const known = word && SUBMIT_REASONS.has(word) ? word : "";
+  if (kind === "timeout") return known ? `enter_unconfirmed:timeout:${known}` : "enter_unconfirmed:timeout";
+  return known ? `enter_unconfirmed:${known}` : "enter_unconfirmed";
+};
 const isUnconfirmed = (reason) => reason === "interrupted_unconfirmed" || String(reason).startsWith("enter_unconfirmed");
 
 function backoffMs(attempts) {
@@ -435,8 +457,9 @@ export function createAntigravityNudgeChannel({
     // Durable, before anything can be typed (and while the poll is still active): "this cursor may be
     // typed now". Cleared when the run reports back; a later poll reconciles it if it never does.
     if (live) save(seat, { state: prior?.state ?? "idle", reason: prior?.reason ?? "", mode, inflight_up_to: fresh.upTo });
+    const stages = {};
     const result = await run({
-      script, mode, team, agent, text, signal, env, platform: hostPlatform, bash,
+      script, mode, team, agent, text, signal, env, platform: hostPlatform, bash, stages,
       // Live only: the moment the line is typed, count it as notified and mark it unconfirmed. This
       // is written while the poll is still active, so a stop or deadline after typing cannot lose it.
       ...(live ? { onTyped: () => {
@@ -451,16 +474,28 @@ export function createAntigravityNudgeChannel({
       if (live) outcomes.set(seat, { upTo: fresh.upTo, typed: Boolean(result.typed) });
       return;
     }
+    // One line per finished run: what happened and when, in milliseconds since the spawn. Numbers and fixed words only,
+    // never the notice, a path or any message text.
+    const record = (reason) => {
+      try {
+        // An expired poll scope cannot publish late writes: a diagnostic line is a write too.
+        assertPollActive();
+        log(JSON.stringify({ event: "nudge_run", channel: CHANNEL_NAME, seat, mode, result: result.kind, code: Number.isInteger(result.code) ? result.code : null, typed_ms: stages.typedMs ?? null, checks: stages.checks ?? 0, last_check_ms: stages.lastCheckMs ?? null, total_ms: stages.totalMs ?? null, reason }));
+      } catch { /* the record is an observation; it never changes the outcome */ }
+    };
     const exit = result.kind === "exit" ? classifyExit(result.code)
       : result.kind === "timeout" ? { state: "blocked", reason: "nudge_timeout", backoff: true }
         : { state: "blocked", reason: "nudge_failed", backoff: true };
     // Live, typed, but not confirmed submitted (Enter failed, or the run was cut short after
     // typing): count it as notified so the line is never typed a second time, and say so.
     if (live && !exit.sent && (exit.typed || result.typed)) {
-      save(seat, { state: "blocked", reason: unconfirmedReason(result.reasonWord), mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
+      const unconfirmed = unconfirmedReason(result.reasonWord, result.kind);
+      record(unconfirmed);
+      save(seat, { state: "blocked", reason: unconfirmed, mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: iso(now()), would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
       return;
     }
     if (exit.sent) {
+      record(live ? "nudged" : "would_send");
       const at = iso(now());
       if (live) save(seat, { state: "delivering", reason: "nudged", mode, up_to: fresh.upTo, dry_up_to: reset.dry_up_to, last_nudge_at: at, would_send: null, unread, attempts: 0, next_try_at: null, inflight_up_to: "" });
       else save(seat, { state: "dry_run", reason: "would_send", mode, up_to: reset.up_to, dry_up_to: fresh.upTo, last_dry_at: at, would_send: text, unread, attempts: 0, next_try_at: null });
@@ -470,6 +505,7 @@ export function createAntigravityNudgeChannel({
     let { state, reason } = exit;
     if (exit.counts && attempts >= UNCONFIRMED_LIMIT) { state = "blocked"; reason = "input_box_unconfirmed"; }
     const wait = exit.recheckMs ?? (exit.backoff ? backoffMs(attempts) : 0);
+    record(reason);
     save(seat, { ...reset, state, reason, mode, unread, attempts, next_try_at: wait ? iso(now() + wait) : null, inflight_up_to: "" });
   }
 

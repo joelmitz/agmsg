@@ -16,7 +16,8 @@
 # 22 the seat is not an antigravity seat, 23 (live only, herdr) the line was typed but
 # its submission could not be confirmed; one reason word is printed first
 # (NUDGE-REASON:<word>, see the herdr block at the end). After typing, NUDGE-TYPED is printed
-# so the caller knows typing happened even if this script is later stopped.
+# so the caller knows typing happened even if this script is later stopped. Each delivery check
+# prints NUDGE-CHECK:<n> (n = 1..3) when it starts, so the daemon can tell how far a run got.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -112,6 +113,8 @@ TOKEN="${TEXT%%]*}]"
 ENTER_SENT=0
 REASON=box_empty
 for ATTEMPT in 1 2 3; do
+  # Stage marker for the daemon's timing record: only the attempt number, no text.
+  echo "NUDGE-CHECK:$ATTEMPT"
   sleep 1
   if declare -F terminal_peek_styled >/dev/null 2>&1; then
     SCREEN_NOW="$(terminal_peek_styled "$BARE_ID" 2>/dev/null)" || _agy_reason peek_failed
