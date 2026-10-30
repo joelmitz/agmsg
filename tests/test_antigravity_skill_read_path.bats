@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 #
 # The rendered Antigravity skill must read the inbox with check-inbox.sh (type as an
-# argument), not inbox.sh: Antigravity's manifest declares detect=explicit, so inbox.sh
-# cannot detect the caller's type and fails, and nothing is marked read. The monitor
+# argument), not inbox.sh: Antigravity's manifest declares detect=explicit (no built-in
+# environment marker), so inbox.sh does not detect it automatically; in the measured setup
+# the detected type was empty and it failed, and nothing was marked read. The monitor
 # prohibition must stay, and the status step is skipped only on Windows, where no
 # Antigravity monitor can run.
 load test_helper
@@ -20,6 +21,12 @@ teardown() { teardown_test_env; }
 
 @test "antigravity skill: the manifest still declares detect=explicit (the reason inbox.sh fails)" {
   [ "$(agmsg_type_get antigravity detect)" = "explicit" ]
+}
+
+@test "antigravity skill: the wording states the limit of the type detection, not a general claim" {
+  grep -qF 'cannot reliably be used here' "$OUT"
+  grep -qF 'In the measured setup the detected type was empty' "$OUT"
+  grep -qF 'with another type'"'"'s marker in the environment it could instead fail with a type mismatch' "$OUT"
 }
 
 @test "antigravity skill: reading uses check-inbox.sh with the type and project as arguments" {
