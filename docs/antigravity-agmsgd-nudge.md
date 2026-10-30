@@ -42,9 +42,10 @@ delivery checks started, `last_check_ms`, `total_ms`, `reason`), never the notic
 `wrapper_ms` (`libs`, `resolved`, `poked`), `peeks_ms` (each screen read, in order: the two safety reads, then the delivery checks)
 and, on the daemon's own clock, `seen_ms` and `peek_seen_ms` (when each mark reached the daemon). The wrapper's clock starts at
 its first statement, so the time Git Bash needed to start is not in `wrapper_ms` (the daemon's `seen_ms` is the only view of it, and
-the two clocks are not subtracted from each other); it is the wall clock (`$EPOCHREALTIME` when bash has it, else `date +%s%3N`,
-which starts a process per reading; neither the cost nor the effect on the timings has been measured) and can be stepped by a time
-correction. A run refused early (a draft, a confirmation screen, an unclear box) shows only the stages it reached, and a dry run
+the two clocks are not subtracted from each other); it is a wall clock chosen once: `$EPOCHREALTIME` when bash has it (bash 5), else `date +%s%3N` if it prints only digits (GNU
+date; it starts a process per reading, a cost not yet measured), else the `$SECONDS` counter (bash 3.2 and BSD `date` on macOS), which
+has whole-second resolution only (every stage time is then a multiple of 1000 and may be off by up to a second); a wall clock can be
+stepped by a time correction. If no clock works, no stage mark is printed and delivery is unaffected. A run refused early (a draft, a confirmation screen, an unclear box) shows only the stages it reached, and a dry run
 shows the safety reads and the no-op poke, not the delivery checks. The marks are for measurement only: no limit, deadline or
 delivery decision uses them. Delivery is best-effort: neither exactly-once nor at-least-once is guaranteed, so a notice can appear twice or not at
 all. Once the daemon has observed the wrapper's "typed" marker, the line counts as notified and is not typed again (a

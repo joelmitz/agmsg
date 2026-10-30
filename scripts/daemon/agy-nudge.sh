@@ -22,24 +22,44 @@ set -euo pipefail
 
 # Stage timing for the daemon's nudge_run record. Origin: this statement, so the time Git Bash itself needed to
 # start before it is NOT included (the daemon's own clock sees that part, see antigravity-nudge.mjs). The clock is
-# the wall clock: $EPOCHREALTIME when bash has it (no process is started), else `date +%s%3N` (one external
-# process per reading, a cost not yet measured). A wall clock can be stepped by a time correction. Marks go to fd 7
-# (a copy of stdout kept from here on), never to stdout inside a command substitution, and carry only a fixed stage
-# name and a number: no notice text, path, token or nonce.
+# chosen ONCE, here, in this order: $EPOCHREALTIME (bash 5; wall clock, millisecond resolution, no process
+# started); else `date +%s%3N` if it prints only digits (GNU date; wall clock; one external process per reading,
+# a cost not yet measured; BSD/macOS date does not understand %3N and prints a non-number, so it is not used there);
+# else $SECONDS (bash 3.2 on macOS: a builtin counter, WHOLE-SECOND resolution only, so every stage time is a
+# multiple of 1000 and can be off by up to a second). A wall clock can be stepped by a time correction. If no clock
+# works, no stage mark is printed at all and delivery is unaffected. AGMSG_AGY_NUDGE_CLOCK=epoch|date|seconds|none
+# pins one clock (used by the tests; a pinned clock that does not work means no marks). Marks go to fd 7 (a copy of
+# stdout kept from here on), never to stdout inside a command substitution, and carry only a fixed stage name and a
+# number: no notice text, path, token or nonce.
 _AGY_T0=""
 _AGY_NOW=""
+_AGY_CLOCK=""
+_agy_pick_clock() {
+  local want="${AGMSG_AGY_NUDGE_CLOCK:-auto}" us v
+  case "$want" in auto|epoch)
+    us="${EPOCHREALTIME:-}"; us="${us//[.,]/}"
+    case "$us" in ''|*[!0-9]*) ;; *) _AGY_CLOCK=epoch; return 0 ;; esac
+    [ "$want" = epoch ] && return 1 ;;
+  esac
+  case "$want" in auto|date)
+    v="$(date +%s%3N 2>/dev/null)" || v=""
+    case "$v" in ''|*[!0-9]*) ;; *) _AGY_CLOCK=date; return 0 ;; esac
+    [ "$want" = date ] && return 1 ;;
+  esac
+  case "$want" in auto|seconds) _AGY_CLOCK=seconds; return 0 ;; esac
+  return 1
+}
 _agy_now_ms() {
   local us v
-  if [ -n "${EPOCHREALTIME:-}" ]; then
-    us="${EPOCHREALTIME//[.,]/}"
-    case "$us" in ''|*[!0-9]*) return 1 ;; esac
-    _AGY_NOW=$((10#$us / 1000)); return 0
-  fi
-  v="$(date +%s%3N 2>/dev/null)" || return 1
-  case "$v" in ''|*[!0-9]*) return 1 ;; esac
-  _AGY_NOW=$v
+  case "$_AGY_CLOCK" in
+    epoch) us="${EPOCHREALTIME:-}"; us="${us//[.,]/}"; case "$us" in ''|*[!0-9]*) return 1 ;; esac; _AGY_NOW=$((10#$us / 1000)) ;;
+    date) v="$(date +%s%3N 2>/dev/null)" || return 1; case "$v" in ''|*[!0-9]*) return 1 ;; esac; _AGY_NOW=$v ;;
+    seconds) _AGY_NOW=$((SECONDS * 1000)) ;;
+    *) return 1 ;;
+  esac
 }
 { exec 7>&1; } 2>/dev/null || true
+_agy_pick_clock || true
 _agy_now_ms && _AGY_T0=$_AGY_NOW || true
 _agy_mark() {   # <fixed stage name>
   [ -n "$_AGY_T0" ] || return 0

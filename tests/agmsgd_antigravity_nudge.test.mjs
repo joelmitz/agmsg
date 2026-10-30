@@ -1155,3 +1155,55 @@ test('B1: an abort after a large pipe read still reports that it typed, with or 
     }
   }
 });
+
+// ---- The wrapper's clock must work (or be absent without harm) where bash 3.2 and BSD date are all there is (macOS).
+function clockSnippet(env, body) {
+  const wrapper = path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh');
+  const script = `set -euo pipefail\nsource <(sed -n '/^_AGY_T0=/,/^_agy_now_ms && /p' '${wrapper}')\n${body}`;
+  return execFileSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } }).trim();
+}
+
+test('macOS-like clock: no $EPOCHREALTIME (unset under set -u) and a BSD-style date that cannot do %3N fall back to the whole-second counter, never to a bad value', (t) => {
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-bsddate-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  writeFileSync(path.join(bin, 'date'), '#!/bin/sh\nprintf "%s\\n" "17301234563N"\n', { mode: 0o755 });
+  const env = { PATH: `${bin}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: '' };
+  const out = clockSnippet(env, 'unset EPOCHREALTIME\n_AGY_CLOCK=; _AGY_T0=; _agy_pick_clock; _agy_now_ms && _AGY_T0=$_AGY_NOW || true\nsleep 1.2; _agy_now_ms\necho "$_AGY_CLOCK $_AGY_T0 $((_AGY_NOW - _AGY_T0))"');
+  const [clock, t0, elapsed] = out.split(' ');
+  assert.equal(clock, 'seconds');
+  assert.equal(t0, '0');
+  assert.ok(Number(elapsed) % 1000 === 0 && Number(elapsed) >= 1000 && Number(elapsed) <= 3000, `whole-second steps only: ${out}`);
+});
+
+test('clock choice: epoch when available, GNU-style date next, a pinned clock that does not work gives no clock at all', (t) => {
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-gnudate-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  writeFileSync(path.join(bin, 'date'), '#!/bin/sh\nprintf "%s\\n" "1730000000123"\n', { mode: 0o755 });
+  const body = '_AGY_CLOCK=; _AGY_T0=; _agy_pick_clock || true; _agy_now_ms && _AGY_T0=$_AGY_NOW || true\necho "[$_AGY_CLOCK] [$_AGY_T0]"';
+  assert.match(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'auto' }, body), /^\[epoch\] \[\d{13}\]$/);
+  assert.equal(clockSnippet({ PATH: `${bin}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: 'date' }, body), '[date] [1730000000123]');
+  assert.equal(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'none' }, body), '[] []');
+  const bad = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-baddate-'));
+  t.after(() => rmSync(bad, { recursive: true, force: true }));
+  writeFileSync(path.join(bad, 'date'), '#!/bin/sh\nprintf "%s\\n" "17301234563N"\n', { mode: 0o755 });
+  assert.equal(clockSnippet({ PATH: `${bad}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: 'date' }, body), '[] []', 'a pinned date that prints a non-number is not used');
+});
+
+test('through the real wrapper, a whole-second clock still records ordered stages (multiples of 1000), and with no clock there are no marks and delivery is unchanged', async (t) => {
+  const sec = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', AGMSG_AGY_NUDGE_CLOCK: 'seconds' });
+  await sec.channel.pollOnce();
+  const [run] = sec.runs();
+  assert.ok(run, JSON.stringify(sec.lines));
+  const values = [...Object.values(run.wrapper_ms), ...run.peeks_ms];
+  assert.ok(values.length >= 4 && values.every((v) => Number.isInteger(v) && v % 1000 === 0), JSON.stringify(run));
+  assert.ok(run.wrapper_ms.libs <= run.wrapper_ms.resolved && run.wrapper_ms.resolved <= run.wrapper_ms.poked, JSON.stringify(run.wrapper_ms));
+  assert.equal(sec.prompts().length, 1);
+  const none = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', AGMSG_AGY_NUDGE_CLOCK: 'none' });
+  await none.channel.pollOnce();
+  const [quiet] = none.runs();
+  assert.ok(quiet, JSON.stringify(none.lines));
+  assert.deepEqual([quiet.wrapper_ms, quiet.peeks_ms, quiet.seen_ms, quiet.peek_seen_ms], [{}, [], {}, []], 'no clock, no stage marks');
+  assert.equal(quiet.result, 'exit');
+  assert.equal(none.prompts().length, 1, 'delivery is the same without a clock');
+  assert.equal(none.row().state, 'delivering');
+});
