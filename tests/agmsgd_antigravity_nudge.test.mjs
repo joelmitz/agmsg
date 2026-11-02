@@ -1053,7 +1053,11 @@ test('runNudge reads stage marks as whole lines once each: split across chunks, 
   assert.equal((await runNudge({ script: path.join(dir, 'marks.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000 })).code, 0);
 });
 
-test('live through the real wrapper: nudge_run carries the wrapper stages and the peek marks, in order, and nothing from the notice', async (t) => {
+// Whether this machine's bash has a clock (bash 5). macOS bash 3.2 does not; there the wrapper prints no marks.
+const HAS_EPOCH = execFileSync('bash', ['-c', 'printf %s "${EPOCHREALTIME:-}"'], { encoding: 'utf8' }) !== '';
+const stagedTest = (name, fn) => test(name, { skip: !HAS_EPOCH && 'this machine\'s bash has no $EPOCHREALTIME (stage marks are not printed there; see the no-clock test)' }, fn);
+
+stagedTest('live through the real wrapper: nudge_run carries the wrapper stages and the peek marks, in order, and nothing from the notice', async (t) => {
   const f = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted' });
   await f.channel.pollOnce();
   const [run] = f.runs();
@@ -1072,7 +1076,7 @@ test('live through the real wrapper: nudge_run carries the wrapper stages and th
   assert.equal(f.row().state, 'delivering');
 });
 
-test('dry through the real wrapper: stages up to the safety decision are recorded, and nothing is typed', async (t) => {
+stagedTest('dry through the real wrapper: stages up to the safety decision are recorded, and nothing is typed', async (t) => {
   const f = stageFixture(t, { screen: 'idle', driver: 'herdr', live: false }, { ...WIN });
   await f.channel.pollOnce();
   const [run] = f.runs();
@@ -1083,7 +1087,7 @@ test('dry through the real wrapper: stages up to the safety decision are recorde
   assert.deepEqual(f.prompts(), [], 'dry types nothing');
 });
 
-test('an early refusal (a draft in the box) records the stages it reached: no second read, no poke', async (t) => {
+stagedTest('an early refusal (a draft in the box) records the stages it reached: no second read, no poke', async (t) => {
   const f = stageFixture(t, { screen: 'draft', driver: 'herdr' }, { ...WIN });
   await f.channel.pollOnce();
   const [run] = f.runs();
@@ -1156,56 +1160,14 @@ test('B1: an abort after a large pipe read still reports that it typed, with or 
   }
 });
 
-// ---- The wrapper's clock must work (or be absent without harm) where bash 3.2 and BSD date are all there is (macOS).
-function clockSnippet(env, body) {
-  const wrapper = path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh');
-  const script = `set -euo pipefail\nsource <(sed -n '/^_AGY_T0=/,/^_agy_now_ms && /p' '${wrapper}')\n${body}`;
-  return execFileSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } }).trim();
-}
+// ---- The stage clock is $EPOCHREALTIME only. Where bash has none (bash 3.2 on macOS) there are no marks and delivery is unchanged.
+// A BASH_ENV that unsets it makes the wrapper's bash behave like bash 3.2 on any machine, so this test is the same everywhere.
 
-test('macOS-like clock: no $EPOCHREALTIME (unset under set -u) and a BSD-style date that cannot do %3N fall back to the whole-second counter, never to a bad value', (t) => {
-  const bin = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-bsddate-'));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
-  writeFileSync(path.join(bin, 'date'), '#!/bin/sh\nprintf "%s\\n" "17301234563N"\n', { mode: 0o755 });
-  const env = { PATH: `${bin}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: '' };
-  const out = clockSnippet(env, 'unset EPOCHREALTIME\n_AGY_CLOCK=; _AGY_T0=; _agy_pick_clock; _agy_now_ms && _AGY_T0=$_AGY_NOW || true\nsleep 1.2; _agy_now_ms\necho "$_AGY_CLOCK $_AGY_T0 $((_AGY_NOW - _AGY_T0))"');
-  const [clock, t0, elapsed] = out.split(' ');
-  assert.equal(clock, 'seconds');
-  assert.equal(t0, '0');
-  assert.ok(Number(elapsed) % 1000 === 0 && Number(elapsed) >= 1000 && Number(elapsed) <= 3000, `whole-second steps only: ${out}`);
-});
-
-test('clock choice: epoch when available, GNU-style date next, a pinned clock that does not work gives no clock at all', (t) => {
-  const bin = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-gnudate-'));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
-  writeFileSync(path.join(bin, 'date'), '#!/bin/sh\nprintf "%s\\n" "1730000000123"\n', { mode: 0o755 });
-  const body = '_AGY_CLOCK=; _AGY_T0=; _agy_pick_clock || true; _agy_now_ms && _AGY_T0=$_AGY_NOW || true\necho "[$_AGY_CLOCK] [$_AGY_T0]"';
-  // The default choice depends on this machine's bash and date (macOS: bash 3.2 and BSD date give seconds), so the
-  // expectation is derived from what the machine can do, not assumed.
-  const hasEpoch = execFileSync('bash', ['-c', 'printf %s "${EPOCHREALTIME:-}"'], { encoding: 'utf8' }) !== '';
-  const hasGnuDate = /^\d+$/.test(execFileSync('bash', ['-c', 'date +%s%3N 2>/dev/null || true'], { encoding: 'utf8' }).trim());
-  const auto = clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'auto' }, body);
-  assert.match(auto, hasEpoch ? /^\[epoch\] \[\d{13}\]$/ : hasGnuDate ? /^\[date\] \[\d{13}\]$/ : /^\[seconds\] \[0\]$/, auto);
-  if (hasEpoch) assert.match(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'epoch' }, body), /^\[epoch\] \[\d{13}\]$/);
-  else assert.equal(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'epoch' }, body), '[] []', 'pinned epoch without $EPOCHREALTIME gives no clock');
-  assert.equal(clockSnippet({ PATH: `${bin}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: 'date' }, body), '[date] [1730000000123]');
-  assert.equal(clockSnippet({ AGMSG_AGY_NUDGE_CLOCK: 'none' }, body), '[] []');
-  const bad = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-baddate-'));
-  t.after(() => rmSync(bad, { recursive: true, force: true }));
-  writeFileSync(path.join(bad, 'date'), '#!/bin/sh\nprintf "%s\\n" "17301234563N"\n', { mode: 0o755 });
-  assert.equal(clockSnippet({ PATH: `${bad}:${process.env.PATH}`, AGMSG_AGY_NUDGE_CLOCK: 'date' }, body), '[] []', 'a pinned date that prints a non-number is not used');
-});
-
-test('through the real wrapper, a whole-second clock still records ordered stages (multiples of 1000), and with no clock there are no marks and delivery is unchanged', async (t) => {
-  const sec = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', AGMSG_AGY_NUDGE_CLOCK: 'seconds' });
-  await sec.channel.pollOnce();
-  const [run] = sec.runs();
-  assert.ok(run, JSON.stringify(sec.lines));
-  const values = [...Object.values(run.wrapper_ms), ...run.peeks_ms];
-  assert.ok(values.length >= 4 && values.every((v) => Number.isInteger(v) && v % 1000 === 0), JSON.stringify(run));
-  assert.ok(run.wrapper_ms.libs <= run.wrapper_ms.resolved && run.wrapper_ms.resolved <= run.wrapper_ms.poked, JSON.stringify(run.wrapper_ms));
-  assert.equal(sec.prompts().length, 1);
-  const none = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', AGMSG_AGY_NUDGE_CLOCK: 'none' });
+test('without a clock ($EPOCHREALTIME unset, as in bash 3.2) the wrapper prints no stage marks and delivers exactly as before', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-noclock-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'noclock.sh'), 'unset EPOCHREALTIME\n');
+  const none = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', BASH_ENV: path.join(dir, 'noclock.sh') });
   await none.channel.pollOnce();
   const [quiet] = none.runs();
   assert.ok(quiet, JSON.stringify(none.lines));
@@ -1213,4 +1175,17 @@ test('through the real wrapper, a whole-second clock still records ordered stage
   assert.equal(quiet.result, 'exit');
   assert.equal(none.prompts().length, 1, 'delivery is the same without a clock');
   assert.equal(none.row().state, 'delivering');
+  // the early-refusal path without a clock: refused as before, nothing typed, no marks
+  const draft = stageFixture(t, { screen: 'draft', driver: 'herdr' }, { ...WIN, BASH_ENV: path.join(dir, 'noclock.sh') });
+  await draft.channel.pollOnce();
+  const [refused] = draft.runs();
+  assert.ok(refused);
+  assert.deepEqual([refused.code, refused.wrapper_ms, refused.peeks_ms], [14, {}, []]);
+  assert.deepEqual(draft.prompts(), []);
+});
+
+test('the wrapper has one clock only: no date fallback, no counter fallback, no pin setting', () => {
+  const wrapper = readFileSync(path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh'), 'utf8');
+  assert.match(wrapper, /EPOCHREALTIME/);
+  assert.ok(!/date \+%s|\$SECONDS|AGMSG_AGY_NUDGE_CLOCK|_AGY_CLOCK/.test(wrapper));
 });
