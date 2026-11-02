@@ -355,6 +355,43 @@ test('status is silent and says disabled without the delivery file', (t) => {
   assert.deepEqual(JSON.parse(execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', statusScript, f.root, '--json'], { encoding: 'utf8' })).antigravity_nudge, { enabled: false, live: false, state: 'disabled', seats: [] });
 });
 
+// status.mjs loads the Antigravity channels lazily (so a missing scripts/ module cannot stop
+// status from printing the install-verify reason). A load failure must not read as "disabled".
+function statusWithoutPollDeadline(t, flags, { removeModule }) {
+  const f = fixture(t);
+  f.db.close();
+  for (const name of flags) f.flag(name);
+  const copy = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-status-copy-'));
+  t.after(() => rmSync(copy, { recursive: true, force: true }));
+  cpSync(path.join(repo, 'scripts'), copy, { recursive: true });
+  if (removeModule) rmSync(path.join(copy, 'daemon', 'poll-deadline.mjs'));
+  const run = (...extra) => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(copy, 'daemon', 'status.mjs'), f.root, ...extra], { encoding: 'utf8' });
+  return { text: run(), json: JSON.parse(run('--json')) };
+}
+
+test('status with a missing channel dependency says unavailable, not disabled, when the flags are on', (t) => {
+  const { text, json } = statusWithoutPollDeadline(t, ['observe-antigravity', 'agmsgd-antigravity-delivery', 'agmsgd-antigravity-live'], { removeModule: true });
+  assert.deepEqual(json.antigravity_observe, { enabled: true, state: 'unavailable', reason: 'channel_module_load_failed', seats: [] });
+  assert.deepEqual(json.antigravity_nudge, { enabled: true, live: true, state: 'unavailable', reason: 'channel_module_load_failed', seats: [] });
+  assert.match(text, /Antigravity observation is on, but its status module could not be loaded \(channel_module_load_failed\)/);
+  assert.match(text, /Antigravity delivery is on \(live\), but its status module could not be loaded \(channel_module_load_failed\)/);
+  assert.doesNotMatch(text, /poll-deadline|ERR_MODULE|node_modules|\/tmp\//);
+});
+
+test('status with a missing channel dependency and no flags stays disabled and silent', (t) => {
+  const { text, json } = statusWithoutPollDeadline(t, [], { removeModule: true });
+  assert.deepEqual(json.antigravity_observe, { enabled: false, state: 'disabled', seats: [] });
+  assert.deepEqual(json.antigravity_nudge, { enabled: false, live: false, state: 'disabled', seats: [] });
+  assert.doesNotMatch(text, /Antigravity/);
+});
+
+test('status with the channels loading normally keeps the real unavailable wording', (t) => {
+  const { text, json } = statusWithoutPollDeadline(t, ['observe-antigravity', 'agmsgd-antigravity-delivery'], { removeModule: false });
+  assert.equal(json.antigravity_nudge.reason, 'no_poll_recorded_yet');
+  assert.equal(json.antigravity_observe.reason, 'no_poll_recorded_yet');
+  assert.doesNotMatch(text, /channel_module_load_failed/);
+});
+
 test('the sources have no way to reach another machine or message content', () => {
   const channel = readFileSync(path.join(repo, 'scripts', 'daemon', 'channels', 'antigravity-nudge.mjs'), 'utf8').replace(/^\s*\/\/.*$/gm, '');
   assert.doesNotMatch(channel, /\b(writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|unlink|unlinkSync|rm|rmSync|mkdir|mkdirSync|chmod|copyFile|symlink)\b/);

@@ -19,7 +19,7 @@
 //     table's own exit column.
 
 import { readPollTimeout } from './log.mjs';
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,16 +30,34 @@ import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
 // fork: the Antigravity channels import poll-deadline.mjs, which upstream's status
 // path never needs. Loaded statically, a missing scripts/ module would crash
 // status with ERR_MODULE_NOT_FOUND before it could print the install-verify
-// reason (upstream #1821). Load them lazily and fall back to "nothing to show".
-let readAntigravityObservation = () => ({ enabled: false, state: "disabled", seats: [] });
-let formatAntigravitySeats = () => "";
-let readAntigravityNudge = () => ({ enabled: false, live: false, state: "disabled", seats: [] });
-let formatAntigravityNudge = () => "";
+// reason (upstream #1821). Load them lazily. When that fails, status still starts
+// and says so for the channels whose flag file is present (the flags are read here
+// without those modules, same rule as theirs: a regular file, not a symlink). No
+// error text or path is shown.
+const AGY_LOAD_FAILED = "channel_module_load_failed";
+const agyFlagOn = (root, name) => {
+  try {
+    const st = lstatSync(join(root, "run", name));
+    return st.isFile() && !st.isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+let readAntigravityObservation = (_db, root) => agyFlagOn(root, "observe-antigravity")
+  ? { enabled: true, state: "unavailable", reason: AGY_LOAD_FAILED, seats: [] }
+  : { enabled: false, state: "disabled", seats: [] };
+let formatAntigravitySeats = (o) => o?.enabled ? "Antigravity observation is on, but its status module could not be loaded (channel_module_load_failed)\n" : "";
+let readAntigravityNudge = (_db, root) => agyFlagOn(root, "agmsgd-antigravity-delivery")
+  ? { enabled: true, live: agyFlagOn(root, "agmsgd-antigravity-live"), state: "unavailable", reason: AGY_LOAD_FAILED, seats: [] }
+  : { enabled: false, live: false, state: "disabled", seats: [] };
+let formatAntigravityNudge = (o) => o?.enabled ? `Antigravity delivery is on (${o.live ? "live" : "dry-run"}), but its status module could not be loaded (channel_module_load_failed)\n` : "";
 try {
-  ({ readAntigravityObservation, formatAntigravitySeats } = await import("./channels/antigravity-observe.mjs"));
-  ({ readAntigravityNudge, formatAntigravityNudge } = await import("./channels/antigravity-nudge.mjs"));
+  const observe = await import("./channels/antigravity-observe.mjs");
+  const nudge = await import("./channels/antigravity-nudge.mjs");
+  ({ readAntigravityObservation, formatAntigravitySeats } = observe);
+  ({ readAntigravityNudge, formatAntigravityNudge } = nudge);
 } catch {
-  // keep the empty fallbacks above
+  // keep the fallbacks above (both pairs: assigned only after both imports succeed)
 }
 
 const STARTING_STOPPING_GRACE_MS = 30_000;
