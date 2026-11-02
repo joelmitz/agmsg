@@ -244,7 +244,7 @@ _stop_daemon() {
   printf '{"pid":999999,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.999999.json"
   _start_daemon_ready
   [ ! -e "$TEST_SKILL_DIR/run/install-verify-warning.999999.json" ]
-  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  run node --disable-warning=ExperimentalWarning "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   refute grep -qF -- "Warning:" <<<"$output"
   _stop_daemon
@@ -265,7 +265,7 @@ _stop_daemon() {
   _write_completion_record
   _start_daemon_ready
   printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.1.json"
-  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  run node --disable-warning=ExperimentalWarning "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   refute grep -qF -- "Warning:" <<<"$output"
   _stop_daemon
 }

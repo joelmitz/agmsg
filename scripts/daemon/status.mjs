@@ -27,8 +27,20 @@ import { isAlive } from "./executor.mjs";
 import { openInstallDb } from "./db.mjs";
 import { PROTOCOL_VERSION } from "./control.mjs";
 import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
-import { readAntigravityObservation, formatAntigravitySeats } from "./channels/antigravity-observe.mjs";
-import { readAntigravityNudge, formatAntigravityNudge } from "./channels/antigravity-nudge.mjs";
+// fork: the Antigravity channels import poll-deadline.mjs, which upstream's status
+// path never needs. Loaded statically, a missing scripts/ module would crash
+// status with ERR_MODULE_NOT_FOUND before it could print the install-verify
+// reason (upstream #1821). Load them lazily and fall back to "nothing to show".
+let readAntigravityObservation = () => ({ enabled: false, state: "disabled", seats: [] });
+let formatAntigravitySeats = () => "";
+let readAntigravityNudge = () => ({ enabled: false, live: false, state: "disabled", seats: [] });
+let formatAntigravityNudge = () => "";
+try {
+  ({ readAntigravityObservation, formatAntigravitySeats } = await import("./channels/antigravity-observe.mjs"));
+  ({ readAntigravityNudge, formatAntigravityNudge } = await import("./channels/antigravity-nudge.mjs"));
+} catch {
+  // keep the empty fallbacks above
+}
 
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
