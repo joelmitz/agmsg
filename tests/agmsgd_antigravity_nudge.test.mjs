@@ -9,6 +9,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
@@ -966,7 +967,7 @@ test('a finished run is recorded as one nudge_run line with numbers and fixed wo
   assert.deepEqual([f.row().state, f.row().reason], ['blocked', 'enter_unconfirmed:timeout']);
   const runs = lines.filter((line) => line.includes('"nudge_run"')).map((line) => JSON.parse(line));
   assert.equal(runs.length, 1);
-  assert.deepEqual(Object.keys(runs[0]).sort(), ['channel', 'checks', 'code', 'event', 'last_check_ms', 'mode', 'reason', 'result', 'seat', 'total_ms', 'typed_ms']);
+  assert.deepEqual(Object.keys(runs[0]).sort(), ['channel', 'checks', 'code', 'event', 'last_check_ms', 'mode', 'peek_seen_ms', 'peeks_ms', 'reason', 'result', 'seat', 'seen_ms', 'total_ms', 'typed_ms', 'wrapper_ms']);
   assert.deepEqual([runs[0].result, runs[0].code, runs[0].typed_ms, runs[0].checks, runs[0].last_check_ms, runs[0].total_ms, runs[0].reason, runs[0].mode],
     ['timeout', null, 17000, 2, 19500, 25300, 'enter_unconfirmed:timeout', 'live']);
   assert.ok(!lines.some((line) => line.includes('New messages are waiting')), 'the notice text is never logged');
@@ -1011,4 +1012,179 @@ test('stage markers that arrive in one chunk are not ordered by the clock: typin
   assert.equal(stages.checks, 2, 'a duplicate marker is counted once');
   assert.ok(stages.typedMs <= stages.lastCheckMs, `typing is never later than a check: ${JSON.stringify(stages)}`);
   assert.ok(stages.lastCheckMs <= stages.totalMs, JSON.stringify(stages));
+});
+
+// ---- Stage marks (wrapper -> daemon): measurement only; no limit, deadline or delivery decision uses them.
+function stageFixture(t, opts = {}, extraEnv = {}) {
+  const f = fixture(t, opts);
+  f.flag('agmsgd-antigravity-delivery');
+  if (opts.live !== false) f.flag('agmsgd-antigravity-live');
+  const lines = [];
+  const channel = createAntigravityNudgeChannel({ db: f.db, installRoot: f.root, env: { ...f.env, ...extraEnv }, now: () => f.clock.ms, log: (line) => lines.push(line) });
+  t.after(() => channel.stop());
+  const runs = () => lines.filter((line) => line.includes('"nudge_run"')).map((line) => JSON.parse(line));
+  const prompts = () => f.calls().filter(line => line.startsWith('agent-prompt'));
+  return { ...f, channel, lines, runs, prompts };
+}
+
+test('runNudge reads stage marks as whole lines once each: split across chunks, repeated, unknown names, malformed numbers and over-long lines are ignored', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-marks-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'marks.sh'), [
+    "printf 'NUDGE-STAGE:libs:12\\n'",
+    "printf 'NUDGE-STAGE:lib'; sleep 0.1; printf 's:99\\n'",            // the second libs (split) is ignored: first one wins
+    "printf 'NUDGE-STAGE:resolved:34\\nNUDGE-STAGE:peek:50\\nNUDGE-STAGE:peek:1050\\n'",
+    "printf 'NUDGE-STAGE:evil:1\\nNUDGE-STAGE:poked:x1\\nNUDGE-STAGE:poked:-5\\nNUDGE-STAGE:poked:1234567890\\n'",
+    "printf 'NUDGE-STAGE:poked:1100\\r\\n'",
+    "printf 'a%.0s' $(seq 1 400); printf '\\nNUDGE-STAGE:peek:2000\\n'",
+    "exit 0", ''].join('\n'));
+  const stages = {};
+  const result = await runNudge({ script: path.join(dir, 'marks.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages });
+  assert.deepEqual([result.kind, result.code], ['exit', 0]);
+  assert.deepEqual(stages.wrapperMs, { libs: 12, resolved: 34, poked: 1100 });
+  assert.deepEqual(stages.peeksMs, [50, 1050, 2000]);
+  assert.equal(stages.peekSeenMs.length, 3);
+  assert.deepEqual(Object.keys(stages.seenMs).sort(), ['libs', 'poked', 'resolved']);
+  const capped = {};
+  writeFileSync(path.join(dir, 'many.sh'), "for i in $(seq 1 40); do printf 'NUDGE-STAGE:peek:%s\\n' $i; done\n");
+  await runNudge({ script: path.join(dir, 'many.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages: capped });
+  assert.equal(capped.peeksMs.length, 12, 'bounded');
+  // without a stages object nothing is read or kept
+  assert.equal((await runNudge({ script: path.join(dir, 'marks.sh'), mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000 })).code, 0);
+});
+
+// Whether this machine's bash has a clock (bash 5). macOS bash 3.2 does not; there the wrapper prints no marks.
+const HAS_EPOCH = execFileSync('bash', ['-c', 'printf %s "${EPOCHREALTIME:-}"'], { encoding: 'utf8' }) !== '';
+const stagedTest = (name, fn) => test(name, { skip: !HAS_EPOCH && 'this machine\'s bash has no $EPOCHREALTIME (stage marks are not printed there; see the no-clock test)' }, fn);
+
+stagedTest('live through the real wrapper: nudge_run carries the wrapper stages and the peek marks, in order, and nothing from the notice', async (t) => {
+  const f = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted' });
+  await f.channel.pollOnce();
+  const [run] = f.runs();
+  assert.ok(run, JSON.stringify(f.lines));
+  assert.equal(run.result, 'exit');
+  for (const name of ['libs', 'resolved', 'poked']) assert.ok(Number.isInteger(run.wrapper_ms[name]) && run.wrapper_ms[name] >= 0, `${name}: ${JSON.stringify(run.wrapper_ms)}`);
+  assert.ok(run.wrapper_ms.libs <= run.wrapper_ms.resolved && run.wrapper_ms.resolved <= run.wrapper_ms.poked, JSON.stringify(run.wrapper_ms));
+  assert.ok(run.peeks_ms.length >= 3, `safe-poke reads twice, then at least one delivery check reads: ${JSON.stringify(run.peeks_ms)}`);
+  assert.deepEqual([...run.peeks_ms].sort((a, b) => a - b), run.peeks_ms, 'peek marks are in order');
+  assert.equal(run.peek_seen_ms.length, run.peeks_ms.length);
+  assert.ok(run.peeks_ms[1] >= run.peeks_ms[0] + 900, 'the second safe-poke read comes after its 1 s settle');
+  assert.ok(run.peeks_ms[1] <= run.wrapper_ms.poked && run.wrapper_ms.poked <= run.peeks_ms[2], 'the two safe-poke reads, then the poke, then the first check read');
+  const text = JSON.stringify(run);
+  assert.ok(!/New messages are waiting|agmsg:|\/tmp|\/c\/|project/.test(text), 'no notice text, nonce or path');
+  assert.equal(f.prompts().length, 1, 'one line typed; the wrapped functions changed nothing about delivery');
+  assert.equal(f.row().state, 'delivering');
+});
+
+stagedTest('dry through the real wrapper: stages up to the safety decision are recorded, and nothing is typed', async (t) => {
+  const f = stageFixture(t, { screen: 'idle', driver: 'herdr', live: false }, { ...WIN });
+  await f.channel.pollOnce();
+  const [run] = f.runs();
+  assert.ok(run, JSON.stringify(f.lines));
+  assert.equal(run.mode, 'dry');
+  assert.ok('libs' in run.wrapper_ms && 'resolved' in run.wrapper_ms && 'poked' in run.wrapper_ms, JSON.stringify(run.wrapper_ms));
+  assert.equal(run.peeks_ms.length, 2, 'dry: safe-poke reads twice and the no-op poke follows; no delivery check runs');
+  assert.deepEqual(f.prompts(), [], 'dry types nothing');
+});
+
+stagedTest('an early refusal (a draft in the box) records the stages it reached: no second read, no poke', async (t) => {
+  const f = stageFixture(t, { screen: 'draft', driver: 'herdr' }, { ...WIN });
+  await f.channel.pollOnce();
+  const [run] = f.runs();
+  assert.ok(run, JSON.stringify(f.lines));
+  assert.equal(run.code, 14);
+  assert.ok('libs' in run.wrapper_ms && 'resolved' in run.wrapper_ms, JSON.stringify(run.wrapper_ms));
+  assert.ok(!('poked' in run.wrapper_ms), 'the poke was never reached');
+  assert.equal(run.peeks_ms.length, 1, 'refused after the first read');
+  assert.deepEqual(f.prompts(), []);
+});
+
+test('the wrapper keeps the shared safe-poke.sh untouched, sends marks to a copied fd only, and the daemon file reads them as data', () => {
+  const wrapper = readFileSync(path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh'), 'utf8');
+  assert.match(wrapper, /exec 7>&1/);
+  assert.match(wrapper, />&7 2>\/dev\/null \|\| true/);
+  assert.match(wrapper, /_agy_wrap terminal_peek_styled peek/);
+  assert.match(wrapper, /_agy_wrap terminal_poke poked/);
+  assert.match(wrapper, /EPOCHREALTIME/);
+  assert.ok(!readFileSync(path.join(repo, 'scripts', 'lib', 'safe-poke.sh'), 'utf8').includes('NUDGE-STAGE'), 'no mark is added inside the shared file');
+});
+
+// ---- The typed / check / reason decisions must not depend on how the pipe cuts the output, or on stage lines being there.
+function pipeChild(pieces, { closeCode = null } = {}) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = Object.assign(new EventEmitter(), { destroy() {} }); child.stderr = Object.assign(new EventEmitter(), { destroy() {} });
+    child.stdin = { on() {}, end() {} };
+    child.kill = () => {}; child.unref = () => {};
+    setImmediate(async () => {
+      for (const piece of pieces) { child.stdout.emit('data', Buffer.from(piece)); await new Promise((resolve) => setImmediate(resolve)); }
+      if (closeCode !== null) child.emit('close', closeCode);
+    });
+    return child;
+  };
+}
+const WRAPPER_OUTPUT = (withStages) => [
+  'NUDGE-TYPED', 'NUDGE-CHECK:1', ...(withStages ? ['NUDGE-STAGE:peek:19000'] : []), 'NUDGE-CHECK:2',
+  ...(withStages ? ['NUDGE-STAGE:peek:20000', 'NUDGE-STAGE:poked:18500'] : []), 'NUDGE-REASON:box_empty', '',
+].join('\n');
+const splitsOf = (text) => [[text], ...Array.from({ length: text.length - 1 }, (_, i) => [text.slice(0, i + 1), text.slice(i + 1)]), [...text]];
+
+test('B1: the typed marker, the checks and the reason are found in one large pipe read and at every split point, with or without stage lines and a stages object', async () => {
+  for (const withStages of [false, true]) {
+    for (const keepStages of [false, true]) {
+      for (const pieces of splitsOf(WRAPPER_OUTPUT(withStages))) {
+        let typedCalls = 0;
+        const stages = keepStages ? {} : undefined;
+        const result = await runNudge({ script: '/x/agy-nudge.sh', mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 5000, stages, onTyped: () => { typedCalls += 1; }, spawnProcess: pipeChild(pieces, { closeCode: 23 }) });
+        const label = `stages=${withStages} object=${keepStages} pieces=${pieces.length}`;
+        assert.deepEqual([result.kind, result.code, result.typed, result.reasonWord], ['exit', 23, true, 'box_empty'], label);
+        assert.equal(typedCalls, 1, `onTyped exactly once: ${label}`);
+        if (keepStages) assert.equal(stages.checks, 2, `both checks counted once: ${label}`);
+      }
+    }
+  }
+});
+
+test('B1: an abort after a large pipe read still reports that it typed, with or without stage lines (so the next poll never types again)', async () => {
+  for (const withStages of [false, true]) {
+    for (const pieces of [[WRAPPER_OUTPUT(withStages)], [...splitsOf(WRAPPER_OUTPUT(withStages))[40]]]) {
+      let typedCalls = 0;
+      const controller = new AbortController();
+      const run = runNudge({ script: '/x/agy-nudge.sh', mode: 'live', team: 't', agent: 'a', text: 'x', timeoutMs: 60000, signal: controller.signal, stages: {}, onTyped: () => { typedCalls += 1; }, spawnProcess: pipeChild(pieces) });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      controller.abort();
+      const result = await run;
+      assert.deepEqual([result.kind, result.typed, result.reasonWord, typedCalls], ['cancelled', true, 'box_empty', 1], `stages=${withStages} pieces=${pieces.length}`);
+    }
+  }
+});
+
+// ---- The stage clock is $EPOCHREALTIME only. Where bash has none (bash 3.2 on macOS) there are no marks and delivery is unchanged.
+// A BASH_ENV that unsets it makes the wrapper's bash behave like bash 3.2 on any machine, so this test is the same everywhere.
+
+test('without a clock ($EPOCHREALTIME unset, as in bash 3.2) the wrapper prints no stage marks and delivers exactly as before', async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-agy-noclock-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'noclock.sh'), 'unset EPOCHREALTIME\n');
+  const none = stageFixture(t, { screen: 'idle', driver: 'herdr' }, { ...WIN, FAKE_AFTER: 'submitted', BASH_ENV: path.join(dir, 'noclock.sh') });
+  await none.channel.pollOnce();
+  const [quiet] = none.runs();
+  assert.ok(quiet, JSON.stringify(none.lines));
+  assert.deepEqual([quiet.wrapper_ms, quiet.peeks_ms, quiet.seen_ms, quiet.peek_seen_ms], [{}, [], {}, []], 'no clock, no stage marks');
+  assert.equal(quiet.result, 'exit');
+  assert.equal(none.prompts().length, 1, 'delivery is the same without a clock');
+  assert.equal(none.row().state, 'delivering');
+  // the early-refusal path without a clock: refused as before, nothing typed, no marks
+  const draft = stageFixture(t, { screen: 'draft', driver: 'herdr' }, { ...WIN, BASH_ENV: path.join(dir, 'noclock.sh') });
+  await draft.channel.pollOnce();
+  const [refused] = draft.runs();
+  assert.ok(refused);
+  assert.deepEqual([refused.code, refused.wrapper_ms, refused.peeks_ms], [14, {}, []]);
+  assert.deepEqual(draft.prompts(), []);
+});
+
+test('the wrapper has one clock only: no date fallback, no counter fallback, no pin setting', () => {
+  const wrapper = readFileSync(path.join(repo, 'scripts', 'daemon', 'agy-nudge.sh'), 'utf8');
+  assert.match(wrapper, /EPOCHREALTIME/);
+  assert.ok(!/date \+%s|\$SECONDS|AGMSG_AGY_NUDGE_CLOCK|_AGY_CLOCK/.test(wrapper));
 });
