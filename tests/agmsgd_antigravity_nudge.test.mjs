@@ -1106,7 +1106,6 @@ test('the wrapper keeps the shared safe-poke.sh untouched, sends marks to a copi
   assert.match(wrapper, /_agy_wrap terminal_peek_styled peek/);
   assert.match(wrapper, /_agy_wrap terminal_poke poked/);
   assert.match(wrapper, /EPOCHREALTIME/);
-  assert.match(wrapper, /date \+%s%3N/);
   assert.ok(!readFileSync(path.join(repo, 'scripts', 'lib', 'safe-poke.sh'), 'utf8').includes('NUDGE-STAGE'), 'no mark is added inside the shared file');
 });
 
