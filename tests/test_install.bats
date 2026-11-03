@@ -224,6 +224,56 @@ _agy_failing_mv_fixture() {
   grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
 }
 
+@test "install --update: an owned Codex shim is removed while agmsgd is on, and put back once it is off" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+  [ -x "$shim" ]
+  [ -f "$SK/run/install.db" ]
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on';"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ ! -e "$shim" ]
+
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ -x "$shim" ]
+  grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
+}
+
+@test "install --update: a Codex shim that cannot be put back is reported with the command to repeat, and the update still finishes" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "Codex shim: removed:" <<<"$output"
+  [ -f "$SK/run/codex-shim-retired" ]
+
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  # A file where the shim directory belongs: restoring cannot create the shim.
+  mv "$FAKE_HOME/.agents/bin" "$FAKE_HOME/.agents/bin.moved"
+  : > "$FAKE_HOME/.agents/bin"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "could not update the Codex shim" <<<"$output"
+  grep -Fq "repeat with: $SK/scripts/drivers/types/codex/codex-shim-install.sh sync" <<<"$output"
+  [ -f "$SK/run/codex-shim-retired" ]
+}
+
+@test "install --update: with agmsgd off an owned Codex shim is refreshed as before" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+  sed 's#/scripts/drivers/types/codex/#/scripts/codex/#g' "$shim" > "$BATS_TEST_TMPDIR/stale"
+  cp "$BATS_TEST_TMPDIR/stale" "$shim"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
+}
+
 @test "install: a failing Antigravity skill step warns once and the rest of the install is unaffected" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   # A file where the skills directory belongs, so creating the skill folder fails.
@@ -1223,8 +1273,7 @@ SH
   run kill -0 "$first"
   [ "$status" -ne 0 ]
 
-  kill "$second" 2>/dev/null || true
-  wait 2>/dev/null || true
+  _agmsg_kill_confirmed "$second"
 }
 
 # --- Pipe-stdin guard: simulate a curl|bash entry path (#98) ---
@@ -1963,7 +2012,7 @@ EOF
 # ships, but whose installed copy a user (or their agent) had edited, is
 # backed up with THAT edited content before being overwritten; user data
 # (ext-tools config + secret, db/, teams/) survives byte-for-byte; the
-# newline-in-filename escape onto a real ext-tools secret (co1's review of
+# newline-in-filename escape onto a real ext-tools secret (a review of
 # the first version of this prune) stays closed; and a second --update
 # clears the first generation's .trash/ before writing its own.
 @test "install --update: moves removed/overwritten scripts/ files to .trash/ (one generation), never touches user data, and closes the newline escape" {
@@ -1993,7 +2042,7 @@ EOF
   printf '%s\n' 'team config' > "$SK/teams/myteam/config.json"
   printf '%s\n' 'sqlite bytes, not really' > "$SK/db/agmsg.sqlite3"
 
-  # co1's finding on the first version: `find | while read` split on
+  # A review finding on the first version: `find | while read` split on
   # newline lets an embedded newline forge a fake second "line". A real
   # entry at scripts/<LF>../ext-tools/myteam/mytool.secret (one directory
   # named the four bytes x, LF, ., .) prints as one find record but reads

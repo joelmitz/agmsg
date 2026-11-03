@@ -486,9 +486,7 @@ run_launcher_until_capture() { # [ENV=VALUE ...]
   done
   capture_elapsed=$((SECONDS - started_seconds))
   fixture_event "capture-observation seen=$seen elapsed=$capture_elapsed parent=$parent"
-  kill "$parent" 2>/dev/null || true
-  _wait_launcher_pid_bounded "$parent" 100 || true
-  wait "$parent" 2>/dev/null || true
+  agmsg_stop_pid "$parent"
   # Retire the lifetime first and let the dispatcher observe that boundary.
   # Killing the dispatcher first can strand the detached role child it spawned.
   if ! _wait_launcher_pid_bounded "$dispatcher" 100; then
@@ -922,8 +920,7 @@ wait_for_bridge_capture() {
   # SIGKILL is what a pane teardown effectively does to a dispatcher that never
   # trapped the signal: the EXIT trap does not run, so the lock row is left
   # behind owned by a dead pid, exactly the state a replacement dispatcher hits.
-  kill -9 "$dispatcher_a" 2>/dev/null || true
-  wait_launcher_or_report "$dispatcher_a" dispatcher-a || return 1
+  agmsg_stop_pid "$dispatcher_a" KILL
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
   # Observe B reaching the child-launch call, and wait for that child attempt to
@@ -972,9 +969,7 @@ EOF
   [ "$duplicate_returned" -eq 1 ]
   [ "$(wait_for_stable_child_count 1)" -eq 1 ]
 
-
-  kill "$dispatcher_b" 2>/dev/null || true
-  wait_launcher_or_report "$dispatcher_b" dispatcher-b || return 1
+  agmsg_stop_pid "$dispatcher_b"
   kill "$parent_a" "$parent_b" 2>/dev/null || true
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
@@ -1004,10 +999,8 @@ EOF
   put_record team alice thread-alice "$PROJ" codex
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
-  kill "$dispatcher" 2>/dev/null || true
-  wait_launcher_or_report "$dispatcher" dispatcher || return 1
-  kill "$parent" 2>/dev/null || true
-  wait "$parent" 2>/dev/null || true
+  agmsg_stop_pid "$dispatcher"
+  agmsg_stop_pid "$parent"
 }
 
 @test "launcher: a role added mid-loop is used only after its request arrives (#466)" {
@@ -1041,10 +1034,8 @@ EOF
   done
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 
-  kill "$dispatcher" 2>/dev/null || true
-  wait_launcher_or_report "$dispatcher" dispatcher || return 1
-  kill "$parent" 2>/dev/null || true
-  wait "$parent" 2>/dev/null || true
+  agmsg_stop_pid "$dispatcher"
+  agmsg_stop_pid "$parent"
 }
 
 # --- which pid space (#567) ---
