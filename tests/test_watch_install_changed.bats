@@ -146,6 +146,11 @@ _wait_for() {
   grep -q 'before-broken-update' "$out"
 
   chmod -x "$SCRIPTS/watch.sh"
+  # watch.sh decides "the install finished" with `[ VERSION -nt stamp ]`; bash 3.2 (macOS /bin/bash)
+  # compares whole seconds, so a VERSION written in the same second as the watcher's start stamp
+  # is not newer and the update is never seen. Cross the second boundary first (fork-local; same
+  # shape as the sleeps in the other tests of this file).
+  sleep 1.1
   printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
 
   _wait_for "! kill -0 $pid 2>/dev/null" || true
