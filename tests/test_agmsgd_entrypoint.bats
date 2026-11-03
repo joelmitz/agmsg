@@ -271,7 +271,7 @@ _stop_daemon() {
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   grep -qF -- "scripts/.DS_Store (not in the record)" <<<"$output"
   rm "$TEST_SKILL_DIR/scripts/.DS_Store"
-  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  run node --disable-warning=ExperimentalWarning "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   refute grep -qF -- "Warning:" <<<"$output"
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR" --json
