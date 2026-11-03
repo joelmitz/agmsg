@@ -1,0 +1,103 @@
+name: Alert on main CI failure
+
+# joelmitz/agmsg（fork）専用。fork の main の tests が赤で終わったら Issue を立てる。
+#
+# 経緯（2026-11-02〜03）: 日次の sync-upstream.yml（merge-upstream API）は、衝突がなければ
+# テストを通さずに main へ入れる。取り込みでテストが壊れても（実例: 上流 #1853 の boot_id
+# 変更で、fork 固有の delivery_switch テストの fixture が落ちた）、tests の失敗を知らせる
+# 経路が無く、main は丸 1 日赤いまま気づかれなかった。sync の失敗 Issue は sync 自体が
+# 失敗したときしか立たない。
+#
+# 設計: tests（約 30 分かかる）は sync の完了（約 10 秒）より後に終わるので、sync の末尾では
+# 結果が見えない。tests の完了を受ける workflow_run で、結果が出た時点で判定する。
+#
+# ★runner を確保できずに cancelled になっただけの run（macOS の混雑で実際に起きた:
+# "The job was not acquired by Runner of type hosted even after multiple attempts"）は、
+# テストの失敗ではないので Issue にしない（集約 job の `bats` は、それで失敗扱いになる）。
+# 実際に failure で終わった job が 1 つでもあれば Issue にする。
+
+on:
+  workflow_run:
+    workflows: [tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Check this tests run instead (default: the latest completed tests run on main)'
+        required: false
+      dry_run:
+        description: 'true: only print what would be done'
+        required: false
+        default: 'false'
+
+# checkout もコードの実行もしない（workflow_run は書き込み権限で動くため）ので contents は不要。
+permissions:
+  actions: read
+  issues: write
+
+# 同時に完了した 2 つの run が、Issue の検索と作成のあいだで競合して二重に立てないよう直列化する。
+concurrency:
+  group: main-ci-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open an issue when main's tests really failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          run_id="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$run_id" ]; then
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow tests --branch main \
+              --status completed --limit 1 --json databaseId --jq '.[0].databaseId')"
+          fi
+          # 手動入力の run_id も含め、「このリポジトリの main の tests の、完了した push/schedule/手動実行の run」
+          # だけを対象にする（feature branch・PR・別 workflow の失敗で main の Issue を立てない）。
+          # --repo で引くので、別リポジトリの run_id は解決されずに失敗する。
+          run="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --json conclusion,headSha,headBranch,workflowName,event,status,url,jobs)"
+          check="$(jq -r '[.workflowName, .headBranch, .status, .event] | @tsv' <<<"$run")"
+          echo "run=$run_id workflow/branch/status/event: $check"
+          if ! jq -e '.workflowName == "tests" and .headBranch == "main" and .status == "completed"
+                      and (.event == "push" or .event == "schedule" or .event == "workflow_dispatch")' <<<"$run" >/dev/null; then
+            echo "::notice::run $run_id is not a completed tests run of main (push/schedule/dispatch); nothing to report."
+            exit 0
+          fi
+          conclusion="$(jq -r '.conclusion' <<<"$run")"
+          sha="$(jq -r '.headSha[:8]' <<<"$run")"
+          url="$(jq -r '.url' <<<"$run")"
+          # 集約 job（名前が bats だけ）は、shard の失敗を映すだけなので数えない。
+          failed="$(jq -r '[.jobs[] | select(.conclusion == "failure" and .name != "bats") | .name] | join(", ")' <<<"$run")"
+          cancelled="$(jq -r '[.jobs[] | select(.conclusion == "cancelled") | .name] | join(", ")' <<<"$run")"
+          echo "sha=$sha conclusion=$conclusion failed=[$failed] cancelled=[$cancelled]"
+          if [ "$conclusion" != "failure" ]; then
+            echo "tests run $run_id ended with '$conclusion'; nothing to report."
+            exit 0
+          fi
+          if [ -z "$failed" ]; then
+            echo "::notice::tests run $run_id failed only through cancelled job(s) [$cancelled] (runner not acquired?); not opening an issue. Re-run the failed jobs: $url"
+            exit 0
+          fi
+          title="Fork main CI failed"
+          body="main (${sha}) tests ended with failure. Failed job(s): ${failed}. Run: ${url}"
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "DRY RUN: would open or update the issue '${title}': ${body}"
+            exit 0
+          fi
+          # 検索の失敗は失敗として扱う（|| true で「対象なし」と取り違えて二重に作らない）。
+          # 候補は状態 open の全件（上限 1000）から、題が完全一致するものだけを選ぶ。
+          issues="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title)"
+          existing="$(jq -r --arg t "$title" '[.[] | select(.title == $t)] | sort_by(.number) | .[0].number // empty' <<<"$issues")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
