@@ -31,10 +31,15 @@ on:
         required: false
         default: 'false'
 
+# checkout もコードの実行もしない（workflow_run は書き込み権限で動くため）ので contents は不要。
 permissions:
-  contents: read
   actions: read
   issues: write
+
+# 同時に完了した 2 つの run が、Issue の検索と作成のあいだで競合して二重に立てないよう直列化する。
+concurrency:
+  group: main-ci-alert
+  cancel-in-progress: false
 
 jobs:
   alert:
@@ -54,14 +59,25 @@ jobs:
             run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow tests --branch main \
               --status completed --limit 1 --json databaseId --jq '.[0].databaseId')"
           fi
-          run="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json conclusion,headSha,url,jobs)"
+          # 手動入力の run_id も含め、「このリポジトリの main の tests の、完了した push/schedule/手動実行の run」
+          # だけを対象にする（feature branch・PR・別 workflow の失敗で main の Issue を立てない）。
+          # --repo で引くので、別リポジトリの run_id は解決されずに失敗する。
+          run="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --json conclusion,headSha,headBranch,workflowName,event,status,url,jobs)"
+          check="$(jq -r '[.workflowName, .headBranch, .status, .event] | @tsv' <<<"$run")"
+          echo "run=$run_id workflow/branch/status/event: $check"
+          if ! jq -e '.workflowName == "tests" and .headBranch == "main" and .status == "completed"
+                      and (.event == "push" or .event == "schedule" or .event == "workflow_dispatch")' <<<"$run" >/dev/null; then
+            echo "::notice::run $run_id is not a completed tests run of main (push/schedule/dispatch); nothing to report."
+            exit 0
+          fi
           conclusion="$(jq -r '.conclusion' <<<"$run")"
           sha="$(jq -r '.headSha[:8]' <<<"$run")"
           url="$(jq -r '.url' <<<"$run")"
           # 集約 job（名前が bats だけ）は、shard の失敗を映すだけなので数えない。
           failed="$(jq -r '[.jobs[] | select(.conclusion == "failure" and .name != "bats") | .name] | join(", ")' <<<"$run")"
           cancelled="$(jq -r '[.jobs[] | select(.conclusion == "cancelled") | .name] | join(", ")' <<<"$run")"
-          echo "run=$run_id sha=$sha conclusion=$conclusion failed=[$failed] cancelled=[$cancelled]"
+          echo "sha=$sha conclusion=$conclusion failed=[$failed] cancelled=[$cancelled]"
           if [ "$conclusion" != "failure" ]; then
             echo "tests run $run_id ended with '$conclusion'; nothing to report."
             exit 0
@@ -76,8 +92,10 @@ jobs:
             echo "DRY RUN: would open or update the issue '${title}': ${body}"
             exit 0
           fi
-          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --search "in:title ${title}" --json number --jq '.[0].number // empty' || true)"
+          # 検索の失敗は失敗として扱う（|| true で「対象なし」と取り違えて二重に作らない）。
+          # 候補は状態 open の全件（上限 1000）から、題が完全一致するものだけを選ぶ。
+          issues="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title)"
+          existing="$(jq -r --arg t "$title" '[.[] | select(.title == $t)] | sort_by(.number) | .[0].number // empty' <<<"$issues")"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
