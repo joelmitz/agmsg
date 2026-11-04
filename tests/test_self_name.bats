@@ -620,7 +620,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   _join_unnamed team alice
   : > "$ARGV_LOG"
-  agmsg_inbox team alice >/dev/null 2>&1 || true
+  bash "$SCRIPTS/inbox.sh" team alice >/dev/null 2>&1 || true
   [ "$(_name_calls)" -eq 1 ]
   grep -q '\[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
@@ -638,7 +638,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   _join_unnamed team alice
   _join_unnamed team bob
-  agmsg_inbox team alice >/dev/null 2>&1 || true
+  bash "$SCRIPTS/inbox.sh" team alice >/dev/null 2>&1 || true
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
   before_mark="$(_mark team alice)"
   [ -n "$before_mark" ]

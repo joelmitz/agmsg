@@ -90,7 +90,6 @@ test_helper_host_isolation.bats	1
 test_herdr_cli_routing.bats	3
 test_identity_path_forms.bats	9
 test_inbox.bats	112
-test_inbox_type_guard.bats	75
 test_install.bats	426
 test_install_op_lock.bats	4
 test_instance_id.bats	51

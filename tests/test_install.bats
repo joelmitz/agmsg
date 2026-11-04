@@ -179,7 +179,7 @@ _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --
   bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-projB
   run bash "$SK/scripts/send.sh" demo alice bob "hello from install"
   [ "$status" -eq 0 ]
-  run env CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash "$SK/scripts/inbox.sh" demo bob
+  run bash "$SK/scripts/inbox.sh" demo bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello from install" ]]
 }
@@ -956,7 +956,7 @@ _agy_failing_mv_fixture() {
   local store="$FAKE_HOME/override-store"
   AGMSG_STORAGE_PATH="$store" bash "$SK/scripts/send.sh" demo alice bob "via override"
   [ -f "$store/messages.db" ]
-  run bash -c "AGMSG_STORAGE_PATH='$store' CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash '$SK/scripts/inbox.sh' demo bob"
+  run bash -c "AGMSG_STORAGE_PATH='$store' bash '$SK/scripts/inbox.sh' demo bob"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "via override" ]]
 }
@@ -3155,8 +3155,7 @@ CYG
   grep -Fq "$SK/SKILL.md" <<< "$output"
   grep -Fq "read the $version section of \"$SK/CHANGELOG.md\"" <<< "$output"
   cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
-  # fork: inbox.sh requires the caller's strong detect= marker (type guard).
-  HOME="$FAKE_HOME" CODEX_HOME="$profile" CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox run bash "$SK/scripts/inbox.sh" update-team alice
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$SK/scripts/inbox.sh" update-team alice
   [ "$status" -eq 0 ]
   grep -Fq 'message survives update' <<< "$output"
 

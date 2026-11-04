@@ -11,24 +11,6 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[3]
 TRANSPORT=str(HERE/'inbox-transport.sh')
-STRONG_DETECT_HELPER=str(ROOT/'scripts'/'lib'/'print-strong-detect-env-keys.sh')
-_ENV_NAME=re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-
-def strong_detect_env_keys():
-    """Registry-derived strong detect= keys. Helper failure is launch refusal."""
-    try:
-        p=subprocess.run([STRONG_DETECT_HELPER],capture_output=True,text=True)
-    except OSError as e:
-        raise RuntimeError(f'agy launch refused: cannot run the strong detect helper ({e})') from e
-    if p.returncode:
-        raise RuntimeError(f'agy launch refused: strong detect helper exited nonzero ({p.returncode})')
-    keys=[]
-    for line in p.stdout.splitlines():
-        if line=='': continue
-        if not _ENV_NAME.fullmatch(line):
-            raise RuntimeError('agy launch refused: strong detect helper returned an invalid environment variable name')
-        keys.append(line)
-    return keys
 
 def encode_component(value):
     return ''.join(chr(byte) if chr(byte).isalnum() and byte < 128 or chr(byte) in '._-' else f'%{byte:02X}' for byte in str(value).encode())
@@ -623,11 +605,9 @@ class Supervisor:
         finally:
             self.call('release')
     def launch(self):
-        keys=strong_detect_env_keys()
         winsize=self.read_winsize(sys.stdin.fileno())
         pid, master=pty.fork()
         if pid==0:
-            for k in keys: os.environ.pop(k, None)
             fcntl.ioctl(0,termios.TIOCSWINSZ,winsize)
             attrs=termios.tcgetattr(0); attrs[3]&=~(termios.ECHO|termios.ECHONL); termios.tcsetattr(0,termios.TCSANOW,attrs)
             os.chdir(self.project); os.execvp(self.a.agy,[self.a.agy]+self.a.agy_args)

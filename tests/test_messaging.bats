@@ -70,7 +70,7 @@ teardown() {
   printf -- '--body-file is the literal message here' > "$TEST_SKILL_DIR/body.txt"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$TEST_SKILL_DIR/body.txt"
   [ "$status" -eq 0 ]
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   [[ "$output" == *"--body-file is the literal message here"* ]]
 }
@@ -80,7 +80,7 @@ teardown() {
   [ "$status" -ne 0 ]
   grep -qF -- "takes exactly one path" <<<"$output"
   # Nothing was delivered: the refusal happens at parse, before any write.
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" == *"No new messages"* ]]
 }
 
@@ -91,7 +91,7 @@ teardown() {
   run bash "$SCRIPTS/send.sh" testteam alice bob --nope
   [ "$status" -ne 0 ]
   grep -qF -- "unrecognized option" <<<"$output"
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" == *"No new messages"* ]]
 }
 
@@ -105,7 +105,7 @@ teardown() {
 @test "send: --body - reads the message from stdin (#1101)" {
   run bash -c "printf 'from stdin, intact' | bash '$SCRIPTS/send.sh' testteam alice bob --body -"
   [ "$status" -eq 0 ]
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" == *"from stdin, intact"* ]]
 }
 
@@ -159,14 +159,14 @@ teardown() {
 # --- inbox.sh ---
 
 @test "inbox: shows no messages when empty" {
-  run agmsg_inbox testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: shows received message" {
   bash "$SCRIPTS/send.sh" testteam alice bob "hello bob"
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello bob" ]]
   [[ "$output" =~ "alice" ]]
@@ -174,21 +174,21 @@ teardown() {
 
 @test "inbox: marks messages as read" {
   bash "$SCRIPTS/send.sh" testteam alice bob "read me"
-  agmsg_inbox testteam bob >/dev/null
-  run agmsg_inbox testteam bob
+  bash "$SCRIPTS/inbox.sh" testteam bob >/dev/null
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: --quiet suppresses output when no messages" {
-  run agmsg_inbox testteam alice --quiet
+  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
 @test "inbox: --quiet shows output when messages exist" {
   bash "$SCRIPTS/send.sh" testteam bob alice "ping"
-  run agmsg_inbox testteam alice --quiet
+  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
   [ "$status" -eq 0 ]
   [[ "$output" =~ "ping" ]]
 }
@@ -197,7 +197,7 @@ teardown() {
   bash "$SCRIPTS/send.sh" testteam alice bob "line1
 line2
 line3"
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   grep -qF "1 new message" <<<"$output"
   grep -qF "alice" <<<"$output"
@@ -207,15 +207,15 @@ line3"
   grep -qx "      line3" <<<"$output"
   refute grep -qF 'line1\nline2' <<<"$output"
   # Still one message, marked read as one.
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: a crafted agent arg cannot inject SQL to delete other messages (#87)" {
   bash "$SCRIPTS/send.sh" testteam alice bob "keepme"
-  run agmsg_inbox testteam "bob' AND read_at IS NULL; DELETE FROM messages; --"
+  run bash "$SCRIPTS/inbox.sh" testteam "bob' AND read_at IS NULL; DELETE FROM messages; --"
   [ "$status" -ne 0 ]
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "keepme" ]]
 }
@@ -223,7 +223,7 @@ line3"
 @test "inbox: an agent name containing a quote still receives its own messages (#87)" {
   bash "$SCRIPTS/join.sh" testteam "o'brien" claude-code /tmp/project-c
   bash "$SCRIPTS/send.sh" testteam alice "o'brien" "for quote"
-  run agmsg_inbox testteam "o'brien"
+  run bash "$SCRIPTS/inbox.sh" testteam "o'brien"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "for quote" ]]
 }

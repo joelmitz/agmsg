@@ -113,12 +113,10 @@ agmsg_test_hide_host_orca() {
 }
 agmsg_test_hide_host_orca || return 1
 
-# Strip host CLI session-identity env. inbox.sh infers caller type from
-# per-type detect= vars; a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID
-# would fail-closed (or falsely pass) against a fixture dest. Called at load
+# Strip host CLI session-identity env. Type detection reads the per-type
+# detect= vars, so a leaked GROK_SESSION_ID / CLAUDE_CODE_SESSION_ID from the
+# developer's own session would change what the fixture detects. Called at load
 # so suites that skip setup_test_env (test_install.bats) are still covered.
-# Do not globally export a replacement marker — Claude dest inbox callers
-# use agmsg_inbox, and type-guard tests set env per case.
 agmsg_clear_session_detect_env() {
   unset CLAUDE_CODE_SESSION_ID GROK_SESSION_ID
   unset CODEX_THREAD_ID CODEX_SANDBOX
@@ -170,7 +168,6 @@ setup_test_env() {
   cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
   chmod +x "$TEST_SKILL_DIR/scripts/"*.js 2>/dev/null || true
-  chmod +x "$TEST_SKILL_DIR/scripts/lib/print-strong-detect-env-keys.sh" 2>/dev/null || true
 
   # Agent-type manifests + per-type runtimes now live under scripts/drivers/types/
   # (the type registry reads <skill-root>/scripts/drivers/types/<name>/type.conf),
@@ -214,67 +211,6 @@ setup_test_env() {
   # caught; there may be others the same way, hence the sibling instead.
   export AGMSG_TEST_TMPDIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
   export TMPDIR="$AGMSG_TEST_TMPDIR"
-}
-
-# Dest type from the fixture team config (registrations[].type, else legacy .type).
-agmsg_test_dest_type() {
-  local team="$1" agent="$2"
-  local cfg="${TEST_SKILL_DIR:-}/teams/$team/config.json"
-  [ -f "$cfg" ] || return 0
-  local cfg_sql agent_sql
-  cfg_sql=$(printf '%s' "$cfg" | sed "s/'/''/g")
-  agent_sql=$(printf '%s' "$agent" | sed "s/'/''/g")
-  sqlite3 :memory: "
-    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
-    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
-    agents AS (
-      SELECT
-        CASE
-          WHEN json_type(json_extract(value, '\$.registrations')) = 'array'
-            THEN json_extract(value, '\$.registrations')
-          ELSE json_array(json_object('type', json_extract(value, '\$.type')))
-        END AS registrations
-      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
-      WHERE key = '$agent_sql'
-    )
-    SELECT COALESCE(json_extract(r.value, '\$.type'), '')
-    FROM agents, json_each(agents.registrations) AS r
-    WHERE json_extract(r.value, '\$.type') IS NOT NULL
-      AND CAST(json_extract(r.value, '\$.type') AS TEXT) != ''
-    LIMIT 1;
-  " 2>/dev/null
-}
-
-# Run inbox.sh with the dest type's strong detect= marker for this call only.
-# Does not export the marker into the calling test. Type-guard tests must call
-# inbox.sh with explicit env instead.
-agmsg_inbox() {
-  local team="$1" agent="$2"
-  shift 2
-  local dest_type inbox
-  dest_type="$(agmsg_test_dest_type "$team" "$agent")"
-  inbox="${SCRIPTS:-${TEST_SKILL_DIR:-}/scripts}/inbox.sh"
-  case "$dest_type" in
-    claude-code)
-      env CLAUDE_CODE_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-agmsg-test-claude-inbox}" \
-        bash "$inbox" "$team" "$agent" "$@"
-      ;;
-    codex)
-      env CODEX_THREAD_ID="${CODEX_THREAD_ID:-agmsg-test-codex-thread}" \
-        bash "$inbox" "$team" "$agent" "$@"
-      ;;
-    grok-build)
-      env GROK_SESSION_ID="${GROK_SESSION_ID:-agmsg-test-grok-session}" \
-        bash "$inbox" "$team" "$agent" "$@"
-      ;;
-    gemini)
-      env GEMINI_CLI="${GEMINI_CLI:-1}" \
-        bash "$inbox" "$team" "$agent" "$@"
-      ;;
-    *)
-      bash "$inbox" "$team" "$agent" "$@"
-      ;;
-  esac
 }
 
 # PIDs (one per line, this shell excluded) whose command line OR environment

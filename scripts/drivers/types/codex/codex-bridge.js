@@ -1862,7 +1862,6 @@ class CodexBridge {
       const result = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "peek", pair.team, pair.name], {
         cwd: this.opts.project,
         encoding: "utf8",
-        env: { ...process.env, CODEX_THREAD_ID: this.threadId },
       });
       if (result.error || result.status !== 0) {
         // A team can disappear after eligibility was resolved (upstream #1739).

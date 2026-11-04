@@ -97,7 +97,7 @@ EOF
   done
 
   PATH="$stub:$PATH"
-  run env CLAUDE_CODE_SESSION_ID=agmsg-test-claude-inbox bash "$SCRIPTS/inbox.sh" crlfteam alice
+  run bash "$SCRIPTS/inbox.sh" crlfteam alice
   [ "$status" -eq 0 ]
   grep -qF -- "20 new message(s):" <<< "$output"
   for n in $(seq 1 20); do

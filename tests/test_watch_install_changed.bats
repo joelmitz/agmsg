@@ -258,7 +258,7 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
 @test "watch test diagnostic: lists what the watcher saw without reading the unread message, and survives a missing file" {
   bash "$SCRIPTS/send.sh" team bob alice "still-unread" >/dev/null
   _explain_if_missing "$BATS_TEST_TMPDIR/does-not-exist.txt" 999999 'never-there'
-  run agmsg_inbox team alice
+  run bash "$SCRIPTS/inbox.sh" team alice
   [ "$status" -eq 0 ]
   case "$output" in *still-unread*) ;; *) false ;; esac
 }

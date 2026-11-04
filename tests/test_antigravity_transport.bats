@@ -302,15 +302,12 @@ PY
 @test "a plain inbox read cannot consume messages while a reservation exists" {
   # Upstream asserts the SOFT outcome: its guard rides on the storage reader,
   # so inbox.sh displays, fails to record read state, exits 0, and the message
-  # is shown again on the next plain read. This fork refuses HARDER and in two
-  # independent places, so that last step cannot be expressed here:
-  #   1. inbox.sh calls agmsg_bridge_guard_check before displaying anything.
-  #   2. the fork-local caller-type guard refuses any plain read of a dest whose
-  #      type is detect=explicit (antigravity is one), with or without a
-  #      reservation -- see tests/test_inbox_type_guard.bats.
-  # The property both designs exist to protect is the same and is what this
-  # test pins: a blocked read must not display OR consume the message. Non-
-  # consumption is therefore checked against storage, not by reading it back.
+  # is shown again on the next plain read. This fork refuses HARDER:
+  # inbox.sh calls agmsg_bridge_guard_check before displaying anything, so the
+  # last step cannot be expressed here. The property both designs exist to
+  # protect is the same and is what this test pins: a blocked read must not
+  # display OR consume the message. Non-consumption is therefore checked
+  # against storage, not by reading it back.
   bash "$SCRIPTS/join.sh" fixture sender antigravity "$PROJ" >/dev/null
   bash "$SCRIPTS/send.sh" fixture sender worker 'held message' >/dev/null
   local before

@@ -4350,7 +4350,7 @@ JSON
   printf '%s' "$output" | grep -Fq "written and consumed"
 
   # Consumed: a second look offers nothing.
-  run agmsg_inbox testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice
   printf '%s' "$output" | grep -Fq "No new messages"
 }
 
@@ -4405,7 +4405,7 @@ JSON
   printf '%s' "$output" | grep -Fq "must survive an unwritable stdout"
 
   # ...and now it is consumed, by the run that could write it.
-  run agmsg_inbox testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice
   printf '%s' "$output" | grep -Fq "No new messages"
 }
 
@@ -4428,7 +4428,7 @@ JSON
   printf '%s' "$output" | grep -Fq "hookSpecificOutput"
 
   # ...and the row is still there for Stop to deliver and consume.
-  run agmsg_inbox testteam alice
+  run bash "$SCRIPTS/inbox.sh" testteam alice
   printf '%s' "$output" | grep -Fq "mid-turn, still unread"
 }
 
