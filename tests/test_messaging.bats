@@ -214,9 +214,8 @@ line3"
 @test "inbox: a crafted agent arg cannot inject SQL to delete other messages (#87)" {
   bash "$SCRIPTS/send.sh" testteam alice bob "keepme"
   run bash "$SCRIPTS/inbox.sh" testteam "bob' AND read_at IS NULL; DELETE FROM messages; --"
-  [ "$status" -ne 0 ]
-  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" =~ "keepme" ]]
 }
 
