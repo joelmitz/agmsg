@@ -1194,7 +1194,6 @@ $_agmsg_running_team"
   # Extensionless entry points the *.sh glob does not reach.
   chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
   agmsg_install_optional_codex_chmod
-  chmod +x "$SKILL_DIR/scripts/lib/print-strong-detect-env-keys.sh" 2>/dev/null || true
   install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
@@ -1367,7 +1366,6 @@ chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
 # Extensionless entry points the *.sh glob does not reach.
 chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
 agmsg_install_optional_codex_chmod
-chmod +x "$SKILL_DIR/scripts/lib/print-strong-detect-env-keys.sh" 2>/dev/null || true
 install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
 # older layout (no-op when no agmsg shim is present). See the --update block

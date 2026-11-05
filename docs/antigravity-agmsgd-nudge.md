@@ -74,9 +74,9 @@ not general statements about the products. Anything not observed is marked as a 
   is 25 s there and 10 s elsewhere. Through `herdr --machine`, one call took 13 to 22 s; remote panes are unsupported.
 - Fact (this setup): the agent ran commands through PowerShell, so in some runs it first tried a bare `bash`, failed, and
   retried with the full path; each attempt asked for permission separately.
-- Fact (this setup): inside agy, `inbox.sh` could not detect the caller type automatically (it failed with "caller type not
-  detected from session env"); `check-inbox.sh antigravity <project>` passes the type explicitly and worked. Whether a
-  manually exported variable would also work was not tried.
+- Fact (this setup, historical): inside agy, `inbox.sh` once refused with "caller type not detected from session env"
+  (a fork-local caller-type guard, since removed; `inbox.sh` no longer checks the caller type). `check-inbox.sh antigravity <project>`
+  passes the type explicitly and worked.
 - Fact (this setup): the notice says "Check your agmsg inbox", and the agent ran an `agmsg` command found on its shell's
   PATH, which on the test machine was an installed shim outside the throwaway setup. Pointing the agent's `HOME` at a throwaway directory
   that holds its own `bin/agmsg` isolated this (done in the test shell only).

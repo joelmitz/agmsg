@@ -76,7 +76,7 @@ SH
   bash "$SCRIPTS/send.sh" testteam alice bob "hi via override"
   [ -f "$AGMSG_STORAGE_PATH/messages.db" ]
 
-  run agmsg_inbox testteam bob
+  run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hi via override" ]]
 }
