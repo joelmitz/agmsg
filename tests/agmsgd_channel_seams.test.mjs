@@ -3,7 +3,7 @@
 // inventory `status` prints). They describe what Claude Code and Codex
 // already get, so adding another channel can be shown not to change it.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 import { createDefaultChannels } from '../scripts/daemon/main.mjs';
 import { createSeatPoller } from '../scripts/daemon/seat-poll.mjs';
+import { createSeatBook } from '../scripts/daemon/seat-book.mjs';
+import { bootId } from '../scripts/daemon/executor.mjs';
 import { ensureCodexChannelSchema } from '../scripts/daemon/channels/codex-queue-store.mjs';
 import { ensureClaudeCodeChannelSchema } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
 
@@ -38,15 +40,13 @@ test('the default channels start with Codex then Claude Code', async (t) => {
   }
 });
 
-test('the seat poller reads the seat table of its own channel', (t) => {
+test('the seat poller reads the seat book of its own channel', (t) => {
   const { db } = fixture(t);
-  const at = new Date().toISOString();
   const events = [];
-  for (const [channel, table] of [['codex', 'beta_codex_seat'], ['claude-code', 'beta_claude_seat']]) {
-    const poller = createSeatPoller({ db, installRoot: '/unused', channel, saveTimeout() {}, log: line => events.push(JSON.parse(line)) });
-    poller.changeState('["t","a"]', () => {
-      db.prepare(`INSERT INTO ${table} (seat, state, reason, checked_at) VALUES (?, 'blocked', 'why', ?)`).run('["t","a"]', at);
-    });
+  for (const channel of ['codex', 'claude-code']) {
+    const book = createSeatBook();
+    const poller = createSeatPoller({ db, book, installRoot: '/unused', channel, saveTimeout() {}, log: line => events.push(JSON.parse(line)) });
+    poller.changeState('["t","a"]', () => book.set('["t","a"]', { state: 'blocked', reason: 'why' }));
   }
   assert.deepEqual(events.map(({ event, channel, state, reason }) => ({ event, channel, state, reason })), [
     { event: 'seat_state', channel: 'codex', state: 'blocked', reason: 'why' },
@@ -54,20 +54,47 @@ test('the seat poller reads the seat table of its own channel', (t) => {
   ]);
 });
 
-test('status prints the Claude Code and Codex seat inventory as before', (t) => {
+test('status prints the Claude Code and Codex seat inventory as before', async (t) => {
   const { root, db } = fixture(t);
   const at = new Date().toISOString();
-  db.prepare("INSERT INTO beta_claude_seat (seat, messaging_socket, state, reason, checked_at) VALUES ('[\"t\",\"a\"]', '/s.sock', 'addressable', '', ?)").run(at);
-  db.prepare("INSERT INTO beta_claude_seat (seat, messaging_socket, state, reason, checked_at) VALUES ('[\"t\",\"b\"]', NULL, 'unaddressable', 'role_session_missing', ?)").run(at);
-  db.prepare("INSERT INTO beta_codex_seat (seat, thread, codex_home, state, reason, checked_at) VALUES ('[\"t\",\"c\"]', NULL, NULL, 'blocked', 'x', ?)").run(at);
+  const claude = [
+    { seat: '["t","a"]', messaging_socket: '/s.sock', state: 'addressable', reason: '', since: at },
+    { seat: '["t","b"]', messaging_socket: null, state: 'unaddressable', reason: 'role_session_missing', since: at },
+  ];
+  const codex = [{ seat: '["t","c"]', thread: null, codex_home: null, state: 'blocked', reason: 'x', since: at }];
+  // Seat state lives only in the running agmsgd's memory, so a stand-in daemon
+  // (own process: the status command blocks this one) answers `seats`.
+  const socket = path.join(root, 'run/d.sock');
+  const child = spawn(process.execPath, ['-e', `
+    const net = require('node:net');
+    const [socket, payload] = process.argv.slice(1);
+    const { claude_code, codex } = JSON.parse(payload);
+    net.createServer((c) => { let b = '';
+      c.on('data', (d) => { b += d; let i;
+        while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1);
+          if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
+          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
+          else if (msg.type === 'seats') { c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: codex }, claude_code: { polled: true, seats: claude_code } }) + '\\n'); c.end(); } } });
+    }).listen(socket, () => console.log('up'));
+  `, socket, JSON.stringify({ claude_code: claude, codex })], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => child.kill());
+  await new Promise(resolve => child.stdout.once('data', resolve));
+  db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
+  db.prepare("UPDATE daemon_intent SET desired='on'").run();
   db.close();
-  const run = (...flags) => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', statusScript, root, ...flags], { encoding: 'utf8' });
-  const text = run();
+  const run = (...flags) => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', statusScript, root, ...flags]);
+    let out = '';
+    p.stdout.on('data', d => { out += d; });
+    p.on('error', reject);
+    p.on('close', () => resolve(out));
+  });
+  const text = await run();
   assert.match(text, /^Claude Code t\/a: last daemon observation: addressable$/m);
   assert.match(text, /Claude Code seats: 1 unavailable destination records hidden/);
   assert.doesNotMatch(text, /t\/b/);
-  assert.match(run('--all'), /^Claude Code t\/b: last daemon observation: unaddressable \(role_session_missing\)$/m);
-  const json = JSON.parse(run('--json'));
+  assert.match(await run('--all'), /^Claude Code t\/b: last daemon observation: unaddressable \(role_session_missing\)$/m);
+  const json = JSON.parse(await run('--json'));
   assert.equal(json.claude_code_seats.state, 'ok');
   assert.equal(json.claude_code_seats.seats.length, 2);
   assert.deepEqual(json.codex_seats.seats.map(seat => [seat.seat, seat.state, seat.reason]), [['["t","c"]', 'blocked', 'x']]);
