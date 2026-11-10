@@ -253,6 +253,20 @@ prepare_push() {
       and (.envelope.cipher=="none") and (.envelope.key_id==null)' >/dev/null
 }
 
+@test "sync contract: a body cut in the middle of a multibyte character still prepares and is offered for push" {
+  # In a UTF-8 locale the byte-stream tools on this path (the sed in
+  # agmsg_sqlite, the tr and paste around the row reads) rejected such a body
+  # ("illegal byte sequence"), prepare failed, and the sync engine stopped.
+  export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+  storage_send demo alice bob "first ok" >/dev/null
+  storage_send demo alice bob "result=$(printf '\xe3\x81')" >/dev/null
+  storage_send demo alice bob "result=$(printf '\x80\x82')" >/dev/null
+  storage_send demo alice bob "last ok" >/dev/null
+  run prepare_push
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | jq -s '[.[] | select(.type=="sync_push_candidate")] | length')" -eq 4 ]
+}
+
 @test "sync contract: a crash after sealing publishes neither wire nor envelope" {
   storage_send demo alice bob "seal once after recovery" >/dev/null
   export AGMSG_SYNC_TEST_WIRE_LOG="$BATS_TEST_TMPDIR/private-wires.log"
@@ -1890,4 +1904,240 @@ _968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact"
   run _968_prepare 4 '[""]'
   [ "$status" -eq 13 ]
   [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
+}
+
+# A message body is data: what machine A's store holds is what machine B's
+# store holds, byte for byte, including a body that is not valid UTF-8 (cut
+# mid-character, a stray 0xff). One such message in a batch used to fail the
+# whole push (a UTF-8 locale's sed) and, with the text tools made byte-wise,
+# still arrived changed (jq turned the bad bytes into U+FFFD).
+#
+# This drives the real pipeline end to end except the HTTP hop, which carries
+# the envelope untouched: A's store -> prepare (driver + seal helper) -> the
+# receiving helper opens each envelope -> B's store through apply.
+bodies_through_sync() {  # prints B's bodies, hex, in sequence order, one per line
+  local a_store="$BATS_TEST_TMPDIR/store" b_store="$BATS_TEST_TMPDIR/store-b"
+  local candidates records seq=0 line
+  candidates=$(prepare_push | grep '"type":"sync_push_candidate"')
+  [ "$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')" = "$1" ]
+  records=$(printf '%s\n' "$candidates" | node -e '
+    const { openEnvelope } = await import(process.argv[1]);
+    const lines = (await new Promise((resolve) => { let s = ""; process.stdin.on("data", (c) => s += c);
+      process.stdin.on("end", () => resolve(s.split("\n").filter(Boolean))); }));
+    let seq = 0;
+    for (const line of lines) {
+      const c = JSON.parse(line);
+      const projection = await openEnvelope({ envelope: c.envelope, max_blob_bytes: 1048576 });
+      seq += 1;
+      console.log(JSON.stringify({ type: "sync_pull_message", server_seq: String(seq), id: c.id,
+        server_received_at: "2026-07-20T13:00:01.000000Z", envelope: c.envelope,
+        status: "importable", policy_revision: "0", local_security_revision: "0", projection }));
+    }
+    console.log(JSON.stringify({ type: "sync_pull_cursor", next_after: String(seq) }));
+  ' --input-type=module "$SCRIPTS/internal/sync-cipher.mjs")
+  AGMSG_STORAGE_PATH="$b_store" storage_init demo >/dev/null
+  AGMSG_STORAGE_PATH="$b_store" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load
+    printf "%s\n" "$2" | storage_sync_apply_pull demo "$3" "$4" 1' _ "$SCRIPTS" "$records" "$SERVER_ID" "$TEAM_ID" >/dev/null
+  sqlite3 "$(AGMSG_STORAGE_PATH="$b_store" agmsg_db_path demo)" \
+    "SELECT lower(hex(CAST(body AS BLOB))) FROM events WHERE type='message_sent' ORDER BY seq"
+}
+
+@test "sync contract: a body that is not valid UTF-8 reaches the other machine as the same bytes" {
+  local db a_hex b_hex
+  storage_send demo alice bob "first, plain" >/dev/null
+  storage_send demo alice bob "placeholder-middle" >/dev/null
+  storage_send demo alice bob "third — ünïcode 日本語" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET body=CAST(x'61e381' AS TEXT) WHERE body='placeholder-middle'"
+  a_hex=$(sqlite3 "$db" "SELECT lower(hex(CAST(body AS BLOB))) FROM events ORDER BY seq")
+  [ "$(printf '%s\n' "$a_hex" | sed -n 2p)" = "61e381" ]
+
+  b_hex=$(bodies_through_sync 3)
+  [ "$b_hex" = "$a_hex" ]
+}
+
+@test "sync contract: every shape of broken or awkward UTF-8 survives, and a batch with one of them still sends the rest" {
+  local db a_hex b_hex i
+  # The last three are valid UTF-8 that a text pipeline still mishandles: a
+  # byte order mark (stripped by a default decoder), a mark alone, and a NUL
+  # (the apply frame's own separator).
+  local -a shapes=(ff 80 c080 eda080 f4908080 e38182e3 6162ff6364 efbbbf68656c6c6f efbbbf 610062)
+  for i in "${!shapes[@]}"; do storage_send demo alice bob "slot-$i" >/dev/null; done
+  storage_send demo alice bob "last, plain" >/dev/null
+  db="$(_sqlite_db demo)"
+  for i in "${!shapes[@]}"; do
+    sqlite3 "$db" "UPDATE events SET body=CAST(x'${shapes[$i]}' AS TEXT) WHERE body='slot-$i'"
+  done
+  a_hex=$(sqlite3 "$db" "SELECT lower(hex(CAST(body AS BLOB))) FROM events ORDER BY seq")
+
+  b_hex=$(bodies_through_sync $(( ${#shapes[@]} + 1 )))
+  [ "$b_hex" = "$a_hex" ]
+}
+
+@test "sync contract: a body that is valid UTF-8 is sealed exactly as before" {
+  # The golden: the bytes inside the envelope for text are the JSON the earlier
+  # releases wrote, with `body` a string and no `body_b64`/`body_hex` field.
+  local blob inner
+  storage_send demo alice bob 'plain "quoted" \ back — 日本語' >/dev/null
+  blob=$(prepare_push | grep '"type":"sync_push_candidate"' | jq -r '.envelope.blob')
+  inner=$(printf '%s' "$blob" | base64 -d)
+  [ "$(printf '%s' "$inner" | jq -r 'keys_unsorted | join(",")')" = "body,created_at,from_agent,to_agent" ]
+  [ "$(printf '%s' "$inner" | jq -r '.body')" = 'plain "quoted" \ back — 日本語' ]
+}
+
+# One local row the seal helper refuses (an agent name the wire cannot carry, a
+# timestamp it cannot read) must not stop the rest of the batch. It used to fail
+# the whole prepare (sealed != pending) every cycle, forever: the same row came
+# back first each time.
+@test "sync contract: a row the seal helper refuses is reported and skipped, the rest of the batch is prepared" {
+  local db out
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "middle" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='middle'"
+
+  run prepare_push
+  [ "$status" -eq 0 ]
+  out="$output"
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_push_candidate"')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 1 ]
+  printf '%s\n' "$out" | grep '"type":"sync_skipped"' | jq -e '.local_position == "2" and (.reason | length > 0) and (has("body") | not)' >/dev/null
+}
+
+# The point of "skip, do not drop": a row left out of a page is still owed. The
+# cursor may not pass it while rows behind it are acknowledged, so that once it
+# can be sealed the next prepare offers it again. The engine's own exclusion
+# list (skip_positions) only keeps it from taking a page slot meanwhile.
+@test "sync contract: a skipped row is still owed after the rows behind it are acknowledged" {
+  local db out acks result
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "middle" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='middle'"
+
+  out=$(prepare_push)
+  acks=$(printf '%s\n' "$out" | jq -c 'select(.type=="sync_push_candidate")
+    | {type:"sync_push_ack",local_position,id,server_seq:.local_position,disposition:"stored"}')
+  result=$(printf '%s\n' "$acks" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1)
+  # Rows 1 and 3 are acknowledged; the cursor stops at 1, under the skipped row.
+  [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = 1 ]
+
+  # Still broken: it comes back as skipped, nothing else is offered again.
+  out=$(prepare_push)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_push_candidate"')" = 0 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 1 ]
+
+  # Fixed: it is sent.
+  sqlite3 "$db" "UPDATE events SET from_agent='alice' WHERE body='middle'"
+  out=$(prepare_push)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = 2 ]
+}
+
+@test "sync contract: positions the engine asks to leave out do not take a page slot" {
+  local db out
+  storage_send demo alice bob "bad one" >/dev/null
+  storage_send demo alice bob "good" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='bad one'"
+  # A page of one: without the exclusion the bad row is all it would hold.
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"skip_positions":[1]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
+  # And a malformed list is refused, not interpolated into SQL.
+  prepare_with_bad_list() {
+    printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"skip_positions":["1) OR (1"]}' \
+      | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1
+  }
+  run prepare_with_bad_list
+  [ "$status" -ne 0 ]
+}
+
+@test "sync contract: an empty body is skipped with the rest of the batch, not fatal to it" {
+  local db out
+  storage_send demo alice bob "first" >/dev/null
+  storage_send demo alice bob "empty" >/dev/null
+  storage_send demo alice bob "third" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET body='' WHERE body='empty'"
+  run prepare_push
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_push_candidate"')" = 2 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 1 ]
+}
+
+@test "sync contract: a retry looks at every position it names, whatever the page limit" {
+  local db out
+  storage_send demo alice bob "bad one" >/dev/null
+  storage_send demo alice bob "bad two" >/dev/null
+  storage_send demo alice bob "good" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body IN ('bad one','bad two')"
+  # A page of one, but both remembered positions are named: both are examined.
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 1)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 2 ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a position that can be sent now is reported resolved, one that is still bad is not" {
+  local db out
+  storage_send demo alice bob "fixed" >/dev/null
+  storage_send demo alice bob "still bad" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "UPDATE events SET from_agent='bad/name' WHERE body='still bad'"
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":true,"recheck_positions":[1,2]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_resolved") | .local_position')" = 1 ]
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_skipped") | .local_position')" = 2 ]
+}
+
+@test "sync contract: with sends not allowed nothing is examined, so nothing is claimed resolved" {
+  local out
+  storage_send demo alice bob "anything" >/dev/null
+  out=$(printf '%s\n' '{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,"max_blob_bytes":1048576,"allow_new":false,"recheck_positions":[1]}' \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_resolved"')" = 0 ]
+}
+
+@test "sync contract: a failure that is true of every row fails the call, it is not skipped as one bad row" {
+  # age-v1 with no age binary: nothing about row 1 is wrong, and "skipped" would
+  # report a healthy message and let prepare succeed with nothing sealed.
+  local recipient out
+  recipient=$(jq -r '.recipient_sets.team_a.recipient' "$BATS_TEST_DIRNAME/../docs/spec/vectors/age-v1-vectors.json")
+  storage_send demo alice bob "a perfectly good message" >/dev/null
+  age_prepare() {
+    printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"age-v1\",\"key_id\":\"epoch-1\",\"recipients\":[\"$recipient\"],\"max_blob_bytes\":1048576,\"allow_new\":true}" \
+      | AGMSG_AGE_BIN=/nonexistent/agmsg-test-age storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100
+  }
+  run age_prepare
+  [ "$status" -ne 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"type":"sync_skipped"')" = 0 ]
+}
+
+@test "sync contract: more known bad rows than a page holds do not keep the good row behind them out" {
+  # 1100 rows the wire cannot carry, then one good row, a page of 100. Every known
+  # bad position is left out, however many there are, so the page reaches the
+  # good row; with a cap on the list the page fills with bad rows again.
+  local db out
+  storage_send demo alice bob "seed" >/dev/null
+  db="$(_sqlite_db demo)"
+  sqlite3 "$db" "
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<1100)
+    INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    SELECT 'message_sent','bulk-'||i,'demo','bad/name','bob','x','2026-11-08T00:00:00Z' FROM c;
+    UPDATE events SET from_agent='bad/name' WHERE id='bulk-1' OR body='seed';"
+  storage_send demo alice bob "the good one" >/dev/null
+  local good bad_list
+  good=$(sqlite3 "$db" "SELECT seq FROM events WHERE body='the good one'")
+  bad_list=$(sqlite3 "$db" "SELECT json_group_array(seq) FROM events WHERE from_agent='bad/name'")
+  [ "$(printf '%s' "$bad_list" | jq 'length')" -gt 1100 ]
+  out=$(printf '%s\n' "{\"type\":\"sync_prepare\",\"envelope_v\":1,\"cipher\":\"none\",\"key_id\":null,\"max_blob_bytes\":1048576,\"allow_new\":true,\"skip_positions\":$bad_list}" \
+    | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100)
+  [ "$(printf '%s\n' "$out" | jq -r 'select(.type=="sync_push_candidate") | .local_position')" = "$good" ]
+  [ "$(printf '%s\n' "$out" | grep -c '"type":"sync_skipped"')" = 0 ]
 }

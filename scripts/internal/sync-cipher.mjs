@@ -38,6 +38,16 @@ function malformed(message) {
   throw new CipherStateError("malformed", message);
 }
 
+// An error that is about THIS row's data or size (a name, a timestamp, a body, a
+// blob that does not fit), as opposed to the exchange: a missing age binary, a
+// cipher this build lacks, a recipient manifest shared by the whole page, a
+// worker that died. Only the first kind may be skipped by a caller; the second
+// is true of every row and has to fail the call. `row` is the marker.
+function rowLocal(error) {
+  if (error instanceof CipherStateError) error.row = true;
+  return error;
+}
+
 function authenticationFailed(message) {
   throw new CipherStateError("authentication_failed", message);
 }
@@ -83,31 +93,79 @@ function requireName(value, label) {
   return value;
 }
 
+// A message body is data: whatever bytes the sender's store holds, the receiver's
+// store must end up holding the same bytes. The envelope's inside is JSON, which
+// can only carry text, so a body that is valid UTF-8 travels as `body` (a string,
+// byte-identical to every release before this one) and a body that is not travels
+// as `body_b64`, its bytes in canonical base64. Exactly one of the two is ever
+// present on the wire, and a body that IS valid UTF-8 is refused as `body_b64`:
+// one body has one wire form, so the same message can never hash or compare two
+// ways.
+//
+// `body_hex` is not a wire form. It is how the storage driver hands the seal
+// helper the bytes it read out of SQLite (send input), and how this module hands
+// the driver a body it must not frame as text (receive output). On the wire it is
+// an unknown field like any other: ignored beside a valid body, and never
+// accepted in place of one.
+const UTF8_KEEPING_BOM = { fatal: true, ignoreBOM: true };
+
+function bodyBytes(projection, forms, decode) {
+  const given = forms.filter((key) => projection[key] !== undefined);
+  if (given.length !== 1) malformed("message projection is invalid");
+  const [key] = given;
+  const value = projection[key];
+  if (typeof value !== "string") malformed("message projection is invalid");
+  if (key === "body") {
+    // Checked on the string itself: encoding a lone surrogate would quietly
+    // turn it into U+FFFD and pass for valid text.
+    requireUnicodeScalars(value, "body");
+    return Buffer.from(value, "utf8");
+  }
+  if (key === "body_hex") {
+    if (value.length % 2 !== 0 || !/^[0-9a-f]*$/u.test(value)) malformed("body_hex is not hex");
+    return Buffer.from(value, "hex");
+  }
+  if (!BASE64.test(value)) malformed("body_b64 is not canonical base64");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) malformed("body_b64 is not canonical base64");
+  return bytes;
+}
+
 // Validates a message projection and returns only the fields the wire format
 // knows about. Used both to build the canonical send-side bytes (below) and,
 // on receive, to tolerate fields a newer sender added (see parseCanonicalProjection):
 // unknown fields are never read here, so they are dropped rather than rejected.
-function validateMessageFields(projection) {
-  if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
-      typeof projection.body !== "string" || Buffer.byteLength(projection.body) < 1 ||
-      Buffer.byteLength(projection.body) > 1_000_000 ||
-      typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
-      !validTimestamp(projection.created_at)) {
-    malformed("message projection is invalid");
+// `forms` names the body fields this caller may read: the wire's own two on
+// receive, and the sender's own input (`body`, `body_hex`) when sealing.
+function validateMessageFields(projection, forms = ["body", "body_b64"]) {
+  try {
+    if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
+        typeof projection.created_at !== "string" || !TIMESTAMP.test(projection.created_at) ||
+        !validTimestamp(projection.created_at)) {
+      malformed("message projection is invalid");
+    }
+    const bytes = bodyBytes(projection, forms);
+    if (bytes.length < 1 || bytes.length > 1_000_000) malformed("message projection is invalid");
+    // ignoreBOM: a leading U+FEFF is a character of the body, not a marker to strip.
+    let text = null;
+    try { text = new TextDecoder("utf-8", UTF8_KEEPING_BOM).decode(bytes); } catch { /* not text */ }
+    if (text !== null && projection.body_b64 !== undefined) malformed("body_b64 carries valid UTF-8");
+    requireName(projection.from_agent, "from_agent");
+    requireName(projection.to_agent, "to_agent");
+    return {
+      ...(text !== null ? { body: text } : { body_b64: bytes.toString("base64") }),
+      created_at: projection.created_at,
+      from_agent: projection.from_agent,
+      to_agent: projection.to_agent,
+    };
+  } catch (error) {
+    throw rowLocal(error);
   }
-  requireUnicodeScalars(projection.body, "body");
-  requireName(projection.from_agent, "from_agent");
-  requireName(projection.to_agent, "to_agent");
-  return {
-    body: projection.body,
-    created_at: projection.created_at,
-    from_agent: projection.from_agent,
-    to_agent: projection.to_agent,
-  };
 }
 
 function canonicalMessage(projection) {
-  return Buffer.from(JSON.stringify(validateMessageFields(projection)), "utf8");
+  return Buffer.from(JSON.stringify(
+    validateMessageFields(projection, ["body", "body_hex"])), "utf8");
 }
 
 function canonicalRosterMutation(projection) {
@@ -202,7 +260,17 @@ function parseCanonicalProjection(bytes) {
   } catch {
     malformed("message is not valid UTF-8 JSON");
   }
-  if (value?.kind === undefined) return validateMessageFields(value);
+  if (value?.kind === undefined) {
+    // The driver frames a page with NUL separators and stores bytes, so a body
+    // it must not read as text reaches it as `body_hex` (and an empty `body`):
+    // one that is not UTF-8, and one that is but holds a U+0000.
+    const { body_b64: wireBytes, ...fields } = validateMessageFields(value);
+    if (wireBytes !== undefined) {
+      return { ...fields, body: "", body_hex: Buffer.from(wireBytes, "base64").toString("hex") };
+    }
+    return fields.body.includes("\u0000") ?
+      { ...fields, body: "", body_hex: Buffer.from(fields.body, "utf8").toString("hex") } : fields;
+  }
   canonicalRosterMutation(value);
   assertKnownFields(value, ROSTER_MUTATION_FIELDS[value.kind], "roster mutation projection");
   return value;
@@ -513,7 +581,7 @@ export function ageExecutableVersion() {
 function sealNone(input, message) {
   if (input.key_id !== null) malformed("none requires null key_id");
   if (message.length > input.max_blob_bytes || message.length > MAX_BLOB_BYTES) {
-    malformed("plaintext exceeds max_blob_bytes");
+    throw rowLocal(new CipherStateError("malformed", "plaintext exceeds max_blob_bytes"));
   }
   return { v: 1, cipher: "none", key_id: null, blob: message.toString("base64") };
 }
@@ -536,7 +604,7 @@ function sealAge(input) {
   const result = runAge(args, frame);
   if (result.status !== 0) throw new Error(`age encryption failed: ${result.stderr.toString("utf8").trim()}`);
   if (result.stdout.length > input.max_blob_bytes || result.stdout.length > MAX_BLOB_BYTES) {
-    malformed("encrypted age file exceeds max_blob_bytes");
+    throw rowLocal(new CipherStateError("malformed", "encrypted age file exceeds max_blob_bytes"));
   }
   if (validateAgeHeader(result.stdout).x25519StanzaCount !== input.recipients.length) {
     malformed("age recipient stanza count differs from the manifest");
@@ -618,7 +686,7 @@ function sealOne(index, request) {
     return { index, worker: threadId, status: "ok", envelope: sealEnvelope(request) };
   } catch (error) {
     return { index, worker: threadId, status: "error", state: error?.state ?? null,
-      message: String(error?.message ?? error) };
+      row: error?.row === true, message: String(error?.message ?? error) };
   }
 }
 

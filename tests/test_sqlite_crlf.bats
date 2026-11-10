@@ -18,6 +18,10 @@ load test_helper
 
 setup() {
   setup_test_env
+  # These tests model Windows, the only platform whose sqlite3 ends rows with
+  # \r\n; the strip runs only there, so say so (the platform decision itself is
+  # tested at the end of this file).
+  export AGMSG_SQLITE_CRLF=1
 }
 
 teardown() {
@@ -255,4 +259,69 @@ EOF
   [ "$status" -eq 5 ]
   [ "$(cat "$outfile")" = busy ]
   [[ "$stderr" == *"Error: database is locked"* ]]
+}
+
+# --- the strip runs only where sqlite3 ends rows with \r\n --------------------
+
+# A sed that records each run, ahead of the real one on PATH.
+_logging_sed_path() {
+  local dir="$BATS_TEST_TMPDIR/sedbin" real
+  real="$(command -v sed)"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\necho run >> "%s/sed.log"\nexec "%s" "$@"\n' "$BATS_TEST_TMPDIR" "$real" > "$dir/sed"
+  chmod +x "$dir/sed"
+  printf '%s' "$dir"
+}
+
+@test "agmsg_sqlite: where sqlite3 ends rows with a plain newline, no sed process runs" {
+  unset AGMSG_SQLITE_CRLF
+  local stub
+  stub="$(_logging_sed_path)"
+  PATH="$stub:$PATH"
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite ':memory:' 'SELECT 1; SELECT 2;'; agmsg_sqlite ':memory:' 'SELECT 3;'"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'1\n2\n3' ]
+  [ ! -e "$BATS_TEST_TMPDIR/sed.log" ]
+}
+
+@test "agmsg_sqlite: under MSYS (OSTYPE=msys) the CR strip runs, once per call" {
+  unset AGMSG_SQLITE_CRLF
+  local stub
+  stub="$(_logging_sed_path)"
+  PATH="$stub:$PATH"
+  run bash -c "OSTYPE=msys; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite ':memory:' 'SELECT 1;'; agmsg_sqlite ':memory:' 'SELECT 2;'"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/sed.log" | tr -d ' ')" -eq 2 ]
+}
+
+@test "agmsg_sqlite_mem: a failing statement reads as nothing, and fails only for a caller with pipefail" {
+  unset AGMSG_SQLITE_CRLF
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite_mem 'not valid sql;' >/dev/null 2>&1; echo plain=\$?"
+  [ "$output" = "plain=0" ]
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; set -o pipefail; agmsg_sqlite_mem 'not valid sql;' >/dev/null 2>&1; echo piped=\$?"
+  [ "$output" != "piped=0" ]
+}
+
+@test "agmsg_sqlite_mem: takes -separator ahead of the database, as the roster readers use it" {
+  unset AGMSG_SQLITE_CRLF
+  run bash -c "OSTYPE=darwin24; source '$SCRIPTS/lib/storage.sh'; agmsg_sqlite_mem -separator '|' \"SELECT 'a','b';\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "a|b" ]
+}
+
+@test "send and inbox start no tr process to strip a CR on a platform without CRLF" {
+  unset AGMSG_SQLITE_CRLF
+  export AGMSG_AGENT_PID=""
+  bash "$SCRIPTS/join.sh" crteam alice claude-code /tmp/project-cr-a >/dev/null
+  bash "$SCRIPTS/join.sh" crteam bob claude-code /tmp/project-cr-b >/dev/null
+  local dir="$BATS_TEST_TMPDIR/trbin" real
+  real="$(command -v tr)"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\necho "$*" >> "%s/tr.log"\nexec "%s" "$@"\n' "$BATS_TEST_TMPDIR" "$real" > "$dir/tr"
+  chmod +x "$dir/tr"
+  PATH="$dir:$PATH"
+  bash "$SCRIPTS/send.sh" crteam alice bob "hello" >/dev/null
+  bash "$SCRIPTS/inbox.sh" crteam bob >/dev/null
+  # No tr of any kind strips a CR or whitespace from sqlite3 output any more.
+  ! LC_ALL=C grep -q -e '-d \\r' -e "-d \\[:space:\\]" "$BATS_TEST_TMPDIR/tr.log" 2>/dev/null
 }

@@ -5,7 +5,7 @@ import { EventEmitter, once } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,6 +24,10 @@ import {
   consistentReadStateContext,
   configure,
   cycle,
+  newSkipState,
+  noteSkips,
+  skipPlan,
+  recordSkips,
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
@@ -2519,6 +2523,41 @@ printf '{"lines":%d}\\n' "$lines"
   }
 });
 
+// The staged-input tests count `agmsg-driver-input-*` entries in the temp
+// directory. Counted in the shared one, a slow removal by something else (an
+// earlier test, antivirus or a file lock on Windows) shows up as a leak of
+// THIS call. So the test gets a temp directory of its own, and only what the
+// code under test creates can appear in it. os.tmpdir() reads these variables
+// on every call, so the engine picks the new one up.
+async function privateTmpdir(t) {
+  const names = ["TMPDIR", "TEMP", "TMP"];
+  const saved = names.map((name) => [name, process.env[name]]);
+  const shared = tmpdir();
+  const own = await mkdtemp(join(shared, "agmsg-own-tmp-"));
+  for (const name of names) process.env[name] = own;
+  t.after(async () => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    if (!own.startsWith(shared)) throw new Error("unsafe test root");
+    await rm(own, { recursive: true, force: true });
+  });
+  return { shared, own };
+}
+
+// Entries are removed shortly after settle on Windows, so a count is awaited
+// up to a bound instead of read once.
+async function stagedInputCount(dir, expected, { wait = true } = {}) {
+  let count = -1;
+  for (let attempt = 0; attempt < (wait ? 50 : 1); attempt += 1) {
+    count = (await readdir(dir)).filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
+    if (count === expected) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return count;
+}
+
 test("a staged input leaves nothing behind, whether the call succeeds or fails",
   { timeout: 30_000 }, async (t) => {
   // What is staged is message content, so the temp directory is not a tidiness
@@ -2531,13 +2570,13 @@ test("a staged input leaves nothing behind, whether the call succeeds or fails",
   // baseline is taken first: this is a shared directory and something else may
   // already have left one, and asserting zero would be asserting about the
   // machine rather than about this call.
-  const residue = async () => (await readdir(tmpdir()))
-    .filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
-  const before = await residue();
+  const { shared, own } = await privateTmpdir(t);
+  const residue = () => stagedInputCount(own, 0);
+  const before = 0;
 
-  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  const root = await mkdtemp(join(shared, "agmsg-sync-driver-residue-"));
   t.after(async () => {
-    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    if (!root.startsWith(shared)) throw new Error("unsafe test root");
     await rm(root, { recursive: true, force: true });
   });
   const input = Array.from({ length: 8 }, (_, index) => ({ type: "probe", index }));
@@ -2588,7 +2627,7 @@ printf '{"ok":true}\\n'
       `successful calls leaked descriptors: ${openBefore} -> ${descriptors()}`);
   }
 
-  const bad = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  const bad = await mkdtemp(join(shared, "agmsg-sync-driver-residue-"));
   const fails = (pidFile, helperFile) => `#!/usr/bin/env bash
 echo $$ > ${JSON.stringify(pidFile)}
 echo $$ > ${JSON.stringify(helperFile)}
@@ -2661,11 +2700,11 @@ test("the staged input has no name for as long as the driver is reading it",
     t.skip("Windows cannot unlink an open file; settle-time removal covers it there");
     return;
   }
-  const residue = async () => (await readdir(tmpdir()))
-    .filter((entry) => entry.startsWith("agmsg-driver-input-")).length;
-  const before = await residue();
+  const { shared, own } = await privateTmpdir(t);
+  const residue = () => stagedInputCount(own, 0);
+  const before = 0;
 
-  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-unnamed-"));
+  const root = await mkdtemp(join(shared, "agmsg-sync-driver-unnamed-"));
   // Writes its pid, then stays alive without having read its input yet -- the
   // fixture helper returns once that pid is on disk, so the check below lands
   // inside the call rather than after it.
@@ -2680,7 +2719,8 @@ printf '{"ok":true}\\n'
   const { started } = await withDriverEnvironment(t, root, script,
     (mock, config) => [() => rosterDriver("apply", config, input)]);
 
-  assert.equal(await residue(), before,
+  // One read, no waiting: waiting would let a name that goes away later pass.
+  assert.equal(await stagedInputCount(own, 0, { wait: false }), before,
     "the staged input still had a name while the driver was reading it");
   for (const { promise } of started) await promise;
   assert.equal(await residue(), before, "and none after it settled");
@@ -5606,6 +5646,130 @@ test("the restart helper retries a failed start, never takes the predecessor's o
   assert.equal(await calls(), 5);
 });
 
+test("the restart helper does not start an engine while an install holds the install lock, then starts once (and not at all if the installer already did)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-lock-"));
+  // Every child is registered the moment it is spawned, so a failed assertion or
+  // a timeout still ends it (and waits for it) before the directory goes.
+  const children = [];
+  const track = (child) => {
+    const done = new Promise((resolve) => child.once("exit", resolve));
+    children.push({ child, done });
+    return child;
+  };
+  t.after(async () => {
+    for (const { child } of children) { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+    await Promise.all(children.map(({ done }) => done));
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "run"));
+  await mkdir(join(root, ".install-op"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
+  const lockDb = join(root, ".install-op", "lock.db");
+  const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
+  const holdLock = async () => {
+    // The installer's lock: BEGIN EXCLUSIVE kept open until the holder is ended.
+    const holder = track(spawn("sqlite3", [lockDb], { stdio: ["pipe", "ignore", "ignore"] }));
+    holder.stdin.write(".timeout 5000\nBEGIN EXCLUSIVE;\nSELECT 1;\n");
+    for (let i = 0; i < 50; i++) {
+      const probe = spawnSync("sqlite3", ["-cmd", ".timeout 100", lockDb, "SELECT count(*) FROM sqlite_master;"], { encoding: "utf8" });
+      if (probe.status !== 0) return holder;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("the lock holder never took the lock");
+  };
+  const helper = (startOutput, options) => {
+    rmSync(log, { force: true });
+    writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(log)}\n${startOutput}\n`, { mode: 0o755 });
+    return track(spawn("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0], options).map((a) => a === join(root, "remote.sh") ? remote : a),
+      { stdio: "ignore", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } }));
+  };
+  const callCount = () => { try { return readFileSync(log, "utf8").trim().split("\n").length; } catch { return 0; } };
+  const exited = (child) => children.find((entry) => entry.child === child).done;
+  const fast = { lockPolls: 3, lockPollSeconds: 0.1 };
+
+  // Lock held: nothing is started, however long the helper looks.
+  const holder = await holdLock();
+  const waiting = helper('echo "Sync engine started for demo (pid 2)."', { lockPolls: 100, lockPollSeconds: 0.1 });
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  assert.equal(callCount(), 0, "no start while the install holds the lock");
+  // Lock let go: exactly one start, and the helper is done.
+  holder.kill();
+  await exited(holder);
+  assert.equal(await exited(waiting), 0);
+  assert.equal(callCount(), 1);
+
+  // The installer started the engine while the helper waited: the helper's start
+  // reports it running under another pid and ends, so no second engine is made.
+  const holder2 = await holdLock();
+  const second = helper('echo "Sync engine already running (pid 222)."', { lockPolls: 100, lockPollSeconds: 0.1 });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(callCount(), 0);
+  holder2.kill();
+  await exited(holder2);
+  assert.equal(await exited(second), 0);
+  assert.equal(callCount(), 1);
+});
+
+test("the restart helper never starts an engine when the install lock is still held at the end of its waiting; it says the engine is down, with the command that starts it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-exhausted-"));
+  const children = [];
+  t.after(async () => {
+    for (const child of children) { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+    await Promise.all(children.map((child) => new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null) ? resolve() : child.once("exit", resolve))));
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "run"));
+  await mkdir(join(root, ".install-op"));
+  await mkdir(join(root, "scripts", "lib"), { recursive: true });
+  await writeFile(join(root, "scripts", "lib", "down-notice.sh"), readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "down-notice.sh")));
+  const lockDb = join(root, ".install-op", "lock.db");
+  const remote = join(root, "scripts", "remote.sh");
+  const log = join(root, "calls");
+  writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(log)}\necho "Sync engine started for demo (pid 2)."\n`, { mode: 0o755 });
+  const holder = spawn("sqlite3", [lockDb], { stdio: ["pipe", "ignore", "ignore"] });
+  children.push(holder);
+  holder.stdin.write(".timeout 5000\nBEGIN EXCLUSIVE;\nSELECT 1;\n");
+  for (let i = 0; i < 50 && spawnSync("sqlite3", ["-cmd", ".timeout 100", lockDb, "SELECT count(*) FROM sqlite_master;"]).status === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const result = spawnSync("bash", standDownRestartArgs("demo", join(root, "scripts"), [0, 0], { lockPolls: 3, lockPollSeconds: 0.1 }),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, timeout: 30000 });
+  assert.equal(result.status, 1);
+  assert.equal(existsSync(log), false, "no start while the lock is held, not even after the waiting is used up");
+  const records = readdirSync(join(root, "run", "down"));
+  assert.equal(records.length, 1);
+  const record = JSON.parse(readFileSync(join(root, "run", "down", records[0]), "utf8"));
+  assert.equal(record.state, "down");
+  assert.equal(record.recovery, `bash ${remote} sync start demo`);
+});
+
+test("the recovery command the restart helper records runs as written, whatever characters the install path holds", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "agmsg-restart-recovery-"));
+  t.after(async () => { await rm(base, { recursive: true, force: true }); });
+  const root = join(base, "sync owner's \"review\" x");
+  await mkdir(join(root, "run"), { recursive: true });
+  await mkdir(join(root, "scripts", "lib"), { recursive: true });
+  const noticeLib = join(root, "scripts", "lib", "down-notice.sh");
+  await writeFile(noticeLib, readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "down-notice.sh")));
+  const argvLog = join(base, "argv");
+  const remote = join(root, "scripts", "remote.sh");
+  // A start that never succeeds: every attempt is used and the record is written.
+  writeFileSync(remote, "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+  const result = spawnSync("bash", standDownRestartArgs("demo", join(root, "scripts"), [0]),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, timeout: 30000 });
+  assert.equal(result.status, 1);
+  // Read the way the status and doctor readers decode it, then run it: it has to
+  // reach the owning script with its own arguments.
+  const listed = spawnSync("bash", ["-c", `. ${shellQuote(noticeLib)}; AGMSG_DOWN_NOTICE_ROOT=${shellQuote(root)} down_notice_list`], { encoding: "utf8" });
+  const recovery = listed.stdout.trim().split("\t")[4];
+  assert.ok(recovery.includes("sync start"), listed.stdout);
+  writeFileSync(remote, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${shellQuote(argvLog)}\n`, { mode: 0o755 });
+  const ran = spawnSync("bash", ["-c", recovery], { encoding: "utf8" });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(readFileSync(argvLog, "utf8"), "sync\nstart\ndemo\n");
+});
+
 test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-roster-reset-log-"));
   const previous = { driver: process.env.AGMSG_SYNC_ROSTER_DRIVER, log: process.env.AGMSG_SYNC_LOG_FILE };
@@ -5631,4 +5795,240 @@ test("a roster state file the driver set aside is reported in the engine log, no
   const logged = (await readFile(process.env.AGMSG_SYNC_LOG_FILE, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(logged.map(({ event, team, file }) => [event, team, file]),
     [["roster.state_reset", config.local_team, "/t/First Last/roster-sync.json.corrupt-1-2"]]);
+});
+
+// A row the driver cannot seal is reported as `sync_skipped`; the engine says so
+// once, leaves it out of later pages without losing it, and asks for it again.
+const skipDrivers = (log, { reported }) => ({
+  driverCall: async (operation, _config, input) => {
+    if (operation !== "prepare") return [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }];
+    log.inputs.push(input[0].skip_positions ?? null);
+    log.rechecks = [...(log.rechecks ?? []), input[0].recheck_positions ?? null];
+    const left = input[0].skip_positions ?? [];
+    const again = input[0].recheck_positions ?? [];
+    // Like the real driver: a position it was told to leave out is not looked at,
+    // one it was asked to look at again is, and is either still skipped or resolved.
+    const looked = !left.includes("2") || again.includes("2");
+    const skipped = reported() && looked ? [{ type: "sync_skipped", local_position: "2",
+      id: "local-2", reason: "malformed: from_agent is invalid" }] : [];
+    const resolved = !reported() && again.includes("2") ?
+      [{ type: "sync_resolved", local_position: "2" }] : [];
+    return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" },
+      ...skipped, ...resolved];
+  },
+  rosterDriverCall: async (operation) => operation === "prepare" ?
+    [{ type: "roster_sync_state", transport_cursor: "0", config_path: "/c", journal_path: "/j" }] : [],
+});
+
+test("cycle: a row the driver skips is reported once, kept out of later pages, and does not fail the cycle", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  let broken = true;
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => broken }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push([...state.rows.values()].map((row) => ({ ...row }))); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  await cycle(config, params, deps);
+  await cycle(config, params, deps);
+  await cycle(config, params, deps);
+  // The first page offers everything; the next two leave position 2 out.
+  assert.deepEqual(log.inputs, [null, ["2"], ["2"]]);
+  // Said once, and written once, naming the row and not a body.
+  const skippedEvents = log.events.filter(([name]) => name === "sync.skipped");
+  assert.equal(skippedEvents.length, 1);
+  assert.deepEqual(skippedEvents[0][1], { direction: "push", local_position: "2", id: "local-2",
+    reason: "malformed: from_agent is invalid" });
+  assert.equal(log.records.length, 1);
+  assert.equal(log.records[0][0].id, "local-2");
+  assert.equal(log.records[0][0].count, 1);
+});
+
+test("cycle: every few cycles the skipped rows are offered again, and one that can now be sent is cleared", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  let broken = true;
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => broken }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push(state.rows.size); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  await cycle(config, params, deps);                 // found
+  broken = false;                                    // the cause goes away
+  for (let i = 0; i < 25; i += 1) await cycle(config, params, deps);
+  // Found on the first and left out of every page after it; the 21st names it
+  // for a second look (it stays in the left-out list, the recheck is separate);
+  // once cleared it is no longer left out.
+  assert.deepEqual(log.inputs.slice(0, 21), [null, ...Array(20).fill(["2"])]);
+  assert.deepEqual(log.rechecks.slice(0, 21), [null, ...Array(19).fill(null), ["2"]]);
+  assert.ok(log.inputs.slice(21).every((input) => input === null));
+  assert.ok(log.events.some(([name]) => name === "sync.skip-cleared"));
+  assert.deepEqual(log.records, [1, 0]);
+  assert.equal(skips.rows.size, 0);
+});
+
+test("cycle: a row that is still unsendable at the retry stays, counted, and is not announced again", async () => {
+  const log = { inputs: [], events: [], records: [] };
+  const skips = newSkipState();
+  const deps = idleCycleBaseDeps({ extra: {
+    ...skipDrivers(log, { reported: () => true }),
+    eventCall: async (name, payload) => { log.events.push([name, payload]); },
+    recordSkipsCall: async (_team, state) => { log.records.push(state.rows.size); state.dirty = false; },
+  } });
+  const params = { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null, skips };
+  for (let i = 0; i < 45; i += 1) await cycle(config, params, deps);
+  assert.equal(log.events.filter(([name]) => name === "sync.skipped").length, 1);
+  assert.equal(log.events.filter(([name]) => name === "sync.skip-cleared").length, 0);
+  assert.equal(skips.rows.get("2").count, 3);
+});
+
+test("recordSkips: the record names the row, a down notice is set for doctor, and both go when nothing is skipped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-skips-"));
+  const savedConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await mkdir(join(root, "run"), { recursive: true });
+    const skips = newSkipState();
+    skips.rows.set("2", { direction: "push", local_position: "2", id: "01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc",
+      reason: "malformed: from_agent is invalid", first_seen: "2026-11-08T00:00:00.000Z", count: 1 });
+    await recordSkips("team-one", skips);
+    assert.equal(skips.dirty, false);
+    const record = JSON.parse(readFileSync(join(root, "run", "remote-sync.team-one.skipped.json"), "utf8"));
+    assert.equal(record.rows[0].id, "01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc");
+    // No body anywhere in it.
+    assert.deepEqual(Object.keys(record.rows[0]).sort(),
+      ["count", "direction", "first_seen", "id", "local_position", "reason"]);
+    const notices = readdirSync(join(root, "run", "down"));
+    assert.equal(notices.length, 1);
+    const notice = readFileSync(join(root, "run", "down", notices[0]), "utf8");
+    assert.match(notice, /degraded/u);
+    assert.match(notice, /01a1bd0d-ab00-7b4c-8a5a-d62d6be756dc/u);
+
+    skips.rows.clear();
+    skips.dirty = true;
+    skips.noticeDirty = true;   // what noteSkips sets when the last row clears
+    await recordSkips("team-one", skips);
+    assert.equal(existsSync(join(root, "run", "remote-sync.team-one.skipped.json")), false);
+    assert.deepEqual(readdirSync(join(root, "run", "down")), []);
+  } finally {
+    if (savedConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("noteSkips: a retry clears only the rows the driver says it resolved, and keeps the ones nobody looked at", () => {
+  const skips = newSkipState();
+  const add = (position) => skips.rows.set(position, { direction: "push", local_position: position,
+    id: `local-${position}`, reason: "malformed: x", first_seen: "t", count: 1 });
+  add("1"); add("2"); add("3");
+  skips.cycles = 20;
+  const plan = skipPlan(skips);
+  assert.deepEqual(plan.recheck, ["1", "2", "3"]);
+  // Every known row stays out of the ordinary page, the retry included.
+  assert.deepEqual(plan.positions, ["1", "2", "3"]);
+  // The driver looked at 1 (resolved) and 3 (still bad); 2 was not examined.
+  const change = noteSkips(skips, plan, [{ local_position: "3", id: "local-3", reason: "malformed: x" }], ["1"]);
+  assert.deepEqual(change.cleared.map((row) => row.local_position), ["1"]);
+  assert.deepEqual([...skips.rows.keys()].sort(), ["2", "3"]);
+  assert.equal(skips.rows.get("3").count, 2);
+  assert.equal(skips.dirty, true);
+});
+
+test("noteSkips: a retry in which nothing was examined (sends not allowed) clears nothing", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "r", first_seen: "t", count: 1 });
+  skips.cycles = 20;
+  const change = noteSkips(skips, skipPlan(skips), [], []);
+  assert.deepEqual(change.cleared, []);
+  assert.equal(skips.rows.size, 1);
+  assert.equal(skips.cycles, 0);
+});
+
+test("noteSkips: a changed count or reason alone marks the record to be written again", () => {
+  const skips = newSkipState();
+  skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "old", first_seen: "t", count: 1 });
+  skips.dirty = false;
+  noteSkips(skips, skipPlan(skips), [{ local_position: "2", id: "local-2", reason: "new" }], []);
+  assert.equal(skips.dirty, true);
+  assert.equal(skips.rows.get("2").reason, "new");
+});
+
+test("skipPlan: no known row ever takes an ordinary page slot, however many there are", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 1100; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  const plan = skipPlan(skips);
+  assert.equal(plan.positions.length, 1100);
+  assert.equal(plan.positions[0], "1");
+  assert.equal(plan.positions.at(-1), "1100");
+});
+
+test("skipPlan: retries rotate, so every remembered position is eventually looked at, a bounded window at a time", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 1001; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  const looked = new Set();
+  let windows = 0;
+  while (looked.size < 1001 && windows < 50) {
+    skips.cycles = 20;
+    const plan = skipPlan(skips);
+    assert.ok(plan.recheck.length > 0 && plan.recheck.length <= 100);
+    for (const position of plan.recheck) looked.add(position);
+    // The driver examined the window and every row in it is still bad.
+    noteSkips(skips, plan, plan.recheck.map((position) => ({ local_position: position,
+      id: `local-${position}`, reason: "r" })), []);
+    windows += 1;
+  }
+  assert.equal(looked.size, 1001);
+  assert.ok(looked.has("1001"), "the last remembered position is reached");
+  assert.equal(windows, 11);
+});
+
+test("noteSkips: a position far down the list is cleared when its window comes round and the driver resolves it", () => {
+  const skips = newSkipState();
+  for (let position = 1; position <= 250; position += 1) {
+    skips.rows.set(String(position), { direction: "push", local_position: String(position),
+      id: `local-${position}`, reason: "r", first_seen: "t", count: 1 });
+  }
+  let cleared = false;
+  for (let round = 0; round < 3 && !cleared; round += 1) {
+    skips.cycles = 20;
+    const plan = skipPlan(skips);
+    const resolved = plan.recheck.filter((position) => position === "230");
+    const stillBad = plan.recheck.filter((position) => position !== "230")
+      .map((position) => ({ local_position: position, id: `local-${position}`, reason: "r" }));
+    cleared = noteSkips(skips, plan, stillBad, resolved).cleared.some((row) => row.local_position === "230");
+  }
+  assert.ok(cleared);
+  assert.equal(skips.rows.has("230"), false);
+});
+
+test("recordSkips: a count that only went up rewrites the record but does not start the notice process", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-skips-"));
+  const savedConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await mkdir(join(root, "run"), { recursive: true });
+    const skips = newSkipState();
+    skips.rows.set("2", { direction: "push", local_position: "2", id: "local-2", reason: "r",
+      first_seen: "t", count: 1 });
+    const notices = [];
+    await recordSkips("team-one", skips, writeFile, rm, async () => { notices.push("set"); });
+    skips.rows.get("2").count = 2;
+    skips.dirty = true;
+    await recordSkips("team-one", skips, writeFile, rm, async () => { notices.push("set"); });
+    assert.deepEqual(notices, ["set"]);
+    assert.equal(JSON.parse(readFileSync(join(root, "run", "remote-sync.team-one.skipped.json"), "utf8")).rows[0].count, 2);
+  } finally {
+    if (savedConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = savedConnection;
+    await rm(root, { recursive: true, force: true });
+  }
 });

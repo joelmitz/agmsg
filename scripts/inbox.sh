@@ -65,7 +65,7 @@ fi
 # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
-_arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
+_arr="[$(printf '%s' "$UNREAD_JSONL" | LC_ALL=C paste -sd, -)]"
 # #777/#1045: an agent's unread backlog grows with every message sent to it, so
 # interpolating it into ONE argv element eventually exceeds the OS's
 # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller still on
@@ -80,7 +80,7 @@ _agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
 trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
-  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(13), ''), char(10), char(30)) || char(31) ||"
+  printf "%s\n" "       replace(replace(${_AGMSG_SQL_BODY_DISPLAY}, char(13), ''), char(10), char(30)) || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"

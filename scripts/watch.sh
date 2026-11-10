@@ -1773,7 +1773,7 @@ EOF
     # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
-    _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
+    _arr="[$(printf '%s' "$OUT" | LC_ALL=C paste -sd, -)]"
     # #777/#1045: this pair's undelivered backlog grows independently of
     # anything this loop bounds, so interpolating it into ONE argv element
     # eventually exceeds the OS's per-argument ceiling (Linux
@@ -1809,7 +1809,7 @@ EOF
         printf "%s\n" "       COALESCE(json_extract(value,'\$.team'),'') || char(31) ||"
         printf "%s\n" "       COALESCE(json_extract(value,'\$.from'),'') || char(31) ||"
         printf "%s\n" "       COALESCE(json_extract(value,'\$.to'),'') || char(31) ||"
-        printf "%s\n" "       replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||"
+        printf "%s\n" "       replace(replace(replace(COALESCE(${_AGMSG_SQL_BODY_DISPLAY},''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||"
         printf "%s\n" "       COALESCE(json_extract(value,'\$.cursor'),'')"
         printf "FROM json_each('"
         printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
