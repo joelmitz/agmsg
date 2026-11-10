@@ -81,6 +81,13 @@
 # only the selected driver is sourced into the caller.
 
 # Source-time lib dir (robust to later subshell/relative cwd).
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 _AGMSG_TERMINAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
 # Pull in the axis-generic registry (bases + trust) if not already sourced.
@@ -1025,12 +1032,12 @@ _agmsg_placement_retire_previous() {
   dir="$(dirname "$mine")"
   cfg="$(dirname "$dir")/teams/$team/config.json"
   [ -f "$cfg" ] || return 0
-  esc="$(sed "s/'/''/g" "$cfg" 2>/dev/null)" || return 0
+  esc="$(LC_ALL=C sed "s/'/''/g" "$cfg" 2>/dev/null)" || return 0
   while IFS= read -r m; do
     [ -n "$m" ] && [ "$m" != "$agent" ] || continue
     cand="${cand}$(agmsg_spawn_path "$team" "$m" 2>/dev/null)"$'\n'
   done <<EOF
-$(sqlite3 :memory: "SELECT key FROM json_each(json_extract('$esc', '\$.agents'));" 2>/dev/null | tr -d '\r')
+$(agmsg_sqlite_mem "SELECT key FROM json_each(json_extract('$esc', '\$.agents'));" 2>/dev/null)
 EOF
   [ -n "$cand" ] || return 0
   while IFS= read -r s; do

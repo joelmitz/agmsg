@@ -6,6 +6,13 @@
 # shape; registrations inside the cache remain machine-local and are never
 # journaled.
 
+# The CR strip for sqlite3 output runs only where sqlite3 emits CRLF.
+_agmsg_crlf_d="${BASH_SOURCE[0]:-$0}"
+case "$_agmsg_crlf_d" in */*) _agmsg_crlf_d="${_agmsg_crlf_d%/*}" ;; *) _agmsg_crlf_d=. ;; esac
+# shellcheck disable=SC1091
+. "$_agmsg_crlf_d/sqlite-crlf.sh"
+unset _agmsg_crlf_d
+
 [ -n "${_AGMSG_ROSTER_JOURNAL_SH:-}" ] && return 0
 _AGMSG_ROSTER_JOURNAL_SH=1
 
@@ -36,42 +43,42 @@ agmsg_roster_has_journal() {
 # join.sh exited 1 in silence after creating the team (#669). The two names read
 # alike and do opposite things to a path, which is how the wrong one was picked.
 _agmsg_roster_sqlesc() {
-  printf '%s' "$1" | sed "s/'/''/g"
+  printf '%s' "$1" | LC_ALL=C sed "s/'/''/g"
 }
 
 _agmsg_roster_record() {
   local type="$1" member_id="$2" name="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','$(_agmsg_roster_sqlesc "$type")',
     'id','$(compat_uuid7)',
     'member_id','$(_agmsg_roster_sqlesc "$member_id")',
     'name','$(_agmsg_roster_sqlesc "$name")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );"
 }
 
 _agmsg_roster_rename_record() {
   local member_id="$1" from="$2" to="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','member_renamed',
     'id','$(compat_uuid7)',
     'member_id','$(_agmsg_roster_sqlesc "$member_id")',
     'from','$(_agmsg_roster_sqlesc "$from")',
     'to','$(_agmsg_roster_sqlesc "$to")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );"
 }
 
 _agmsg_key_rotated_record() {
   local epoch="$1" key_id="$2" fingerprint="$3" at="$4"
-  sqlite3 :memory: "SELECT json_object(
+  agmsg_sqlite_mem "SELECT json_object(
     'type','key_rotated',
     'id','$(compat_uuid7)',
     'epoch','$(_agmsg_roster_sqlesc "$epoch")',
     'key_id','$(_agmsg_roster_sqlesc "$key_id")',
     'fingerprint','$(_agmsg_roster_sqlesc "$fingerprint")',
     'at','$(_agmsg_roster_sqlesc "$at")'
-  );" | tr -d '\r'
+  );"
 }
 
 _agmsg_roster_append_record() {
@@ -133,7 +140,7 @@ agmsg_roster_name_owner() {
        WHERE json_extract(event,'\$.type') IN ('member_joined','member_renamed')
     )
     SELECT member_id FROM bindings
-     WHERE name='$name_sql' ORDER BY ord LIMIT 1;" 2>/dev/null | tr -d '\r'
+     WHERE name='$name_sql' ORDER BY ord LIMIT 1;" 2>/dev/null | LC_ALL=C tr -d '\r'
 }
 
 # The reverse of agmsg_roster_name_owner: the name a member_id answers to
@@ -175,7 +182,7 @@ agmsg_roster_owner_name() {
     )
     SELECT CASE type WHEN 'member_left' THEN NULL ELSE name END
       FROM bindings
-     WHERE member_id='$id_sql' ORDER BY ord DESC LIMIT 1;" 2>/dev/null | tr -d '\r'
+     WHERE member_id='$id_sql' ORDER BY ord DESC LIMIT 1;" 2>/dev/null | LC_ALL=C tr -d '\r'
 }
 
 # Start an id-bearing team journal from its current config. This is needed for
@@ -189,9 +196,9 @@ agmsg_roster_ensure() {
   [ -f "$journal" ] && return 0
   [ -f "$config" ] || return 0
   config_sql="$(agmsg_sql_readfile_path "$config")"
-  team_id="$(sqlite3 :memory: \
+  team_id="$(agmsg_sqlite_mem \
     "SELECT COALESCE(json_extract(CAST(readfile('$config_sql') AS TEXT), '\$.team_id'),'');" \
-    2>/dev/null | tr -d '\r')"
+    2>/dev/null)"
   [ -n "$team_id" ] || return 0
   at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   while IFS="$(printf '\t')" read -r name member_id; do
@@ -204,7 +211,7 @@ $(sqlite3 -separator "$(printf '\t')" :memory: "
   SELECT key, COALESCE(json_extract(value, '\$.member_id'),'')
     FROM json_each(json_extract(
       CAST(readfile('$config_sql') AS TEXT), '\$.agents'))
-   ORDER BY key;" 2>/dev/null | tr -d '\r')
+   ORDER BY key;" 2>/dev/null | LC_ALL=C tr -d '\r')
 EOF
   agmsg_write_atomic "$journal" "$lines"
 }
@@ -387,7 +394,7 @@ agmsg_roster_project_config() {
     SELECT json_set(CAST(readfile('$config_sql') AS TEXT),
                     '\$.agents',json(agents.value),
                     '\$.retired_members',json(retired.value))
-      FROM agents,retired;" 2>/dev/null | tr -d '\r')" || return 1
+      FROM agents,retired;" 2>/dev/null | LC_ALL=C tr -d '\r')" || return 1
   # Empty, after the precheck above already said both files open. Before #669
   # this line was a bare `return 1` and every way of arriving here looked the
   # same: join.sh printed "Created team:" and exited with nothing on stderr.

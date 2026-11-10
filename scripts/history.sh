@@ -55,7 +55,7 @@ fi
 # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
-_arr="[$(printf '%s' "$HIST_JSONL" | paste -sd, -)]"
+_arr="[$(printf '%s' "$HIST_JSONL" | LC_ALL=C paste -sd, -)]"
 # #777: same argv-length exposure on the display path. Capping --limit does not bound this
 # one either, because a single long body can carry it past the ceiling on its own.
 _agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-history-rows.XXXXXX") || exit 13
@@ -63,7 +63,7 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.to') || char(31) ||"
-  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(13), ''), char(10), char(30)) || char(31) ||"
+  printf "%s\n" "       replace(replace(${_AGMSG_SQL_BODY_DISPLAY}, char(13), ''), char(10), char(30)) || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"
@@ -91,7 +91,7 @@ while IFS= read -r r; do
   [ -n "$r" ] || continue
   u=$(storage_list_unread "$TEAM" "$r") || continue
   [ -n "$u" ] || continue
-  uarr="[$(printf '%s' "$u" | paste -sd, -)]"
+  uarr="[$(printf '%s' "$u" | LC_ALL=C paste -sd, -)]"
   # #777: a recipient's unread backlog grows independently of the display limit, so
   # interpolating it into one argv element eventually exceeds the ceiling on a SINGLE
   # argument -- on Linux `MAX_ARG_STRLEN`, 131,072 bytes. Measured: the failing
