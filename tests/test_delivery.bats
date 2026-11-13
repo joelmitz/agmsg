@@ -2870,6 +2870,115 @@ EOF
   [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
 }
 
+# --- Antigravity inbox guard hook (.agents/hooks.json) ---
+agy_guard_field() {  # <hooks.json> <json path under the guard key>
+  sqlite_mem "SELECT json_extract(readfile('$(rf "$1")'), '\$.\"agmsg-tui-inbox-guard\"$2');"
+}
+
+@test "antigravity monitor: registers the inbox guard hook with an absolute script path, idempotently" {
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local f="$TEST_PROJECT/.agents/hooks.json"
+  [ "$(agy_guard_field "$f" '.PreToolUse[0].matcher')" = run_command ]
+  [ "$(agy_guard_field "$f" '.PreToolUse[0].hooks[0].timeout')" = 5 ]
+  [[ "$(agy_guard_field "$f" '.PreToolUse[0].hooks[0].command')" == "bash '$SCRIPTS/drivers/types/antigravity/hooks/block-agmsg-inbox.sh'" ]]
+  local before; before="$(cat "$f")"
+  bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$(cat "$f")" = "$before" ]
+}
+
+@test "antigravity guard hook script allows with no reservation, denies with one (cwd-independent)" {
+  local hook="$SCRIPTS/drivers/types/antigravity/hooks/block-agmsg-inbox.sh"
+  local payload='{"toolName":"run_command","toolInput":{"CommandLine":"bash x/check-inbox.sh antigravity p"}}'
+  mkdir -p "$TEST_SKILL_DIR/run"   # the hook finds run/ next to its own install
+  run bash -c "cd / && printf '%s' '$payload' | bash '$hook'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"decision": "allow"'* ]]
+  : > "$TEST_SKILL_DIR/run/read-reservation.k.json"
+  run bash -c "cd / && printf '%s' '$payload' | env -u AGMSG_SKILL_DIR bash '$hook'"
+  [[ "$output" == *'"decision": "deny"'* ]]
+}
+
+@test "antigravity guard hook script is self-contained when started with a PATH that has no tr/iconv/awk" {
+  local hook="$SCRIPTS/drivers/types/antigravity/hooks/block-agmsg-inbox.sh"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  # Reproduces the Windows case (absolute bash.exe, PATH without Git\usr\bin): without the PATH
+  # self-completion every command was denied (fail closed), including a harmless one.
+  run bash -c "printf '%s' '{\"CommandLine\":\"echo hello\"}' | env -i PATH=/nonexistent AGMSG_SKILL_DIR='$TEST_SKILL_DIR' '$BASH' '$hook'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"decision": "allow"'* ]]
+  : > "$TEST_SKILL_DIR/run/read-reservation.k.json"
+  run bash -c "printf '%s' '{\"CommandLine\":\"bash check-inbox.sh antigravity p\"}' | env -i PATH=/nonexistent AGMSG_SKILL_DIR='$TEST_SKILL_DIR' '$BASH' '$hook'"
+  [[ "$output" == *'"decision": "deny"'* ]]
+  [[ "$output" == *"bridge manages receipt"* ]]
+}
+
+@test "antigravity guard hook: other keys keep their names and values across set monitor and set turn (whitespace may be normalized)" {
+  mkdir -p "$TEST_PROJECT/.agents"
+  printf '{"mine":{"PreToolUse":[{"matcher":"x","hooks":[]}]}}\n' > "$TEST_PROJECT/.agents/hooks.json"
+  bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.agents/hooks.json")'), '\$.mine.PreToolUse[0].matcher');")" = x ]
+  [ -n "$(agy_guard_field "$TEST_PROJECT/.agents/hooks.json" '.PreToolUse[0].matcher')" ]
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  [ -z "$(agy_guard_field "$TEST_PROJECT/.agents/hooks.json" '.PreToolUse[0].matcher')" ]
+  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.agents/hooks.json")'), '\$.mine.PreToolUse[0].matcher');")" = x ]
+}
+
+@test "antigravity guard hook: a hooks.json agmsg created is deleted by set off; an invalid one is left alone with a warning" {
+  bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.agents/hooks.json" ]
+  bash "$SCRIPTS/delivery.sh" set off antigravity "$TEST_PROJECT"
+  [ ! -f "$TEST_PROJECT/.agents/hooks.json" ]
+  printf 'not json' > "$TEST_PROJECT/.agents/hooks.json"
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"left unchanged"* ]]
+  [ "$(cat "$TEST_PROJECT/.agents/hooks.json")" = "not json" ]
+}
+
+@test "antigravity guard hook (Windows): a space-free Git Bash path is used as is; a path with a space is refused and nothing is registered" {
+  export AGMSG_AGY_GUARD_PLATFORM=windows
+  PATH_NO_CYG="$(command -v cygpath || true)"; [ -z "$PATH_NO_CYG" ] || skip "cygpath present"
+  local f="$TEST_PROJECT/.agents/hooks.json" cmd
+  # an explicit GIT_BASH without a space: used unquoted (parses the same in cmd.exe and PowerShell)
+  GIT_BASH='C:\PROGRA~1\Git\bin\bash.exe' run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  cmd="$(agy_guard_field "$f" '.PreToolUse[0].hooks[0].command')"
+  [[ "$cmd" == 'C:\PROGRA~1\Git\bin\bash.exe '*'/hooks/block-agmsg-inbox.sh' ]]
+  # no cygpath and no GIT_BASH: the default path has a space and no 8.3 name is known -> refused,
+  # the older entry is removed, delivery itself still succeeds with a warning
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"has a space"* ]]
+  [[ "$output" == *"could not install the agy inbox guard hook"* ]]
+  [ ! -f "$f" ]
+  grep -Fq "agmsg:antigravity:monitor" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  # GIT_BASH with a space is refused too, never emitted as a quoted executable
+  GIT_BASH='C:\Program Files\Git\bin\bash.exe' run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ ! -f "$f" ]
+}
+
+@test "antigravity guard hook (Windows, with cygpath): the 8.3 short-path command is exactly <short bash> <mixed script path>" {
+  export AGMSG_AGY_GUARD_PLATFORM=windows
+  mkdir -p "$TEST_SKILL_DIR/fakebin"
+  cat > "$TEST_SKILL_DIR/fakebin/cygpath" <<'EOS'
+#!/bin/sh
+case "$1" in
+  -ws) printf '%s' 'C:\PROGRA~1\Git\usr\bin\bash.exe' ;;
+  -m) case "$2" in *block-agmsg-inbox.sh) printf '%s' "C:/fake/$(basename "$2")" ;; *) printf '%s' "$2" ;; esac ;;
+  *) printf '%s' "$2" ;;
+esac
+EOS
+  chmod +x "$TEST_SKILL_DIR/fakebin/cygpath"
+  PATH="$TEST_SKILL_DIR/fakebin:$PATH" bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$(agy_guard_field "$TEST_PROJECT/.agents/hooks.json" '.PreToolUse[0].hooks[0].command')" = 'C:\PROGRA~1\Git\usr\bin\bash.exe C:/fake/block-agmsg-inbox.sh' ]
+  # 8.3 names disabled: cygpath -ws returns the long path (with a space) -> refused, entry removed
+  sed -i 's#C:\\PROGRA~1\\Git\\usr\\bin\\bash.exe#C:\\Program Files\\Git\\usr\\bin\\bash.exe#' "$TEST_SKILL_DIR/fakebin/cygpath"
+  PATH="$TEST_SKILL_DIR/fakebin:$PATH" run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [[ "$output" == *"has a space"* ]]
+  [ ! -f "$TEST_PROJECT/.agents/hooks.json" ]
+}
+
 # --- Codex monitor bridge (#41) ---
 @test "session-start.sh for codex starts bridge when monitor launcher env is present" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null

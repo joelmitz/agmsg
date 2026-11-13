@@ -2,6 +2,13 @@
 # Delivery mode is represented by an agmsg rule-file marker; the marker alone
 # does not start agy.
 agmsg_delivery_apply() {
+  _agmsg_antigravity_apply_rule "$@" || return $?
+  # The inbox guard hook follows the mode (installed for monitor, removed otherwise).
+  # shellcheck disable=SC1091
+  . "$(dirname "${BASH_SOURCE[0]}")/_guard-hook.sh"
+  agmsg_agy_guard_sync "$3" "$2"
+}
+_agmsg_antigravity_apply_rule() {
   local type="$1" project="$2" mode="$3"
   # Refuse before any write: an empty SKILL_DIR would render broken guidance
   # paths ("/scripts/where.sh" etc.) into the rule file, and rulefile_apply

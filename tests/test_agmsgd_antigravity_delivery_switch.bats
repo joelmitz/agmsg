@@ -82,6 +82,16 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   [ "$(cut -f1,3 "$TEST_SKILL_DIR/run/delivery-choice")" = "$(printf 'antigravity\tagmsgd')" ]
 }
 
+@test "delivery agmsgd for Antigravity: the inbox guard hook set by monitor is removed (agmsgd applies the turn rule)" {
+  _mark_daemon_ready
+  : > "$TEST_SKILL_DIR/run/agmsgd-antigravity-delivery"
+  bash "$SCRIPTS/delivery.sh" set monitor antigravity "$PROJECT" >/dev/null
+  grep -Fq "agmsg-tui-inbox-guard" "$PROJECT/.agents/hooks.json"
+  run bash "$SCRIPTS/agmsg" delivery agmsgd --type antigravity --project "$PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -Fqs "agmsg-tui-inbox-guard" "$PROJECT/.agents/hooks.json"
+}
+
 @test "delivery agmsgd for Antigravity: a running TUI monitor refuses the switch and nothing changes" {
   [ "$(uname -s)" = Linux ] || skip 'process identity is read from /proc'
   _mark_daemon_ready
