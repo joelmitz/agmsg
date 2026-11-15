@@ -190,7 +190,9 @@ prepare_push() {
   printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
   db=$(agmsg_db_path demo)
   [ "$(agmsg_sqlite "$db" \
-    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+    "SELECT COUNT(*) FROM sync_messages WHERE wire_id='$prior_wire';" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT COUNT(*) FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" -eq 0 ]
 
   # Now a second page: one record whose id is the SAME UUID with a trailing
   # U+0000 appended -- the exact string that, if stripped rather than
@@ -212,10 +214,12 @@ prepare_push() {
   run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page2"
   [ "$status" -eq 13 ]
   printf '%s\n' "$output" | grep -q 'record 1: field id contains U+0000'
-  # The prior, legitimate record is untouched -- not quarantined, not
-  # overwritten, still imported under its real wire id.
+  # The prior message remains mapped and readable, and no corrupt quarantine
+  # row was created for its wire id.
   [ "$(agmsg_sqlite "$db" \
-    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+    "SELECT COUNT(*) FROM sync_messages WHERE wire_id='$prior_wire';" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT COUNT(*) FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" -eq 0 ]
   [ "$(storage_history demo | jq -s '[.[]|select(.body=="legitimate prior message")]|length')" -eq 1 ]
 }
 
