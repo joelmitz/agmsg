@@ -66,9 +66,10 @@
     "emptyState": "Aún no hay mensajes."
   },
   "pane": {
-    "monitorTip": {
-      "native": "Automonitoreo — este tipo entrega los mensajes de agmsg por sí mismo",
-      "app": "Monitor de la app — los mensajes de agmsg se inyectan en el stdin de este panel"
+    "deliveryTip": {
+      "agmsgd": "agmsgd entrega los mensajes a este agente",
+      "native": "Esta CLI recibe los mensajes de agmsg por sí misma",
+      "app": "La app escribe los avisos de mensajes en este terminal"
     },
     "closeTitle": "cerrar panel",
     "closeGlyph": "×",
@@ -476,6 +477,10 @@
       "readFailed": "No se pudieron leer las solicitudes de apertura: {{message}}",
       "actionFailed": "No se pudo procesar la solicitud: {{message}}",
       "truncated": "No se muestran las solicitudes más antiguas.",
+      "notice": {
+        "no_app_user": "Este equipo no tiene app-user, así que no puede recibir solicitudes de apertura.",
+        "several_app_users": "Este equipo tiene más de un app-user, así que no se muestran las solicitudes."
+      },
       "close": "Close"
     },
     "menu": {

@@ -78,9 +78,10 @@
     "emptyState": "No messages yet."
   },
   "pane": {
-    "monitorTip": {
-      "native": "Self-monitoring — this type delivers agmsg messages on its own",
-      "app": "App monitor — agmsg messages are injected into this pane's stdin"
+    "deliveryTip": {
+      "agmsgd": "agmsgd delivers messages to this agent",
+      "native": "This CLI receives agmsg messages on its own",
+      "app": "The app types message notices into this terminal"
     },
     "closeTitle": "close pane",
     "closeGlyph": "×",
@@ -478,6 +479,10 @@
       "readFailed": "Open requests could not be read: {{message}}",
       "actionFailed": "The request could not be handled: {{message}}",
       "truncated": "Older requests are not shown.",
+      "notice": {
+        "no_app_user": "This team has no app-user, so it cannot receive open requests.",
+        "several_app_users": "This team has more than one app-user, so requests are not shown."
+      },
       "close": "Close"
     },
     "menu": {

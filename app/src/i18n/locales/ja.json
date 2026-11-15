@@ -68,9 +68,10 @@
     "emptyState": "メッセージはまだありません。"
   },
   "pane": {
-    "monitorTip": {
-      "native": "セルフモニタリング — このタイプは自身でagmsgメッセージを配信します",
-      "app": "アプリモニター — agmsgメッセージはこのペインの標準入力に注入されます"
+    "deliveryTip": {
+      "agmsgd": "agmsgd がこのエージェントにメッセージを届けます",
+      "native": "この CLI は agmsg のメッセージを自分で受け取ります",
+      "app": "アプリがメッセージの通知をこのターミナルに入力します"
     },
     "closeTitle": "ペインを閉じる",
     "closeGlyph": "×",
@@ -476,6 +477,10 @@
       "readFailed": "オープン要求を読めませんでした: {{message}}",
       "actionFailed": "要求を処理できませんでした: {{message}}",
       "truncated": "古い要求は表示していません。",
+      "notice": {
+        "no_app_user": "このチームには app-user がいないため、オープン要求を受け取れません。",
+        "several_app_users": "このチームには app-user が複数いるため、要求は表示しません。"
+      },
       "close": "閉じる"
     },
     "menu": {

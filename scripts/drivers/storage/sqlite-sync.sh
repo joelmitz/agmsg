@@ -1675,7 +1675,71 @@ storage_sync_apply_pull() {
        AND NOT EXISTS(SELECT 1 FROM sync_quarantine qx
          WHERE qx.server_instance_id=c.server_instance_id
            AND qx.remote_team_id=c.remote_team_id
-           AND qx.protocol_version=c.protocol_version AND qx.wire_id=c.wire_id);"
+           AND qx.protocol_version=c.protocol_version AND qx.wire_id=c.wire_id);" || return $?
+  # After the outcomes above are read: they report the rows of this page.
+  _sqlite_sync_quarantine_sweep "$db" || true
+}
+
+# Removes quarantine rows that only repeat a stored message (#1966): status
+# imported or reconciled, no reason, and a sync_messages row with the same
+# wire id, server sequence and envelope. Everything a later pull asks of such a
+# row (is this sequence mapped to another wire id, does this wire id carry
+# another envelope) the sync_messages row answers identically, and the read
+# frontier holds the sequence through that row too, so nothing else needs it.
+# A row with a reason, any other status, or no matching mapping is kept.
+#
+# One sqlite3 process runs the batches as separate statements, so the writer
+# lock is taken once per batch of 100 rows and released between them, never held
+# for the backlog. The process takes the lock again the moment it lets go, so
+# another writer is not let in between the batches: it waits for the whole call,
+# however many batches there are. What bounds that wait is the time the call may
+# run: before each batch a guard statement checks that less than 200 ms have
+# passed since the call began, and past that it fails a CHECK on a temp table,
+# which `.bail on` turns into the end of the script. Nothing after it runs, so a
+# call past its deadline scans nothing (a test inside the DELETE would not do:
+# SQLite visits every candidate row and tests it per row). 100 batches are the
+# outer limit and the rest is taken on the next pull. On a store with a
+# 43,000-row backlog one call of 100 batches took up to 2.1 s here; the cause of
+# the failed writes that led to this is not established (they were not
+# reproduced), so this bounds what the cleanup can add rather than removing a
+# known cause. A failure is reported and retried on the next pull, never fatal:
+# the page it follows has already been applied.
+_sqlite_sync_quarantine_sweep_sql() {   # <deadline-ms>
+  local batch n=0
+  batch="DELETE FROM sync_quarantine WHERE rowid IN (
+    SELECT q.rowid FROM sync_quarantine q
+     WHERE q.status IN ('imported','reconciled') AND COALESCE(q.reason,'')=''
+       AND EXISTS(SELECT 1 FROM sync_messages m
+         WHERE m.server_instance_id=q.server_instance_id
+           AND m.remote_team_id=q.remote_team_id
+           AND m.protocol_version=q.protocol_version AND m.wire_id=q.wire_id
+           AND m.server_seq=q.server_seq AND m.envelope_v=q.envelope_v
+           AND m.cipher=q.cipher AND COALESCE(m.key_id,'')=COALESCE(q.key_id,'')
+           AND m.blob=q.blob)
+     LIMIT 100);"
+  # The clock and the guard live in sqlite's temp database, so they take no lock
+  # on the store.
+  printf '.bail on\nCREATE TEMP TABLE sweep_clock AS SELECT julianday('"'"'now'"'"') AS t0;\n'
+  printf 'CREATE TEMP TABLE sweep_guard(sweep_deadline_ok INTEGER CHECK(sweep_deadline_ok=1));\n'
+  while [ "$n" -lt 100 ]; do
+    printf "INSERT INTO temp.sweep_guard SELECT CASE WHEN (julianday('now')-(SELECT t0 FROM temp.sweep_clock))*86400000 < %s THEN 1 ELSE 0 END;\n%s\n" "$1" "$batch"
+    n=$((n + 1))
+  done
+}
+
+_sqlite_sync_quarantine_sweep() {
+  local db="$1" deadline_ms="${AGMSG_SYNC_SWEEP_MS:-200}" err rc=0
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=200 ;; esac
+  agmsg_sqlite_warm
+  err="$(_sqlite_sync_quarantine_sweep_sql "$deadline_ms" | agmsg_sqlite "$db" 2>&1 >/dev/null)" || rc=$?
+  # Running out of time is the guard's CHECK failing: the intended end of a call.
+  if [ "$rc" -ne 0 ]; then
+    case "$err" in
+      *sweep_deadline_ok*) return 0 ;;
+    esac
+    echo "agmsg: storage sync could not clean up imported quarantine rows (#1966); it is retried on the next pull" >&2
+    return 1
+  fi
 }
 
 # Emits durable blocking envelopes for explicit decrypt/import reprocessing.
@@ -1947,6 +2011,26 @@ EOF
                            AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
                            AND q.driver_generation='$generation'
                            AND CAST(q.server_seq AS INTEGER)=r.server_seq)
+      UNION ALL
+      -- A message whose quarantine row the cleanup removed (#1966) is held by
+      -- its mapping: the cursor only passes a sequence in the same transaction
+      -- that quarantines it, and the cleanup removes only imported/reconciled
+      -- rows that have an identical mapping, so a mapping with a server
+      -- sequence at or below the cursor is the same fact the row was.
+      SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
+             m.driver_generation,CAST(m.server_seq AS INTEGER),
+             CASE WHEN m.direction='pull' THEN 'imported' ELSE 'reconciled' END,m.wire_id,
+             EXISTS(SELECT 1 FROM roster_read_seqs r
+                     WHERE r.server_seq=CAST(m.server_seq AS INTEGER))
+        FROM sync_messages m
+       WHERE m.local_team='$tl' AND m.server_instance_id='$server'
+         AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
+         AND m.driver_generation='$generation' AND m.server_seq IS NOT NULL
+         AND NOT EXISTS(SELECT 1 FROM sync_quarantine q
+                         WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+                           AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+                           AND q.driver_generation='$generation'
+                           AND CAST(q.server_seq AS INTEGER)=CAST(m.server_seq AS INTEGER))
     ), ordered AS (
       SELECT rm.member_id,rm.agent,CAST(rm.remote_server_seq AS INTEGER) AS base,
              CAST(b.transport_cursor AS INTEGER) AS tip,
@@ -2271,7 +2355,8 @@ storage_sync_apply_read_state() {
      WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1 AND e.to_agent=rm.agent
-       AND (m.direction='push' OR q.status IN ('imported','reconciled'))
+       AND (m.direction='push' OR q.status IN ('imported','reconciled')
+            OR q.wire_id IS NULL)
        AND (CAST(m.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER)
          OR EXISTS(SELECT 1 FROM sync_read_remote_exact x
            WHERE x.local_team=rm.local_team AND x.server_instance_id=rm.server_instance_id

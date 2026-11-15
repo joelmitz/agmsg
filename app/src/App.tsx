@@ -27,6 +27,7 @@ import { createLatestOnly } from "./latestOnly";
 import { createNoticeFlusher } from "./noticeFlusher";
 import { heldCount, type Queues } from "./noticeQueue";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
+import { agentPaneRows, syncAgentStatus, type AgentPaneRow } from "./addonStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
@@ -63,6 +64,7 @@ import {
   type SplitNode,
 } from "./paneTree";
 import { PulseDot } from "./pulseSync";
+import { appTypesInto, deliveryDot, deliveryFromMode, type PaneDelivery } from "./paneDelivery";
 import { RailAvatar, SidebarUser } from "./SidebarUser";
 import { resolveActiveTab } from "./tabMemory";
 import { updateCell } from "./cellMeasure";
@@ -87,13 +89,18 @@ export type Pane = {
   cmd: string;
   args: string[];
   cwd?: string;
-  /** True only when this pane's type self-delivers agmsg messages (manifest
-   *  monitor=yes) — the app must NOT also inject there (double-delivery).
-   *  False for actas-booted types with no monitor of their own (codex,
+  /** True when something other than the app delivers agmsg messages to this pane (the agent's own monitor, or
+   *  agmsgd) — the app must NOT also inject there (double-delivery).
+   *  False for actas-booted types with nothing of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** How an agent pane's messages arrive (see paneDelivery.ts). Set only on agent panes, which are the ones that
+   *  get the delivery dot; a shell, an add-on pane and the shell an agent falls back to have none. */
+  delivery?: PaneDelivery;
   /** The journal entry of an agent an add-on started: the backend learns the process from it. */
   agentKey?: string;
+  /** The agent type (claude-code, codex, ...) of a pane that runs a member's CLI. Not set on a shell, an add-on pane or the bash fallback. */
+  agentType?: string;
   /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
    *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
    *  the shell instead of a new tab" behavior below: it has to be an
@@ -878,7 +885,7 @@ export default function App() {
   const renameDraftRef = useRef("");
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
-  const deliveryCache = useRef(new Map<string, boolean>());
+  const deliveryCache = useRef(new Map<string, PaneDelivery>());
   const askedPlacer = useRef(createAskedPlacer());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
@@ -976,6 +983,24 @@ export default function App() {
     noticeFlusherRef.current?.state(paneId, state);
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
+
+  // Tell the host when an agent pane appears, changes state or goes away, so it can tell the add-ons that read its team.
+  // One call per actual change (the diff is empty otherwise); no polling and no timer.
+  const [endedPanes, setEndedPanes] = useState<ReadonlySet<string>>(() => new Set());
+  const statusSentRef = useRef<Map<string, AgentPaneRow>>(new Map());
+  const statusChainRef = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => {
+    const rows = agentPaneRows(
+      windows.map((w) => ({ team: w.team, leafIds: leaves(w.root) })),
+      panes,
+      paneStatus,
+      endedPanes,
+    );
+    // One run at a time, each diffed against what the host has accepted, so a failed call is repeated, never dropped.
+    statusChainRef.current = statusChainRef.current.then(() =>
+      syncAgentStatus(statusSentRef.current, rows, Date.now(), (r) => invoke("addon_agent_status", r), appLog),
+    );
+  }, [windows, panes, paneStatus, endedPanes]);
 
   // Cell size in CSS px. The ref is for snapping a divider drag to whole
   // terminal rows/cols — read once at drag-start, doesn't need a re-render
@@ -1433,26 +1458,27 @@ export default function App() {
       const cmdPrefix = type ? freshCmdPrefixFor.get(type) : undefined;
       const promptArg = type ? freshPromptArgFor.get(type) : undefined;
       const modelArg = type ? freshModelArgFor.get(type) : undefined;
-      // `native` = "this (type, project) actually self-delivers agmsg
-      // messages" — asked from agmsg's own delivery.sh status (mode derived
-      // from the project's real hooks file), NOT a static type.conf flag.
-      // A static flag can't see per-project setup or advanced opt-in paths
-      // (e.g. codex's app-server bridge "monitor" mode is disabled by
-      // default per type.conf but can be turned on per-project). When it's
-      // NOT self-delivering, the app's PTY stdin-inject universal monitor is
-      // this pane's only way to receive agmsg messages.
-      let monitors = false;
+      // How this (type, project) receives agmsg messages — asked from agmsg's own
+      // delivery.sh status (mode derived from the project's real hooks file and
+      // from agmsgd), NOT a static type.conf flag. A static flag can't see
+      // per-project setup or advanced opt-in paths (e.g. codex's app-server
+      // bridge "monitor" mode is disabled by default per type.conf but can be
+      // turned on per-project). Only when nothing else delivers ("app") is the
+      // app's PTY stdin-inject this pane's way to receive agmsg messages; with
+      // agmsgd or the CLI's own monitor delivering, typing a notice too would
+      // deliver everything twice.
+      let delivery: PaneDelivery = "app";
       // An agent an add-on starts is a fresh folder under ~/agmsg-agents, set up the same way every time for a
       // type, so its answer is asked of agmsg once per type and spawn options for this run of the app (the
       // second chess player does not ask again). An agent added by hand is always asked.
       const deliveryKey = fromAddon && type ? `${type}|${options.join(" ")}` : null;
       if (deliveryKey && deliveryCache.current.has(deliveryKey)) {
-        monitors = deliveryCache.current.get(deliveryKey)!;
+        delivery = deliveryCache.current.get(deliveryKey)!;
       } else if (type && m.project) {
         try {
           const mode = await invoke<string>("agmsg_delivery_mode", { agentType: type, project: m.project });
-          monitors = mode === "monitor" || mode === "both";
-          if (deliveryKey) deliveryCache.current.set(deliveryKey, monitors);
+          delivery = deliveryFromMode(mode);
+          if (deliveryKey) deliveryCache.current.set(deliveryKey, delivery);
         } catch (err) {
           console.error(err);
         }
@@ -1471,8 +1497,10 @@ export default function App() {
             cmd: cli,
             args: agentCliArgs(options, modelArg, fromAddon?.model, fromAddon?.effortArgs, actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg, fromAddon?.team ?? team)),
             cwd: m.project || undefined,
-            native: monitors,
+            native: !appTypesInto(delivery),
+            delivery,
             agentKey: fromAddon?.key,
+            agentType: type,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
@@ -1542,6 +1570,7 @@ export default function App() {
 
   useEffect(() => {
     const p = listen<{ id: string }>("pty-exit", (e) => {
+      setEndedPanes((current) => (current.has(e.payload.id) ? current : new Set(current).add(e.payload.id)));
       setPaneStatus((current) => {
         if (!(e.payload.id in current)) return current;
         const next = { ...current };
@@ -2914,6 +2943,7 @@ export default function App() {
               actionError={openRequests.actionError}
               onClearAction={openRequests.clearActionError}
               notice={openRequests.view?.notice}
+              noticeCode={openRequests.view?.noticeCode}
               truncated={openRequests.view?.truncated}
             />
           )}
@@ -3042,16 +3072,14 @@ export default function App() {
                     >
                       {p.label}
                     </button>
-                    <PulseDot
-                      periodMs={2200}
-                      className={p.native ? "monitor-dot native" : "monitor-dot app"}
-                    >
-                      <span className="monitor-tip">
-                        {p.native
-                          ? t("pane.monitorTip.native")
-                          : t("pane.monitorTip.app")}
-                      </span>
-                    </PulseDot>
+                    {(() => {
+                      const dot = deliveryDot(p);
+                      return dot ? (
+                        <span className={dot.className}>
+                          <span className="monitor-tip">{t(dot.tipKey)}</span>
+                        </span>
+                      ) : null;
+                    })()}
                     <button
                       className="pane-header-close"
                       onClick={() => setModal({ kind: "closePane", paneId: p.id })}
