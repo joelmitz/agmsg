@@ -33,6 +33,7 @@ poke_with() {   # <fixture name>
 }
 
 @test "agy manifest declares the box recognition and the refuse list" {
+  skip "fork 独自の agy 機構。upstream 1.7.4 同期で agy は上流優先とし、type.conf/channel 登録を上流へ寄せたため休止中(廃止または再統合の判断待ち)"
   [ "$MARKER" = ">" ]
   [ "$BOXED" = yes ]
   [ -n "$REFUSE" ]
@@ -58,12 +59,14 @@ poke_with() {   # <fixture name>
 }
 
 @test "agy permission screen: refuses with its own code 16, nothing typed" {
+  skip "fork 独自の agy 機構。upstream 1.7.4 同期で agy は上流優先とし、type.conf/channel 登録を上流へ寄せたため休止中(廃止または再統合の判断待ち)"
   run poke_with perm
   [ "$status" -eq 16 ]
   [ ! -s "$POKE_LOG" ]
 }
 
 @test "regression: without the new guards the permission screen is refused only by accident (14), and 16 is not reachable" {
+  skip "fork 独自の agy 機構。upstream 1.7.4 同期で agy は上流優先とし、type.conf/channel 登録を上流へ寄せたため休止中(廃止または再統合の判断待ち)"
   SCREEN="$FIX/perm.ansi"
   run agmsg_safe_poke pane-1 "text" "$MARKER" "$BOXED" t a
   [ "$status" -eq 14 ]

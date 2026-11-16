@@ -20,8 +20,8 @@ import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
-import { createAntigravityObserveChannel } from "./channels/antigravity-observe.mjs";
-import { createAntigravityNudgeChannel } from "./channels/antigravity-nudge.mjs";
+import { createTerminalPokeChannel } from "./channels/terminal-poke.mjs";
+import { ensureTerminalPokeChannelSchema } from "./channels/terminal-poke-store.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
 
@@ -31,6 +31,7 @@ export async function prepareClaimWithCodexSchema(prepareClaim) {
   const prepared = await prepareClaim();
   ensureCodexChannelSchema(prepared.db);
   ensureClaudeCodeChannelSchema(prepared.db);
+  ensureTerminalPokeChannelSchema(prepared.db);
   return prepared;
 }
 
@@ -40,11 +41,7 @@ export function createDefaultChannels({ db, installRoot, expectedOpGen }) {
   return [
     createCodexQueueChannel({ db, installRoot, expectedOpGen }),
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
-    // Observation only and off unless run/observe-antigravity exists.
-    createAntigravityObserveChannel({ db, installRoot }),
-    // Off unless run/agmsgd-antigravity-delivery exists; dry-run unless
-    // run/agmsgd-antigravity-live exists too.
-    createAntigravityNudgeChannel({ db, installRoot }),
+    createTerminalPokeChannel({ db, installRoot, expectedOpGen }),
   ];
 }
 
@@ -244,7 +241,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
       // What the channels last observed about their seats. Held in memory, so
       // this is the only place it can be read.
       onSeats: async () => {
-        const out = { codex: { polled: false, seats: [] }, claude_code: { polled: false, seats: [] } };
+        const out = { codex: { polled: false, seats: [] }, claude_code: { polled: false, seats: [] }, terminal_poke: { polled: false, seats: [] } };
         for (const hook of channelHooks) {
           if (typeof hook.seats !== 'function' || !out[hook.seatKind]) continue;
           out[hook.seatKind] = hook.seats();
