@@ -44,6 +44,7 @@ _reads() { grep -c '^tmux \[capture-pane\]' "$ARGV_LOG" || true; }
 _typed() { grep -cE '^tmux \[(send-keys|paste-buffer|load-buffer|set-buffer)' "$ARGV_LOG" || true; }
 
 @test "poke.sh: an agy permission screen exits 16, types nothing, and is not retried" {
+  skip "fork 独自の agy 機構。upstream 1.7.4 同期で agy は上流優先とし、type.conf/channel 登録を上流へ寄せたため休止中(廃止または再統合の判断待ち)"
   _fake_tmux_screen "$FIX/perm.ansi"
   run bash "$SCRIPTS/poke.sh" testteam alice --retries 2 --retry-delay 0 "hello"
   [ "$status" -eq 16 ] || { echo "status=$status output=$output"; false; }
