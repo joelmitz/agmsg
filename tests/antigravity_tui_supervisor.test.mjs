@@ -5,7 +5,6 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
-import { isolatedEnv } from './helpers/isolated-env.mjs';
 
 const supervisor = new URL('../scripts/drivers/types/antigravity/antigravity-tui-supervisor.py', import.meta.url).pathname;
 const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
@@ -14,7 +13,7 @@ const agyScreenFixture = new URL('./fixtures/agy-1.1.27-screen-transcripts.json'
 function runPython(source) {
   const result = spawnSync('python3', ['-c', source], {
     encoding: 'utf8',
-    env: isolatedEnv({ PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' }),
+    env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/agmsg-pycache' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
@@ -303,7 +302,7 @@ assert notice.getvalue().count('resume when the empty input prompt returns') == 
 `);
 });
 
-test('regular input automatically recovers on stable idle and non-idle resets the stable period', () => {
+test('normal input auto-resumes only after a stable idle following non-idle', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -322,7 +321,7 @@ s.injection_ready = lambda: ready['value']
 now = {'value': 10.0}
 module.time.monotonic = lambda: now['value']
 s.update_human_input_state()
-assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
+assert s.state['humanInputActive'] is True, 'an old idle alone does not clear it'
 ready['value'] = False
 s.update_human_input_state()
 assert s.state['humanInputSawNonIdle'] is True
@@ -357,41 +356,7 @@ assert s.state['humanInputActive'] is True, 'does not clear while a batch is unr
 `);
 });
 
-test('resumes automatic delivery on stable idle after human input without observing non-idle', () => {
-  runPython(`
-import importlib.util
-spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-s = module.Supervisor.__new__(module.Supervisor)
-s.HUMAN_IDLE_STABLE_SECONDS = 0.6
-s.state = {'batch': None, 'manualResumeRequired': False, 'humanInputActive': False,
-           'humanInputSawNonIdle': False, 'durableAttention': False,
-           'supervisorPhase': 'WAITING_FOR_IDLE'}
-s.human_input_restart_recovery = False
-s.human_idle_since = None
-s.save = lambda: None
-s.violations = type('Violations', (), {'exists': lambda self: False})()
-s.injection_ready = lambda: True
-now = {'value': 30.0}
-module.time.monotonic = lambda: now['value']
-s.pause_for_human_input()
-assert s.state['humanInputActive'] is True
-assert s.state['humanInputSawNonIdle'] is False
-s.update_human_input_state()
-assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
-now['value'] += 0.59
-s.update_human_input_state()
-assert s.state['humanInputActive'] is True, 'does not clear before the stable period elapses'
-now['value'] += 0.02
-s.update_human_input_state()
-assert s.state['humanInputActive'] is False
-assert s.state['humanInputSawNonIdle'] is False
-assert s.human_input_restart_recovery is False
-`);
-});
-
-test('restart recovery requires only stable idle of the new screen and does not clear durable attention', () => {
+test('restart recovery requires only a stable idle on the new screen, and does not clear the durable state', () => {
   runPython(`
 import importlib.util
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
@@ -484,42 +449,6 @@ assert s.permission_input_ready(), 'recognized as the permission UI even when a 
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\n▸ Generating...\\r\\n>\\r\\n────────────────────────────────\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), 'must not allow a synthetic display with a normal screen between nav and footer'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'allows structured permission screen'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'allows permission screen on agy 1.1.28 and later'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('received body: Requesting permission for: Run this command? > 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
-assert not s.permission_input_ready(), 'does not misidentify received message body containing current text as a permission screen'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert not s.permission_input_ready(), 'does not allow current permission screen lacking the Yes option'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'recognizes permission screen when cursor moved to second option'
-diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, 'reports yes position even when cursor is on the second option'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'recognizes permission screen when cursor moved to third option'
-diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, 'reports yes position even when cursor is on the third option'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'recognizes permission screen with current wording when cursor is on second option'
-diagnostic = s.permission_screen_diagnostic()
-assert "'yes': []" not in diagnostic, 'reports yes position with current wording even when cursor is on second option'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nRun this command?\\r\\n  1. Yes\\r\\n  2. Yes, and always allow in this conversation\\r\\n> 3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert s.permission_input_ready(), 'recognizes permission screen with current wording when cursor is on third option'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('received body: Requesting permission for: Do you want to proceed? 1. Yes\\r\\n>\\r\\n? for shortcuts  Gemini 3.8 Flash · high'.encode())
-assert not s.permission_input_ready(), 'does not misidentify received message body with Yes phrase but no cursor as a permission screen'
-s.screen = module.TerminalScreen(24, 120)
-s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 2. Yes, and always allow in this conversation\\r\\n  3. Yes, and persist this permission\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
-assert not s.permission_input_ready(), 'does not allow screen lacking option 1 with only options 2 and 3 present'
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('> 1. Yes\\r\\nRequesting permission for:\\r\\nDo you want to proceed?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), 'must not allow a synthetic display whose required-element order differs from the permission modal'
@@ -629,25 +558,7 @@ assert events == ['child-partial-redraw','allowed'], events
 `);
 });
 
-test('permission snapshot fallback is consumed by only the next single input', () => {
-  runPython(`
-import importlib.util
-from types import SimpleNamespace
-spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-s=module.Supervisor.__new__(module.Supervisor)
-s.screen=SimpleNamespace(ready=False)
-s.permission_screen_snapshot=SimpleNamespace(ready=True)
-s.permission_snapshot_fallback_used=False
-s.permission_input_ready=lambda: s.screen.ready
-assert s.permission_input_ready_with_snapshot(False)
-assert s.permission_snapshot_fallback_used
-assert not s.permission_input_ready_with_snapshot(False), 'snapshot is not carried over to the second input'
-`);
-});
-
-test('displays safe recovery instructions on read-denied stop', () => {
+test('a read-denied stop shows safe recovery guidance', () => {
   runPython(`
 import contextlib
 import importlib.util
@@ -668,64 +579,7 @@ assert s.state['durableAttention'] is True
 `);
 });
 
-test('does not emit human-facing notices to stderr while child PTY is alive', () => {
-  runPython(`
-import contextlib
-import importlib.util
-import io
-spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-s = module.Supervisor.__new__(module.Supervisor)
-s.master = 99
-s.pending_notices = []
-s.save = lambda: None
-s.state = {'manualResumeRequired': False, 'humanInputActive': False, 'humanInputSawNonIdle': False,
-           'supervisorPhase': 'WAITING_FOR_IDLE', 'batch': None, 'durableAttention': False}
-s.human_idle_since = None
-s.stopping = False
-notice = io.StringIO()
-with contextlib.redirect_stderr(notice):
-    s.pause_for_human_input()
-    s.allow_permission_input()
-    s.fail('detected a mark-read attempt through the regular inbox')
-assert notice.getvalue() == ''
-joined = '\\n'.join(s.pending_notices)
-assert 'Automatic delivery is paused' in joined
-assert 'Relayed human input to the permission UI' in joined
-assert 'stopping without ack' in joined
-assert s.stopping is True
-`);
-});
-
-test('flushes pending notices to stderr after close', () => {
-  runPython(`
-import contextlib
-import importlib.util
-import io
-spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-s = module.Supervisor.__new__(module.Supervisor)
-s.master = 99
-s.old = None
-s.child = None
-s.state = {'batch': {'id': 'keep'}}
-s.pending_notices = []
-notice = io.StringIO()
-with contextlib.redirect_stderr(notice):
-    s.notice('\\r\\n[agmsg] Resumed automatic delivery after confirming the empty input prompt')
-    s.notice('\\r\\nstop reason; stopping without ack')
-    assert notice.getvalue() == ''
-    s.close()
-text = notice.getvalue()
-assert 'Resumed automatic delivery' in text
-assert 'stopping without ack' in text
-assert s.pending_notices == []
-`);
-});
-
-test('reset-guard clears violations only when stopped and without a batch', () => {
+test('reset-guard clears the violation only while stopped and with no batch', () => {
   runPython(`
 import importlib.util
 import json
@@ -1019,11 +873,12 @@ process.stdin.on('data', chunk => {
 });
 `);
   fs.writeFileSync(fake, `#!/bin/sh\nexec '${process.execPath}' '${path.join(dir, 'fake.mjs')}'\n`, { mode: 0o700 });
-  const env = isolatedEnv({
+  const env = {
+    ...process.env,
     AGMSG_STORAGE_DRIVER: 'sqlite',
     AGMSG_STORAGE_PATH: path.join(install, 'db'),
     AGMSG_CONFIG: path.join(dir, 'config.json'),
-  });
+  };
   const run = (script, args) => {
     const result = spawnSync('bash', [path.join(install, 'scripts', script), ...args], { env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr + result.stdout);
@@ -1088,7 +943,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
     const stateFile = fs.readdirSync(path.join(install, 'run')).find(name => name.endsWith('.state.json'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
     assert.match(output, /AGMSG_RECEIVED:/);
-    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
+    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
     child.stdin.write('D');
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).humanInputActive === true);
     assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty paused/);
@@ -1097,7 +952,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
     run('send.sh', ['fixture', 'sender', 'worker', 'RENDER_THEN_RECEIPT']);
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.messages?.some(message => message.body === 'RENDER_THEN_RECEIPT'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
-    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
+    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
     run('send.sh', ['fixture', 'sender', 'worker', 'PERMISSION_THEN_RECEIPT']);
     await waitFor(() => output.includes('Requesting permission for:'));
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch?.phase === 'sent');
@@ -1167,7 +1022,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
       spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
       await waitFor(() => replay.exitCode !== null);
     }
-    assert.equal(spawnSync('bash', ['-c', `source '${install}/scripts/lib/storage.sh'; agmsg_storage_load; storage_list_unread fixture worker`], { env, encoding: 'utf8' }).stdout.trim(), '');
+    assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
     const afterReplay = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
     assert.equal(afterReplay.humanInputActive, false, "an explicit replay clears the previous session's normal-input pause");
     assert.equal(afterReplay.humanInputSawNonIdle, false);
@@ -1193,11 +1048,12 @@ test('agy-tui passes only the arguments received after -- through unchanged to t
   fs.mkdirSync(install);
   fs.mkdirSync(project);
   fs.cpSync(path.join(repo, 'scripts'), path.join(install, 'scripts'), { recursive: true });
-  const env = isolatedEnv({
+  const env = {
+    ...process.env,
     AGMSG_STORAGE_DRIVER: 'sqlite',
     AGMSG_STORAGE_PATH: path.join(install, 'db'),
     AGMSG_CONFIG: path.join(dir, 'config.json'),
-  });
+  };
   const run = (script, args) => {
     const result = spawnSync('bash', [path.join(install, 'scripts', script), ...args], { env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr + result.stdout);
@@ -1297,7 +1153,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
   }
 });
 
-test('claim rejection displays holding supervisor pid and stop command', () => {
+test('a claim refusal shows the pid of the holding supervisor and the stop command', () => {
   runPython(`
 import importlib.util, json, os, tempfile
 from pathlib import Path

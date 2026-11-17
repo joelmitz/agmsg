@@ -5,7 +5,7 @@ The supervisor and its headless sibling use the same process identity contract
 on Linux and macOS. Windows remains refused by the shell wrapper because it
 does not provide the POSIX PTY and advisory-lock primitives used here.
 """
-import argparse, codecs, copy, errno, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
+import argparse, codecs, errno, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -358,7 +358,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'read-reservation.{key}.json'; self.legacy_reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.pending_notices=[]; self.screen=None; self.permission_screen_snapshot=None; self.permission_snapshot_fallback_used=False; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.last_output=time.monotonic(); self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.last_output=time.monotonic(); self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -369,22 +369,11 @@ class Supervisor:
         self.resume_requested=True
     def request_resize(self, _signum, _frame):
         self.resize_requested=True
-    def notice(self, message):
-        # Do not write to the same TTY while the child PTY is alive. Flush after close().
-        if getattr(self,'master',None) is not None:
-            if getattr(self,'pending_notices',None) is None: self.pending_notices=[]
-            self.pending_notices.append(message)
-            return
-        print(message,file=sys.stderr)
-    def flush_notices(self):
-        pending=getattr(self,'pending_notices',None) or []
-        self.pending_notices=[]
-        for message in pending: print(message,file=sys.stderr)
     def pause_for_human_input(self):
         already_paused=self.state.get('humanInputActive',False)
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=False; self.human_idle_since=None; self.save()
         if not already_paused:
-            self.notice('\r\n[agmsg] Automatic delivery is paused while a person is entering input. It will resume when the empty input prompt returns')
+            print('\r\n[agmsg] Automatic delivery is paused while a person is entering input. It will resume when the empty input prompt returns',file=sys.stderr)
     def permission_input_rejection_reason(self):
         """Return None for the permission UI, otherwise a fail-closed diagnostic reason."""
         screen=getattr(self,'screen',None)
@@ -404,16 +393,10 @@ class Supervisor:
             physical_budget=max(16,(1024+screen.cols-1)//screen.cols)
             start=max(0,nav[0]-physical_budget)
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
-            request_position=modal.find('Requesting permission for:')
-            # Match the text of choice 1 without depending on the `>` cursor.
-            yes_position=modal.find('1. Yes')
-            if request_position<0 or yes_position<0:return 'permission-body-incomplete'
-            questions=('Do you want to proceed?','Run this command?')
-            question_positions=[modal.find(token,request_position+1) for token in questions]
-            question_position=next((position for position in question_positions
-                                    if request_position<position<yes_position),-1)
-            if question_position<0:return 'permission-body-incomplete'
-            if not request_position<question_position<yes_position:return 'permission-body-order'
+            required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
+            positions=[modal.find(token) for token in required]
+            if any(position<0 for position in positions):return 'permission-body-incomplete'
+            if positions!=sorted(positions):return 'permission-body-order'
             return None
         if screen.tail_with_prefix('↑/↓ Navigate · enter Confirm'):
             tail=visible[-8:]
@@ -429,8 +412,7 @@ class Supervisor:
         tokens={
             'request':'Requesting permission for:',
             'proceed':'Do you want to proceed?',
-            'run_command':'Run this command?',
-            'yes':'1. Yes',
+            'yes':'> 1. Yes',
             'navigate':'Navigate',
             'amend':'Amend',
             'footer':'esc to cancel',
@@ -455,17 +437,7 @@ class Supervisor:
     def allow_permission_input(self):
         # The current batch waits for its receipt; preserve durable pause and set only a temporary input pause.
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
-        self.notice('\r\n[agmsg] Relayed human input to the permission UI. It will resume after confirmation when the empty input prompt returns')
-    def permission_input_ready_with_snapshot(self, live_ready):
-        """Recheck the prior structured screen once after a partial redraw."""
-        if live_ready or self.permission_screen_snapshot is None or self.permission_snapshot_fallback_used:
-            return live_ready
-        current_screen=self.screen
-        self.screen=self.permission_screen_snapshot
-        try: ready=self.permission_input_ready()
-        finally: self.screen=current_screen
-        if ready: self.permission_snapshot_fallback_used=True
-        return ready
+        print('\r\n[agmsg] Relayed human input to the permission UI. It will resume after confirmation when the empty input prompt returns',file=sys.stderr)
     @staticmethod
     def read_winsize(fd):
         return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -514,7 +486,7 @@ class Supervisor:
         message=f'\r\n{why}; stopping without ack'
         if why=='detected a mark-read attempt through the regular inbox':
             message+='\nRecovery: clear the input field, then run `agy-tui reset-guard --project <project> --team <team> --name <role>`'
-        self.notice(message); self.stopping=True
+        print(message,file=sys.stderr); self.stopping=True
     def check_guard(self):
         reservation=json.loads(self.reservation.read_text())
         if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('reservation ownership mismatch')
@@ -637,8 +609,6 @@ class Supervisor:
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
-        self.permission_screen_snapshot=None
-        self.permission_snapshot_fallback_used=False
         self.permission_raw_window=''
         if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
@@ -656,7 +626,7 @@ class Supervisor:
         self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'
         if pause_after_ack:
             self.human_input_seen=True; self.state['manualResumeRequired']=True
-            self.notice('\r\n[agmsg] Stopped subsequent automatic delivery because the message body contained an idle-screen signature. Resume: $agmsg resume')
+            print('\r\n[agmsg] Stopped subsequent automatic delivery because the message body contained an idle-screen signature. Resume: $agmsg resume',file=sys.stderr)
         self.save()
     def maybe_poll(self):
         if time.monotonic()-self.last_poll<self.a.poll: return
@@ -712,14 +682,15 @@ class Supervisor:
             if not self.human_input_restart_recovery and not self.state.get('humanInputSawNonIdle'):
                 self.state['humanInputSawNonIdle']=True; self.save()
             return
-        # A stable empty prompt proves human input is done even if a non-idle frame was missed.
+        if not self.human_input_restart_recovery and not self.state.get('humanInputSawNonIdle'):
+            self.human_idle_since=None; return
         now=time.monotonic()
         if self.human_idle_since is None:
             self.human_idle_since=now; return
         if now-self.human_idle_since<self.HUMAN_IDLE_STABLE_SECONDS:return
         self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False
         self.human_input_restart_recovery=False; self.human_idle_since=None; self.save()
-        self.notice('\r\n[agmsg] Resumed automatic delivery after confirming the empty input prompt')
+        print('\r\n[agmsg] Resumed automatic delivery after confirming the empty input prompt',file=sys.stderr)
     def loop(self):
         while not self.stopping:
             if self.resize_requested:
@@ -728,7 +699,7 @@ class Supervisor:
                 self.resume_requested=False
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('refused resume request during a delivery turn'); continue
                 self.state['manualResumeRequired']=False; self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False; self.human_input_restart_recovery=False; self.human_idle_since=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
-                self.notice('\r\nAccepted monitor resume request. Delivery will continue after the empty input prompt is confirmed')
+                print('\r\nAccepted monitor resume request. Delivery will continue after the empty input prompt is confirmed',file=sys.stderr)
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
@@ -748,11 +719,6 @@ class Supervisor:
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
                     self.permission_raw_window=(getattr(self,'permission_raw_window','')+text)[-65536:]
-                    if (self.permission_input_ready()
-                            and hasattr(self.screen,'tail_with_prefix')
-                            and self.screen.tail_with_prefix('esc to cancel')):
-                        self.permission_screen_snapshot=copy.deepcopy(self.screen)
-                        self.permission_snapshot_fallback_used=False
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
                         if self.batch_contains_receipt(b): self.fail('refusing to ack because the receipt appears in the delivered body')
@@ -762,11 +728,8 @@ class Supervisor:
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
-                permission_ready=(permission_before_read or self.permission_input_ready())
-                if (not permission_ready and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'):
-                    permission_ready=self.permission_input_ready_with_snapshot(permission_ready)
                 if (self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
-                        and permission_ready): self.allow_permission_input()
+                        and (permission_before_read or self.permission_input_ready())): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     reason=self.permission_input_rejection_reason()
                     diagnostic=self.permission_screen_diagnostic()
@@ -787,27 +750,24 @@ class Supervisor:
         if (self.state.get('batch') or {}).get('phase')=='completed': self.ack()
         self.launch(); self.loop()
     def close(self):
-        try:
-            if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
-            if self.child:
-                try: os.write(self.master,b'\x04')
-                except (OSError,TypeError): pass
-                deadline=time.monotonic()+5
-                while time.monotonic()<deadline:
-                    try:
-                        if proc_start(self.child)!=self.state.get('childStart'): break
-                    except (FileNotFoundError,ProcessLookupError): break
-                    time.sleep(0.05)
+        if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
+        if self.child:
+            try: os.write(self.master,b'\x04')
+            except (OSError,TypeError): pass
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
                 try:
-                    if proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGHUP)
-                except (FileNotFoundError,ProcessLookupError): pass
-            if not self.state.get('batch'):
-                try:
-                    r=json.loads(self.reservation.read_text())
-                    if r['owner']==self.owner and r['start']==self.start and self.actas.read_text().strip()==self.owner: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
-                except Exception: pass
-        finally:
-            self.flush_notices()
+                    if proc_start(self.child)!=self.state.get('childStart'): break
+                except (FileNotFoundError,ProcessLookupError): break
+                time.sleep(0.05)
+            try:
+                if proc_start(self.child)==self.state.get('childStart'): os.kill(self.child,signal.SIGHUP)
+            except (FileNotFoundError,ProcessLookupError): pass
+        if not self.state.get('batch'):
+            try:
+                r=json.loads(self.reservation.read_text())
+                if r['owner']==self.owner and r['start']==self.start and self.actas.read_text().strip()==self.owner: self.reservation.unlink(); self.actas.unlink(missing_ok=True)
+            except Exception: pass
 
 def recover(a):
     s=Supervisor(a)
