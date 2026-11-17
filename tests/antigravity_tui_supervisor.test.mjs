@@ -437,7 +437,7 @@ assert 'RAW_WINDOW_SECRET_MARKER' not in diagnostic, 'must not include the raw-o
 s.screen = module.TerminalScreen(40, 120)
 s.screen.feed(('Command\\r\\n' +
     'Requesting permission for:\\r\\n' +
-    '   ~/.agents/skills/agmsg/scripts/whoami.sh "/home/joel/projects/babelbiblenet-v2"\\r\\n' +
+    '   ~/.agents/skills/agmsg/scripts/whoami.sh "/home/user/projects/sample-workspace"\\r\\n' +
     'Do you want to proceed?\\r\\n' +
     '> 1. Yes\\r\\n' +
     "  2. Yes, and always allow in this conversation for commands that start with '~/.agents/skills/agmsg/scripts/whoami.sh'\\r\\n" +
