@@ -148,35 +148,10 @@ A missing bridge in the moment after launch is not a failure. Do not read `run/`
 state, threads or metadata directly to infer or rewrite a seat; when several
 threads make the seat ambiguous, stop and report rather than adopting a guess.
 
-### 4. The Antigravity TUI supervisor
-
-`--update` refreshes the `~/.agents/bin/agy-tui` shim. That is not the same as
-switching over the Python supervisor and its child `agy` that were started
-before the update — those keep running the old code.
-
-Stop the TUI that was running, relaunch it from the updated shim, and check from
-another shell:
-
-```bash
-agy-tui --team <team> --name <role>
-agy-tui status --project "<project>" --team <team> --name <role>
-```
-
-- Confirm `command -v agy-tui` resolves to `~/.agents/bin/agy-tui` first.
-- Expect `running`, or a `paused` whose stated reason is a safety hold.
-- On an unresolved batch or `NEEDS_ATTENTION`, do **not** run `ack`, `replay` or
-  `reset-guard` automatically. Report the batch ID and state as they stand.
-- While the supervisor owns the identity, do not run a bare inbox read against
-  it; use `agy-tui status` (or `agy-tui diagnose`, which is read-only) instead.
-- On a host that does not use Antigravity, or where the TUI is intentionally
-  stopped, do not start it — and do not read the stopped state as a failed
-  update.
-
 ## After the update
 
 - Verify what you restarted, rather than assuming the restart took:
-  `remote.sh status <team>`, `delivery.sh status <type> <project>`,
-  `agy-tui status`.
+  `remote.sh status <team>`, `delivery.sh status <type> <project>`.
 - Re-run `delivery.sh set <mode> <type> <project>` in any project whose
   SessionStart/Stop hook entries were in fact dropped.
 - When upgrading more than one machine, do them one at a time and confirm the

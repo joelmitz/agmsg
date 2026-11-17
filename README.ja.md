@@ -111,7 +111,6 @@ cd agmsg
 ./install.sh              # インタラクティブ（コマンド名を尋ねる、デフォルト: agmsg）
 ./install.sh --cmd m      # カスタムコマンド名で非インタラクティブ
 ./install.sh --agent-type codex       # Codex向けの共有SKILL.mdをインストール
-./install.sh --agent-type antigravity # Antigravity向けの共有SKILL.mdとagy-tuiをインストール
 ./install.sh --agent-type gemini    # Gemini向けのSKILL.mdをインストール
 ./install.sh --agent-type opencode  # OpenCode専用: 共有スキルをOpenCodeテンプレートに設定
 ```
@@ -131,13 +130,7 @@ cd agmsg
 # Codex: monitorを有効化し、表示されたshell functionまたはPATH shimを設定して再起動する。
 # 最初のturnを1回送り、その後bridgeを確認する。
 ~/.agents/skills/<cmd>/scripts/delivery.sh status codex <project>
-
-# Antigravity TUI: 同じroleをTUI supervisor経由で起動、確認する。
-agy-tui --team <team> --name <role>
-agy-tui status --project <project> --team <team> --name <role>
 ```
-
-Antigravity TUI supervisorがroleを所有している間は `agy-tui status` を使い、そのroleに対してbare `$<cmd>`、`inbox.sh`、`check-inbox.sh` を実行しない。
 
 ### Windows: Git Bash
 
