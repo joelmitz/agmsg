@@ -32,22 +32,29 @@ _agmsg_daemon_node_verdict() {   # <pid> <boot-id>
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
-  local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable=""
+  local row state pid boot recorded_start recorded_pid_ns=- ns_select="'-'" ns_columns current_boot process_start started_epoch boot_epoch start_unreliable=""
   [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 0
+  # The executor's pid namespace is read in the same SELECT as the rest of the
+  # owner (one snapshot, so it cannot belong to another owner than the pid and
+  # boot id it is judged with). A database without that column keeps the
+  # SELECT it had; whether the column exists is asked first, and an answer that
+  # cannot be had ends the read as an unreadable record does.
+  ns_columns="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name = 'executor_pid_ns';" 2>/dev/null)" || return 0
+  [ "$ns_columns" = 1 ] && ns_select="COALESCE(o.executor_pid_ns,'-')"
   # One sqlite invocation, read-only, bounded when another writer is busy. A
   # start refusal only explains the present state when it is newer than both the
   # last end and this owner's own claim: a running owner has no last end, so
   # without the claim bound every refusal ever recorded would qualify.
   row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "$_AGMSG_DAEMON_ROOT/run/install.db" "
     SELECT COALESCE(i.desired,'unset'), o.state, COALESCE(o.executor_pid,0),
-      COALESCE(o.executor_boot_id,'-'), COALESCE(o.executor_started_at,'-'),
+      COALESCE(o.executor_boot_id,'-'), COALESCE(o.executor_started_at,'-'), $ns_select,
       replace(replace(replace(COALESCE(
         (SELECT reason FROM daemon_start_attempts WHERE at > MAX(COALESCE(o.last_end_at,''), COALESCE(o.started_at,'')) ORDER BY at DESC, rowid DESC LIMIT 1),
         o.last_end_reason, 'executor unavailable'),char(9),' '),char(10),' '),char(13),' ')
     FROM daemon_owner o CROSS JOIN daemon_intent i;
   " 2>/dev/null)" || return 0
   [ -n "$row" ] || return 0
-  IFS=$'\t' read -r AGMSGD_DESIRED state pid boot recorded_start AGMSGD_REASON <<< "$row"
+  IFS=$'\t' read -r AGMSGD_DESIRED state pid boot recorded_start recorded_pid_ns AGMSGD_REASON <<< "$row"
   AGMSGD_HEALTH=stopped
   [ "$state" = ready ] || { AGMSGD_REASON="$state: $AGMSGD_REASON"; return 0; }
   case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
@@ -140,10 +147,9 @@ agmsg_daemon_read_state() {
   # neither reports nor restarts a daemon that is running. A record without a
   # namespace (written before it was recorded) keeps the checks below.
   if [ "$(uname -s)" = Linux ]; then
-    local recorded_pid_ns="" own_pid_ns=""
-    recorded_pid_ns="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" 'SELECT executor_pid_ns FROM daemon_owner;' 2>/dev/null)" || recorded_pid_ns=""
+    local own_pid_ns=""
     own_pid_ns="$(readlink "$_AGMSG_PID_NS_LINK" 2>/dev/null)" || own_pid_ns=""
-    if [ -n "$recorded_pid_ns" ] && [ -n "$own_pid_ns" ] && [ "$recorded_pid_ns" != "$own_pid_ns" ]; then
+    if [ "$recorded_pid_ns" != - ] && [ -n "$own_pid_ns" ] && [ "$recorded_pid_ns" != "$own_pid_ns" ]; then
       AGMSGD_HEALTH=unchecked
       AGMSGD_REASON="the executor runs in another pid namespace (a sandbox); its liveness cannot be read from here"
       return 0
