@@ -54,6 +54,14 @@ agmsg_daemon_read_state() {
     FROM daemon_owner o CROSS JOIN daemon_intent i;
   " 2>/dev/null)" || return 0
   [ -n "$row" ] || return 0
+  # Read without the column, it may have been added (and a new owner recorded
+  # with its namespace) since it was asked about. Columns are only ever added,
+  # so asking again after the SELECT settles it: still absent means the owner
+  # read could not have had one; anything else leaves the state unknown.
+  if [ "$ns_columns" != 1 ]; then
+    ns_columns="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name = 'executor_pid_ns';" 2>/dev/null)" || return 0
+    [ "$ns_columns" = 0 ] || return 0
+  fi
   IFS=$'\t' read -r AGMSGD_DESIRED state pid boot recorded_start recorded_pid_ns AGMSGD_REASON <<< "$row"
   AGMSGD_HEALTH=stopped
   [ "$state" = ready ] || { AGMSGD_REASON="$state: $AGMSGD_REASON"; return 0; }

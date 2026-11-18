@@ -667,6 +667,39 @@ SHIM
   [ "$output" = stopped ]
 }
 
+@test "a column added to daemon_owner between the column check and the owner read is not read as a record without a namespace" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
+  local boot gone real_sqlite
+  boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id)"
+  gone="$(bash -c 'echo $$')"
+  real_sqlite="$(command -v sqlite3)"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$gone, executor_boot_id='$boot', executor_pid_ns='pid:[4026500000]', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  ln -s 'pid:[4026500001]' "$BATS_TEST_TMPDIR/other-ns"
+  # The migration landing in that window: the first column check still sees an
+  # older database (answers 0), the later ones see the real one.
+  mkdir "$BATS_TEST_TMPDIR/shim"
+  cat > "$BATS_TEST_TMPDIR/shim/sqlite3" <<SHIM
+#!/usr/bin/env bash
+case "\${*: -1}" in
+  *pragma_table_info*)
+    if [ ! -e "$BATS_TEST_TMPDIR/first-check-done" ]; then : > "$BATS_TEST_TMPDIR/first-check-done"; echo 0; exit 0; fi ;;
+esac
+exec "$real_sqlite" "\$@"
+SHIM
+  chmod +x "$BATS_TEST_TMPDIR/shim/sqlite3"
+  local gen_before
+  gen_before="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
+  run bash -c 'PATH="$BATS_TEST_TMPDIR/shim:$PATH"; source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$status" -eq 0 ]
+  [ "$output" = unknown ]
+  rm "$BATS_TEST_TMPDIR/first-check-done"
+  run bash -c 'PATH="$BATS_TEST_TMPDIR/shim:$PATH"; source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_warn_if_stopped 2>&1; agmsg_daemon_warn_if_stopped always 2>&1'
+  [ "$status" -eq 0 ]
+  assert_lacks 'agmsg daemon start'
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$gen_before" ]
+}
+
 @test "the daemon schema adds the executor's pid namespace to an older daemon_owner" {
   # The schema as it was before the column: the same file without its line.
   grep -v 'executor_pid_ns' "$SCRIPTS/daemon/schema.sql" | sqlite3 "$TEST_SKILL_DIR/run/older.db"
