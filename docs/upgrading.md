@@ -210,8 +210,10 @@ rather than adopting a guess.
 cannot inspect the daemon process, including when it runs in another pid
 namespace. The daemon may still be running. Do not treat this as stopped and do
 not run `agmsg delivery agmsgd`, `agmsg daemon start`, or `agmsg daemon stop`
-here. Check delivery from an environment that can inspect the daemon; keep the
-project's configured delivery unchanged until then.
+here. Do not run `agmsg daemon enable`, `agmsg daemon disable`, or
+`install.sh --update` either: those commands manage the registered service or
+replace its files. Continue from an environment that can inspect the daemon;
+keep the project's configured delivery unchanged until then.
 
 ## After the update
 

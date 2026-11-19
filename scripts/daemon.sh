@@ -420,6 +420,9 @@ EOF
 # Leaves a down_notice only when the self-heal attempt itself fails, cleared
 # the moment the unit is next seen running.
 _linux_recover_if_failed() {
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  agmsg_daemon_read_state
+  [ "${AGMSGD_HEALTH:-}" != unchecked ] || return 0
   _systemd_user_usable || return 0
   local unit_path unit_name
   unit_path="$(_systemd_unit_path)"
@@ -822,6 +825,15 @@ _tool_path_restart_hint() {
   echo "agmsg daemon start: the running agmsgd uses the terminal CLI directories it read when it started ('${applied:-none}'); the ones found now ('${TOOL_PATH_RECORDED:-none}') take effect after: agmsg daemon stop, then agmsg daemon start"
 }
 
+_daemon_refuse_if_unchecked() {   # <action>
+  local action="${1:-operate on}"
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  agmsg_daemon_read_state
+  [ "${AGMSGD_HEALTH:-}" = unchecked ] || return 1
+  echo "agmsg daemon $action: agmsgd could not be checked here (${AGMSGD_REASON:-liveness is unavailable}). It may be running; do not enable, start, stop, disable, or update this install here. Check from an environment that can inspect it. Nothing was changed." >&2
+  return 0
+}
+
 cmd_start() {
   local only_gen=""
   case "${1:-}" in
@@ -832,16 +844,9 @@ cmd_start() {
     *) _usage; return 2 ;;
   esac
   _ensure_install_db_schema
-  # A different pid namespace cannot see the recorded executor. Starting in
-  # that case would bump op_gen and can make the live daemon stand down, so
-  # leave the intent and every other start record alone until checked outside
-  # this environment.
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
-  agmsg_daemon_read_state
-  if [ "${AGMSGD_HEALTH:-}" = unchecked ]; then
-    echo "agmsg daemon start: agmsgd could not be checked here (${AGMSGD_REASON:-liveness is unavailable}). It may be running; do not start or stop it here. Check from an environment that can inspect it. Nothing was changed." >&2
-    return 1
-  fi
+  # A start bumps op_gen, which can make an executor in another pid namespace
+  # stand down. Do not do that until this environment can check its liveness.
+  _daemon_refuse_if_unchecked start && return 1
   # Before the "already running" answer below: a running agmsgd picks the
   # record up at its next start (the update path restarts it).
   [ "$(_os)" = windows ] || _record_tool_path
@@ -964,6 +969,7 @@ _request_stop_over_socket() {
 
 cmd_stop() {
   _ensure_install_db_schema
+  _daemon_refuse_if_unchecked stop && return 1
   # Stop takes no operation lock.
   local desired
   desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
@@ -1084,6 +1090,7 @@ _codex_shim_sync() {
 
 cmd_enable() {
   _ensure_install_db_schema
+  _daemon_refuse_if_unchecked enable && return 1
   if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
     echo "agmsg daemon enable: systemd user services are not available here (systemctl --user does not work), so agmsgd cannot be registered to start on its own. Nothing was changed. 'agmsg daemon start' runs it for this session only." >&2
     _path_hint start >&2
@@ -1181,6 +1188,7 @@ _disable_restore_intent() {
 
 cmd_disable() {
   _ensure_install_db_schema
+  _daemon_refuse_if_unchecked disable && return 1
   # The daemon writes stopping -> none into install.db on its way out, so it
   # must stop while no operation holds that database: commit the intent and
   # release the lock first, let the daemon finish, and only then unregister

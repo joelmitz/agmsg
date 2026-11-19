@@ -197,6 +197,34 @@ agmsg_install_pid_gone() {   # <pid>
   return 1
 }
 
+# An updater can run in a different Linux pid namespace than the installed
+# daemon. In that case neither the control socket nor kill -0 can establish
+# that the recorded executor is gone; do not let the update infer a stop and
+# replace scripts underneath a possibly live daemon.
+agmsg_install_daemon_unchecked() {   # <skill_dir>
+  local db="$1/run/install.db" state_lib="$1/scripts/lib/daemon-state.sh" health
+  if [ -r "$state_lib" ]; then
+    health="$(
+      . "$state_lib"
+      agmsg_daemon_read_state
+      printf '%s' "${AGMSGD_HEALTH:-unknown}"
+    )" || health=unknown
+    [ "$health" != unchecked ] || return 0
+    case "$health" in ready|stopped|unverifiable) return 1 ;; esac
+  fi
+  local ns_columns row state recorded_ns current_ns
+  [ "$(uname -s 2>/dev/null)" = Linux ] || return 1
+  [ -f "$db" ] || return 1
+  ns_columns="$(sqlite3 -readonly -cmd '.timeout 1000' "$db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name='executor_pid_ns';" 2>/dev/null)" || return 1
+  [ "$ns_columns" = 1 ] || return 1
+  row="$(sqlite3 -readonly -cmd '.timeout 1000' -separator $'\t' "$db" "SELECT COALESCE(state,''), COALESCE(executor_pid_ns,'') FROM daemon_owner LIMIT 1;" 2>/dev/null)" || return 1
+  IFS=$'\t' read -r state recorded_ns <<< "$row"
+  [ "$state" = ready ] || return 1
+  case "$recorded_ns" in ''|-) return 1 ;; esac
+  current_ns="$(readlink /proc/self/ns/pid 2>/dev/null)" || current_ns=""
+  [ -z "$current_ns" ] || [ "$current_ns" != "$recorded_ns" ]
+}
+
 # Asks a running agmsgd to stop before the update touches any file, and waits
 # until it has gone (or a bound passes), so that in the normal case the old
 # executor has left before the new files are written and the new one starts.
@@ -799,6 +827,10 @@ agmsg_install_operation_begin() {
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
+  if [ "${UPDATE_ONLY:-false}" = true ] && agmsg_install_daemon_unchecked "$SKILL_DIR"; then
+    echo "  ! agmsgd may still be running in another pid namespace; this environment cannot check it. Nothing was updated. Run --update from an environment that can inspect the daemon." >&2
+    return 1
+  fi
   if ! agmsg_install_op_legacy_lock_hold "$SKILL_DIR"; then
     echo "  ! another agmsg install or update is running (it holds the old-layout lock $SKILL_DIR/run/install-op.lock.db); nothing was changed. Run this again after it finishes." >&2
     return 1
@@ -1375,6 +1407,10 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   SKILL_NAME="$(basename "$SKILL_DIR")"
   CMD_NAME="$SKILL_NAME"
+  if agmsg_install_daemon_unchecked "$SKILL_DIR"; then
+    echo "  ! agmsgd may still be running in another pid namespace; this environment cannot check it. Nothing was updated. Run --update from an environment that can inspect the daemon." >&2
+    exit 1
+  fi
   if agmsg_state_name_reserved "$CMD_NAME"; then
     echo "  ! '$CMD_NAME' cannot be an install name: $(agmsg_state_base)/$CMD_NAME is shared by every install. Rename or remove $SKILL_DIR." >&2
     exit 1

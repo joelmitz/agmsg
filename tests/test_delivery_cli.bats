@@ -180,12 +180,12 @@ EOF
   PATH="$TEST_SKILL_DIR/bin:$PATH" run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
   grep -Fq 'agmsgd could not be checked here' <<<"$output"
-  grep -Fq 'do not start or stop it here' <<<"$output"
+  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
   refute grep -Fq 'start it with: agmsg delivery agmsgd' <<<"$output"
   PATH="$TEST_SKILL_DIR/bin:$PATH" run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 1 ]
   grep -Fq 'This project' <<<"$output"
-  grep -Fq 'do not start or stop it here' <<<"$output"
+  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
   [ "$(bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT")" = "$before_mode" ]
   [ ! -e "$TEST_SKILL_DIR/run/delivery-choice" ]

@@ -319,11 +319,62 @@ _assert_start_result() {
   PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$DAEMON" start
   [ "$status" -eq 1 ]
   grep -Fq 'could not be checked here' <<<"$output"
-  grep -Fq 'do not start or stop it here' <<<"$output"
+  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
   [ "$(sqlite3 "$db" 'SELECT desired FROM daemon_intent;')" = on ]
   [ "$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
   [ "$(sqlite3 "$db" 'SELECT state FROM daemon_owner;')" = ready ]
   [ ! -e "$TEST_SKILL_DIR/run/agmsgd-tool-path" ]
+}
+
+@test "daemon.sh enable: an unchecked executor leaves intent and service registration alone" {
+  _seed_install_db
+  _make_pid_namespace_unchecked
+  _fake_recover_systemctl
+  : > "$FAKE_LINUX/start-fails"
+  local before_gen
+  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
+  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" \
+    AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash "$DAEMON" enable
+  [ "$status" -eq 1 ]
+  grep -Fq 'could not be checked here' <<<"$output"
+  grep -Fq 'Nothing was changed' <<<"$output"
+  [ ! -s "$FAKE_LINUX/call-log" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
+  [ ! -f "$(_unit_file)" ]
+}
+
+@test "daemon.sh stop: an unchecked executor does not change intent or op_gen" {
+  _seed_install_db
+  _make_pid_namespace_unchecked
+  local before_gen
+  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
+  PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$DAEMON" stop
+  [ "$status" -eq 1 ]
+  grep -Fq 'could not be checked here' <<<"$output"
+  grep -Fq 'Nothing was changed' <<<"$output"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = ready ]
+}
+
+@test "daemon.sh disable: an unchecked executor is not stopped or unregistered" {
+  _seed_install_db
+  _make_pid_namespace_unchecked
+  _fake_recover_systemctl
+  local before_gen
+  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
+  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" \
+    AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash "$DAEMON" disable
+  [ "$status" -eq 1 ]
+  grep -Fq 'could not be checked here' <<<"$output"
+  grep -Fq 'Nothing was changed' <<<"$output"
+  [ ! -s "$FAKE_LINUX/call-log" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = ready ]
 }
 
 @test "daemon.sh start: a second start while already running is a no-op" {
@@ -1222,6 +1273,20 @@ EOF
   refute grep -qx 'start' "$TEST_SKILL_DIR/fake-linux/call-log"
   refute grep -qx 'is-failed' "$TEST_SKILL_DIR/fake-linux/call-log"
   grep -qx 'is-active' "$TEST_SKILL_DIR/fake-linux/call-log"
+}
+
+@test "_linux_recover_if_failed does not restart an unchecked executor" {
+  _seed_install_db
+  _make_pid_namespace_unchecked
+  _fake_recover_systemctl
+  local fns
+  fns="$(_daemon_fns)"
+  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; : > "$3/fake-linux/call-log"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ ! -s "$FAKE_LINUX/call-log" ]
+  [ -f "$FAKE_LINUX/failed" ]
+  [ ! -f "$FAKE_LINUX/active" ]
 }
 
 @test "daemon.sh status: a retry failure's reason and recovery are shown in text, JSON stays an object (review round 2)" {
