@@ -14,9 +14,6 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
-# shellcheck source=_home.sh
-source "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
-
 # Newest-N rollout files under $sessions_dir, sorted by mtime descending.
 # `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
 # reported to intermittently return an empty/truncated list with no
@@ -76,8 +73,7 @@ agmsg_resolve_codex_thread() {
     printf '%s' "${SESSION_ID:-}"
     return 0
   fi
-  local sessions_dir
-  sessions_dir="$(agmsg_codex_sessions_dir)"
+  local sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 0
   # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
   # path (e.g. a workspace under a symlinked home) while Codex records the
@@ -132,9 +128,7 @@ agmsg_codex_refresh_destination() {
   local profile owner
   # shellcheck disable=SC1091
   . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
-  # Fork: the effective home (AGMSG_CODEX_HOME first), the same profile
-  # agmsg_codex_role_home_matches compares records against.
-  profile="$(agmsg_codex_profile_canonical "$(agmsg_codex_effective_home)")" || return 1
+  profile="$(agmsg_codex_profile_from_env)" || return 1
   owner="$(agmsg_instance_id "$thread" codex 2>/dev/null)" || return 1
   agmsg_role_session_record "$chosen_team" "$chosen_name" "$thread" "$project" codex "$owner" "$profile" inactive || return 1
   agmsg_role_session_load "$chosen_team" "$chosen_name"
@@ -192,8 +186,7 @@ agmsg_session_start() {
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
-    # Fork: publish the effective home (AGMSG_CODEX_HOME first), as recorded above.
-    CODEX_HOME="$(agmsg_codex_effective_home)" agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
+    agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
   fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""
@@ -204,11 +197,8 @@ agmsg_session_start() {
     candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
     if [ -n "$candidate_thread" ]; then
       candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
-      candidate_home="$(agmsg_role_session_get "$candidate_team" "$candidate_name" codex_home 2>/dev/null || true)"
       candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-      { [ "$candidate_project_phys" = "$project_phys" ] \
-        && [ "$candidate_thread" = "$thread_id" ] \
-        && agmsg_codex_role_home_matches "$candidate_home"; } || continue
+      { [ "$candidate_project_phys" = "$project_phys" ] && [ "$candidate_thread" = "$thread_id" ]; } || continue
     else
       # No recorded seat means no live TUI for this role; leave its inbox unread.
       continue
