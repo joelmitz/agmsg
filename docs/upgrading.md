@@ -124,7 +124,59 @@ watcher was gone. The update's output warns that an upgrade *can* drop the
 SessionStart/Stop hooks; that is not the same as saying it did. Check first,
 rather than re-running `set` reflexively.
 
-### 3. A Codex bridge — belongs to the Codex session, not to the install
+### 3. A Codex seat — first find out how this project is delivered
+
+What to check depends on the delivery the **project** uses, not on whether
+agmsgd is on: agmsgd can be on while a project has chosen `monitor` (legacy),
+`turn` or `off`. Settle that first, from the project directory or with
+`--project`:
+
+```bash
+agmsg delivery status --type codex --project "<project>"
+```
+
+The first line of the output is the install-wide agmsgd state; the line that
+starts with `this project:` is what **this project** chose. Read both:
+
+| First line (install-wide) | `this project:` line | What it means | Go to |
+|---|---|---|---|
+| `delivery: agmsgd (on) — notices are delivered directly` | `this project: agmsgd — no Monitor is armed here; ...` | agmsgd is running and delivers here | 3a |
+| `delivery: agmsgd (on, but not running: <reason>) — start it with: agmsg delivery agmsgd` | `this project: agmsgd — ...` | this project is set to agmsgd, but agmsgd is **not running, so nothing is delivered right now** | start agmsgd as the line says, then run this check again. **Exception:** if the reason says `the executor runs in another pid namespace (a sandbox)`, agmsgd may well be running and this command only cannot see it: do not start it from here, and run the check from an ordinary shell outside the sandbox |
+| `delivery: agmsgd (off) — available; ...` or `delivery: agmsgd (unavailable) — <reason>` | `this project: agmsgd — ...` | this project is set to agmsgd, but agmsgd is **turned off or unavailable, so nothing is delivered** | turn it on as the line says (or read the reason), then run this check again |
+| any | `this project: monitor (legacy)` (with or without `chosen — agmsgd does not deliver here`) | the bridge delivers here | 3b |
+| any | `this project: turn chosen — agmsgd does not deliver here`, `this project: off chosen — agmsgd does not deliver here`, or a bare `this project: turn` / `this project: off` | neither a bridge nor agmsgd delivers here | nothing to restart for this update |
+
+`this project: agmsgd` by itself never means that agmsgd is delivering: it is
+printed when the project chose agmsgd even while agmsgd is stopped. Treat the
+project as delivered by agmsgd only when the first line says `(on)`.
+
+#### 3a. The project uses agmsgd
+
+Only once the first line above says `(on)`. There is no bridge to restart.
+Codex runs as plain Codex and agmsgd delivers
+through the destination record the seat wrote when it picked its role.
+`--update` restarts agmsgd itself when it was on. To see that it is running and
+what it recorded for each seat, use:
+
+```bash
+agmsg daemon status
+```
+
+Expect `agmsgd is running (gen ..., version ...)` and, for the seat,
+`Codex <team>/<agent>: destination recorded`. If the seat line says
+`no destination record; restart Codex and run actas again to record it`, close
+Codex, start it again, and in the first turn pick the role again
+(`$agmsg actas <name>`). A session that still has a bridge from before agmsgd
+was enabled keeps using that bridge until it is restarted: the seat line then
+says `bridge process running; reopen Codex to switch to agmsgd`, and agmsgd
+skips that session meanwhile. Restarting Codex ends that state.
+
+Run `agmsg daemon status` from an ordinary shell, not from inside a Codex
+sandbox. A command in another pid namespace cannot see agmsgd and says so
+(`agmsgd cannot be checked from here ...`); that is not a sign that agmsgd is
+down, and the message tells you not to stop or start it from there.
+
+#### 3b. The project uses the monitor (legacy)
 
 The bridge is a process of the Codex session. Running `--update` against a
 session that is already open does not switch it to the new code.
@@ -137,16 +189,20 @@ Close the Codex TUI and start it again through whichever entry point this
 install set up — the shell function that `delivery.sh set monitor codex
 <project>` printed, the PATH shim, or `codex-monitor.sh`
 (see [codex-monitor-beta.md](codex-monitor-beta.md)). Then, in the first turn,
-pick the role again so the seat is recorded, and confirm from another shell:
+pick the role again so the seat is recorded, and confirm from another shell
+(the output ends with the `Codex bridge: ...` lines for the project):
 
 ```bash
-bash ~/.agents/skills/agmsg/scripts/delivery.sh status codex "<project>"
+agmsg delivery status --type codex --project "<project>"
 ```
 
+#### Both cases
+
 The Codex SessionStart hook fires on the **first turn**, not when the TUI opens.
-A missing bridge in the moment after launch is not a failure. Do not read `run/`
-state, threads or metadata directly to infer or rewrite a seat; when several
-threads make the seat ambiguous, stop and report rather than adopting a guess.
+A missing bridge or destination record in the moment after launch is not a
+failure. Do not read `run/` state, threads or metadata directly to infer or
+rewrite a seat; when several threads make the seat ambiguous, stop and report
+rather than adopting a guess.
 
 ## After the update
 

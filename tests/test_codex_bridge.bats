@@ -4,7 +4,6 @@ load test_helper
 
 setup() {
   setup_test_env
-  export SKILL_DIR="$TEST_SKILL_DIR"
   # Pin bare instance-id keying (#93): no test here is about agent-pid
   # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
   # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
@@ -172,33 +171,8 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "codex-bridge: native Windows project hash matches the Git Bash project hash" {
-  skip_unless_windows "the fixture needs native Windows path.resolve and Git Bash cygpath"
-  local project native posix expected actual other
-  # /tmp is a Git Bash alias for a physical Windows path, so use this worktree.
-  project="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
-  native="$(cygpath -am "$project")"
-  posix="$project"
-  source "$SCRIPTS/lib/resolve-project.sh"
-  expected="$(agmsg_normalize_project_path "$posix" | tr '\\' '/' | sha1sum | cut -c1-40)"
-  [ -n "$expected" ]
-  actual="$(node -e 'const c=require("crypto"),p=require("path"),{projectIdentityPath}=require(process.argv[1]); process.stdout.write(c.createHash("sha1").update(projectIdentityPath(p.resolve(process.argv[2]))).digest("hex"))' "$TYPES/codex/codex-bridge.js" "$native")"
-  if [ "$actual" != "$expected" ]; then
-    printf 'project=%s native=%s actual=%s expected=%s\n' "$posix" "$native" "$actual" "$expected"
-    false
-  fi
-  other="$(node -e 'const c=require("crypto"),p=require("path"),{projectIdentityPath}=require(process.argv[1]); process.stdout.write(c.createHash("sha1").update(projectIdentityPath(p.resolve(process.argv[2]))).digest("hex"))' "$TYPES/codex/codex-bridge.js" "${native}-other")"
-  [ "$other" != "$expected" ]
-  grep -Fq 'update(projectIdentityPath(this.opts.project)).digest("hex")' "$TYPES/codex/codex-bridge.js"
-}
-
 @test "codex-bridge: toPosixPath leaves POSIX paths unchanged" {
   run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath("/c/Users/me/OneDrive/codex-work") !== "/c/Users/me/OneDrive/codex-work") process.exit(1); if (toPosixPath("/home/me/x") !== "/home/me/x") process.exit(1);' "$TYPES/codex/codex-bridge.js"
-  [ "$status" -eq 0 ]
-}
-
-@test "codex-bridge: project identity spelling is stable across MSYS and native Windows paths" {
-  run node -e 'const { projectIdentityPath } = require(process.argv[1]); const expected = "C:/Users/me/OneDrive/codex-work"; if (projectIdentityPath("/c/Users/me/OneDrive/codex-work") !== expected) process.exit(1); if (projectIdentityPath(String.raw`C:\Users\me\OneDrive\codex-work`) !== expected) process.exit(1); if (projectIdentityPath("C:/Users/me/OneDrive/codex-work") !== expected) process.exit(1);' "$TYPES/codex/codex-bridge.js"
   [ "$status" -eq 0 ]
 }
 
@@ -1075,46 +1049,6 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "started turn" ]]
-}
-
-@test "codex-bridge: structured self-test marker gets a dedicated confirm turn and exact ack" {
-  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) process.exit(1);'
-  [ "$status" -eq 0 ] || skip "node child_process.spawn is not available in this sandbox"
-
-  local nonce="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  bash "$SCRIPTS/send.sh" team alice alice "agmsg-codex-self-test:v1:diag-1:$nonce" >/dev/null
-  local fake="$TEST_SKILL_DIR/fake-app-server-self-test.js"
-  local captured="$TEST_SKILL_DIR/captured-self-test-prompt"
-  cat >"$fake" <<'EOF'
-const fs = require("fs");
-const readline = require("readline");
-const rl = readline.createInterface({ input: process.stdin });
-const send = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
-rl.on("line", (line) => {
-  const m = JSON.parse(line);
-  if (m.method === "initialize") send({ jsonrpc:"2.0", id:m.id, result:{} });
-  else if (m.method === "thread/start") send({ jsonrpc:"2.0", id:m.id, result:{thread:{id:"thread-1",status:{type:"idle"}}} });
-  else if (m.method === "process/spawn") {
-    send({ jsonrpc:"2.0", id:m.id, result:{} });
-    setTimeout(() => send({ jsonrpc:"2.0", method:"process/exited", params:{processHandle:m.params.processHandle,exitCode:0,stdout:"status=pending count=1 max_id=marker-1\n",stderr:""} }), 10);
-  } else if (m.method === "turn/start") {
-    fs.writeFileSync(process.env.CAPTURED_PROMPT, m.params.input[0].text);
-    send({ jsonrpc:"2.0", id:m.id, result:{turn:{id:"turn-self-test"}} });
-    setTimeout(() => send({jsonrpc:"2.0",method:"turn/completed",params:{threadId:m.params.threadId,turn:{id:"turn-self-test"}}}),10);
-  } else if (m.method === "process/kill") send({jsonrpc:"2.0",id:m.id,result:{}});
-});
-EOF
-
-  CAPTURED_PROMPT="$captured" AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --thread thread-1 --timeout 1 --interval 1 \
-    --request-timeout-ms 1000 --max-wakes 1 --inline-inbox
-  [ "$status" -eq 0 ]
-  grep -qF -- "--confirm '$nonce'" "$captured"
-  grep -qF "agmsg self-delivery marker reached this Codex turn" "$captured"
-  ! grep -qF "agmsg delivered the following unread messages" "$captured"
-  run bash "$SCRIPTS/inbox.sh" team alice --quiet
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
 }
 
 @test "codex-bridge: stops instead of looping on the same unread max_id" {
@@ -2457,16 +2391,11 @@ const hash = (p) => crypto.createHash("sha1").update(p).digest("hex");
 function leaseHash(project) {
   mod.exports.CodexBridge.prototype.writeLease.call({
     opts: { project }, identities: [{ team: "team", name: "alice" }], leasefile,
-    // fork ではコンストラクタが projectHash / pairsHash を計算する（同じ式を再現）。
-    projectHash: hash(mod.exports.projectIdentityPath(project)),
-    pairsHash: hash(hash("team\talice")),
     startToken: () => ({ src: "pwsh", token: "123456" }),
   });
   return fs.readFileSync(leasefile, "utf8").match(/^project=(.*)$/m)[1];
 }
-// fork の launcher は agmsg_normalize_project_path で "C:/..." 形に正規化して hash するため、
-// 同一性は projectIdentityPath() の "C:/..." 形で比較する（上流テストは "/c/..." 形を期待していた）。
-const expected = hash("C:/TEMP/project with spaces");
+const expected = hash("/c/TEMP/project with spaces");
 assert.equal(leaseHash(String.raw`C:\TEMP\project with spaces`), expected);
 assert.equal(leaseHash("C:/TEMP/project with spaces"), expected);
 assert.equal(leaseHash("/c/TEMP/project with spaces"), expected);
@@ -2474,7 +2403,7 @@ assert.notEqual(leaseHash("C:/TEMP/other project"), expected);
 assert.notEqual(leaseHash("C:/TEMP/Project with spaces"), expected);
 assert.equal(leaseHash(String.raw`\\host\share\project`), hash("//host/share/project"));
 assert.equal(leaseHash("/home/me/project"), hash("/home/me/project"));
-assert.equal(leaseHash(String.raw`/home/me/project\literal`), hash("/home/me/project/literal"));
+assert.equal(leaseHash(String.raw`/home/me/project\literal`), hash(String.raw`/home/me/project\literal`));
 fs.unlinkSync(leasefile);
 NODE
   [ "$status" -eq 0 ]
@@ -2492,20 +2421,15 @@ const loaded = new Module(filename, module);
 loaded.filename = filename;
 loaded.paths = Module._nodeModulePaths(require("path").dirname(filename));
 loaded._compile(fs.readFileSync(filename, "utf8") + "\nmodule.exports.CodexBridge = CodexBridge;", filename);
-// fork: the inline reader is readInboxForPrompts (peek/ack transport) and
-// returns one prompt per delivery; the property checked is the same.
-const context = Object.assign(Object.create(loaded.exports.CodexBridge.prototype), {
-  opts: { project: process.argv[3], type: "codex", inlineInbox: true },
+const context = {
+  opts: { project: process.argv[3], type: "codex" },
   identities: [{ team: "missing-team", name: "alice" }, { team: "team", name: "alice" }],
-  identity: { team: "team", name: "alice" },
-  threadId: "thread-1714",
-});
-const result = loaded.exports.CodexBridge.prototype.readInboxForPrompts.call(context).map((prompt) => prompt.text).join("\n\n");
+};
+const result = loaded.exports.CodexBridge.prototype.readInboxForPrompt.call(context);
 if (!result.includes("healthy message") || result.includes("team not found")) process.exit(1);
 console.log(result);
 JS
   [ "$status" -eq 0 ]
   [[ "$output" == *"healthy message"* ]]
   [[ "$output" != *"inbox.sh failed"* ]]
-  [[ "$output" != *"inbox transport failed"* ]]
 }

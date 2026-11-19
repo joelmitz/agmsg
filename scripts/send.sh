@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage:
-#   send.sh <team> <from> <to> <message> [--force] [--print-id] # body as ONE quoted arg
+#   send.sh <team> <from> <to> <message> [--force]              # body as ONE quoted arg
 #   send.sh <team> <from> <to> --body-file <path> [--force]     # body read from a file
 #   send.sh <team> <from> <to> --body - [--force]               # body read from stdin
 #
@@ -26,15 +26,10 @@ shift 3
 # --force is historically the trailing flag AFTER the body; recognize it only as the
 # last argument, so a --body-file body whose text happens to be "--force" is unaffected.
 FORCE=0
-PRINT_ID=0
-while [ "$#" -gt 0 ]; do
-  case "${!#}" in
-    --force) FORCE=1 ;;
-    --print-id) PRINT_ID=1 ;;
-    *) break ;;
-  esac
+if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
+  FORCE=1
   set -- "${@:1:$#-1}"
-done
+fi
 
 # Read a body from stdin as bytes. A shell variable cannot hold a NUL, so a body
 # that has one is kept in a file (BODY_NUL_FILE) and the store reads it from
@@ -163,9 +158,8 @@ fi
 # the message log (an append-only message_sent event), not a direct INSERT.
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
-# the DB file before the table exists just creates it). The id is surfaced only
-# for the explicit --print-id machine contract.
-MESSAGE_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY" ${BODY_NUL_FILE:+"$BODY_NUL_FILE"})" || _agmsg_send_rc=$?
+# the DB file before the table exists just creates it).
+MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY" ${BODY_NUL_FILE:+"$BODY_NUL_FILE"})" || _agmsg_send_rc=$?
 if [ -n "${_agmsg_send_rc:-}" ]; then
   [ -z "$BODY_NUL_FILE" ] || rm -f "$BODY_NUL_FILE"
   # Whatever the driver printed above says why; this line makes sure a failed
@@ -175,7 +169,6 @@ if [ -n "${_agmsg_send_rc:-}" ]; then
 fi
 
 echo "Sent to $TO in team $TEAM"
-[ "$PRINT_ID" -eq 0 ] || echo "message_id=$MESSAGE_ID"
 
 # agmsgd could not reach this recipient's live session for a while (a record in
 # run/down/, scripts/lib/down-notice.sh): the message is stored, and the sender is
@@ -200,7 +193,7 @@ fi
 # for its own adapter contract). Best-effort: any failure a hook reports must
 # never turn a successful send into a failed one -- the message is already
 # saved by this point. A hook may not call exit.
-if [ -n "${MESSAGE_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
+if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
   # Quote held in a variable, not written inline in the pattern (#897): a
   # literal \' replacement disagrees between bash 3.2 (keeps the backslash,
   # doubling into \'\') and bash 4+ (doubles into ''), and this scope has no
@@ -250,7 +243,7 @@ if [ -n "${MESSAGE_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
           # is "a failure never turns a successful send into a failed one,
           # and the caller decides how this ends" -- shielding the call is
           # what keeps that true regardless of what happens inside the hook.
-          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MESSAGE_ID" "$_AGMSG_MSG_BODY_FILE" || true
+          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MSG_ID" "$_AGMSG_MSG_BODY_FILE" || true
           [ "$_AGMSG_MSG_BODY_FILE" = "$BODY_NUL_FILE" ] || rm -f "$_AGMSG_MSG_BODY_FILE"
         fi
       fi

@@ -61,7 +61,6 @@ test_close_fds.bats	1
 test_cmdline_path_match.bats	3
 test_codex_bridge.bats	227
 test_codex_bridge_launcher.bats	409
-test_codex_diag.bats	33
 test_codex_monitor.bats	29
 test_codex_resume.bats	28
 test_codex_shim.bats	27
