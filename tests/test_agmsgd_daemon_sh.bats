@@ -60,6 +60,7 @@ _seed_install_db() {
 }
 
 _make_pid_namespace_unchecked() {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
   local boot
   case "$(uname -s)" in
     Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id)" ;;

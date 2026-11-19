@@ -55,6 +55,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
 }
 
 @test "offer: a daemon in another pid namespace is unchecked, not stopped" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
   _mark_daemon_ready
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='pid:[111]';"
   cat > "$TEST_SKILL_DIR/bin/readlink" <<'EOF'

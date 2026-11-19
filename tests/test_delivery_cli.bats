@@ -166,6 +166,7 @@ STUB
 }
 
 @test "delivery agmsgd: unchecked daemon is reported without start or stop advice and changes nothing" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
   _mark_daemon_ready
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='pid:[111]';"
   cat > "$TEST_SKILL_DIR/bin/readlink" <<'EOF'

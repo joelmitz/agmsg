@@ -702,6 +702,7 @@ _pid_gone_harness() {   # <kill message>
 }
 
 @test "install: --update refuses an unchecked daemon before changing the installation" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local db="$SK/run/install.db" before_gen before_script boot
   before_gen="$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')"
