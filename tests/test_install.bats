@@ -701,6 +701,26 @@ _pid_gone_harness() {   # <kill message>
   [ "$owner_state" = "ready" ]
 }
 
+@test "install: --update refuses an unchecked daemon before changing the installation" {
+  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local db="$SK/run/install.db" before_gen before_script boot
+  before_gen="$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')"
+  before_script="$(sha256sum "$SK/scripts/daemon.sh" | cut -d ' ' -f1)"
+  IFS= read -r boot < /proc/sys/kernel/random/boot_id
+  sqlite3 "$db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), executor_pid_ns='pid:[111]';"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 1 ]
+  grep -Fq 'may still be running in another pid namespace' <<<"$output"
+  grep -Fq 'Nothing was updated' <<<"$output"
+  [ "$(sha256sum "$SK/scripts/daemon.sh" | cut -d ' ' -f1)" = "$before_script" ]
+  [ "$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
+  [ "$(sqlite3 "$db" 'SELECT desired FROM daemon_intent;')" = on ]
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+  [ ! -e "$SK/run/agmsgd-updating" ]
+}
+
 @test "install: --update clears a down_notice left by an earlier failed restart once the daemon comes back (decision 11-04, S01/S14)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"

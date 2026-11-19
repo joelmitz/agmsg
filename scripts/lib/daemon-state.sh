@@ -31,7 +31,7 @@ _agmsg_daemon_node_verdict() {   # <pid> <boot-id>
 }
 
 agmsg_daemon_read_state() {
-  AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
+  AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"; AGMSGD_PID_NS_MISMATCH=0
   local row state pid boot recorded_start recorded_pid_ns=- ns_select="'-'" ns_columns current_boot process_start started_epoch boot_epoch start_unreliable=""
   [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 0
   # The executor's pid namespace is read in the same SELECT as the rest of the
@@ -159,6 +159,7 @@ agmsg_daemon_read_state() {
     own_pid_ns="$(readlink "$_AGMSG_PID_NS_LINK" 2>/dev/null)" || own_pid_ns=""
     if [ "$recorded_pid_ns" != - ] && [ -n "$own_pid_ns" ] && [ "$recorded_pid_ns" != "$own_pid_ns" ]; then
       AGMSGD_HEALTH=unchecked
+      AGMSGD_PID_NS_MISMATCH=1
       AGMSGD_REASON="the executor runs in another pid namespace (a sandbox); its liveness cannot be read from here"
       return 0
     fi
