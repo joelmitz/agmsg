@@ -207,10 +207,9 @@ agmsg_install_daemon_unchecked() {   # <skill_dir>
     health="$(
       . "$state_lib"
       agmsg_daemon_read_state
-      printf '%s' "${AGMSGD_HEALTH:-unknown}"
+      printf '%s|%s' "${AGMSGD_HEALTH:-unknown}" "${AGMSGD_PID_NS_MISMATCH:-absent}"
     )" || health=unknown
-    [ "$health" != unchecked ] || return 0
-    case "$health" in ready|stopped|unverifiable) return 1 ;; esac
+    case "$health" in *'|1') return 0 ;; unchecked\|0|ready\|0|stopped\|0|unverifiable\|0) return 1 ;; esac
   fi
   local ns_columns row state recorded_ns current_ns
   [ "$(uname -s 2>/dev/null)" = Linux ] || return 1

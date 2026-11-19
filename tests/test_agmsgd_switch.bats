@@ -312,6 +312,8 @@ WRAPPER
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"; agmsg_daemon_warn_if_stopped 2>&1'
   [ "$status" -eq 0 ]
   [ "$output" = unchecked ]
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_PID_NS_MISMATCH"'
+  [ "$output" = 'unchecked|0' ]
   # A sandbox that refuses the signal for a live process ("not permitted") is
   # still "exists"; only "no such process" is a stopped daemon.
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -ec 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - Operation not permitted" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
@@ -515,6 +517,8 @@ WRAPPER
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_HEALTH" "$AGMSGD_REASON"'
   [ "$status" -eq 0 ]
   [ "$output" = "unchecked|the executor runs in another pid namespace (a sandbox); its liveness cannot be read from here" ]
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_PID_NS_MISMATCH"'
+  [ "$output" = 1 ]
   # Neither the ordinary path (which would self-heal a stopped daemon) nor the
   # always path reports it or starts another daemon.
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_PID_NS_LINK="$BATS_TEST_TMPDIR/other-ns"; agmsg_daemon_warn_if_stopped 2>&1; agmsg_daemon_warn_if_stopped always 2>&1'

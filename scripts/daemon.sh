@@ -420,9 +420,9 @@ EOF
 # Leaves a down_notice only when the self-heal attempt itself fails, cleared
 # the moment the unit is next seen running.
 _linux_recover_if_failed() {
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
   agmsg_daemon_read_state
-  [ "${AGMSGD_HEALTH:-}" != unchecked ] || return 0
+  [ "${AGMSGD_PID_NS_MISMATCH:-0}" != 1 ] || return 0
   _systemd_user_usable || return 0
   local unit_path unit_name
   unit_path="$(_systemd_unit_path)"
@@ -827,9 +827,9 @@ _tool_path_restart_hint() {
 
 _daemon_refuse_if_unchecked() {   # <action>
   local action="${1:-operate on}"
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
   agmsg_daemon_read_state
-  [ "${AGMSGD_HEALTH:-}" = unchecked ] || return 1
+  [ "${AGMSGD_PID_NS_MISMATCH:-0}" = 1 ] || return 1
   echo "agmsg daemon $action: agmsgd could not be checked here (${AGMSGD_REASON:-liveness is unavailable}). It may be running; do not enable, start, stop, disable, or update this install here. Check from an environment that can inspect it. Nothing was changed." >&2
   return 0
 }
@@ -1345,11 +1345,11 @@ cmd_offer() {
   if [ "$desired" = on ]; then
     # Turned on is an intent, not proof that notices are being delivered:
     # a failed start or a stopped executor leaves it on with nothing running.
-    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
     agmsg_daemon_read_state
     if [ "${AGMSGD_HEALTH:-}" = ready ]; then
       echo "agmsgd=on"
-    elif [ "${AGMSGD_HEALTH:-}" = unchecked ]; then
+    elif [ "${AGMSGD_PID_NS_MISMATCH:-0}" = 1 ]; then
       echo "agmsgd=unchecked reason=${AGMSGD_REASON:-agmsgd liveness cannot be checked here}"
     else
       echo "agmsgd=not-running reason=${AGMSGD_REASON:-agmsgd is turned on but is not confirmed running}"
