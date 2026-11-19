@@ -204,6 +204,15 @@ failure. Do not read `run/` state, threads or metadata directly to infer or
 rewrite a seat; when several threads make the seat ambiguous, stop and report
 rather than adopting a guess.
 
+### 4. agmsgd that cannot be checked from this environment
+
+`agmsg daemon offer` reports `agmsgd=unchecked` when the current environment
+cannot inspect the daemon process, including when it runs in another pid
+namespace. The daemon may still be running. Do not treat this as stopped and do
+not run `agmsg delivery agmsgd`, `agmsg daemon start`, or `agmsg daemon stop`
+here. Check delivery from an environment that can inspect the daemon; keep the
+project's configured delivery unchanged until then.
+
 ## After the update
 
 - Verify what you restarted, rather than assuming the restart took:

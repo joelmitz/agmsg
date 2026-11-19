@@ -17,6 +17,7 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
        3. `turn`, 4. `off` — as before.
      - `agmsgd=on`: ask nothing. Run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery agmsgd --type __AGENT_TYPE__ --project "$(pwd)"`. Only if it succeeds, say "agmsgd is on: notices are delivered directly", and continue. On failure, report the failure and continue without a delivery question or a claim that notices are delivered.
      - `agmsgd=not-running reason=...`: agmsgd is turned on but is not running, so do not say notices are delivered directly. Say so with the reason; only on a human-initiated first join, ask whether to start it (`agmsg delivery agmsgd` starts it) or switch to `monitor (legacy)`.
+     - `agmsgd=unchecked reason=...`: this environment cannot check whether agmsgd is running; it may be running. Say so with the reason, and do not start or stop it here. Check from an environment that can inspect it; preserve the configured delivery meanwhile.
      - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line; only on a human-initiated first join, ask for `monitor (legacy)`, `turn`, or `off` (empty input means `monitor`).
 
      Outside a human-initiated first join, if the offer is not `agmsgd=on`, preserve the configured delivery and continue without asking or changing it. Report a stopped or unavailable service with its reason; do not claim delivery is active. An explicit `delivery <value>` request still applies the requested value directly.

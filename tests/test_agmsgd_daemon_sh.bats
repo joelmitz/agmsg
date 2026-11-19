@@ -59,6 +59,22 @@ _seed_install_db() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id = 'daemon-sh-test', node_path = '$(command -v node)';"
 }
 
+_make_pid_namespace_unchecked() {
+  local boot
+  case "$(uname -s)" in
+    Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id)" ;;
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    *) skip 'pid namespace liveness fixture' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), executor_pid_ns='pid:[111]';"
+  mkdir -p "$TEST_SKILL_DIR/fake-bin"
+  cat > "$TEST_SKILL_DIR/fake-bin/readlink" <<'EOF'
+#!/bin/sh
+if [ "$1" = /proc/self/ns/pid ]; then echo 'pid:[222]'; else exec /usr/bin/readlink "$@"; fi
+EOF
+  chmod +x "$TEST_SKILL_DIR/fake-bin/readlink"
+}
+
 _write_completion_record() {
   # watchForDrift() compares the live VERSION file against the manifest's
   # own copy of it every poll cycle; a manifest that names a version
@@ -293,6 +309,21 @@ _assert_start_result() {
   _assert_start_result 'running'
   [ -x "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" ]
   bash "$DAEMON" stop >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh start: an unchecked executor is not restarted and op_gen is unchanged" {
+  _seed_install_db
+  _make_pid_namespace_unchecked
+  local db="$TEST_SKILL_DIR/run/install.db" before_gen
+  before_gen="$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')"
+  PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$DAEMON" start
+  [ "$status" -eq 1 ]
+  grep -Fq 'could not be checked here' <<<"$output"
+  grep -Fq 'do not start or stop it here' <<<"$output"
+  [ "$(sqlite3 "$db" 'SELECT desired FROM daemon_intent;')" = on ]
+  [ "$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
+  [ "$(sqlite3 "$db" 'SELECT state FROM daemon_owner;')" = ready ]
+  [ ! -e "$TEST_SKILL_DIR/run/agmsgd-tool-path" ]
 }
 
 @test "daemon.sh start: a second start while already running is a no-op" {

@@ -832,6 +832,16 @@ cmd_start() {
     *) _usage; return 2 ;;
   esac
   _ensure_install_db_schema
+  # A different pid namespace cannot see the recorded executor. Starting in
+  # that case would bump op_gen and can make the live daemon stand down, so
+  # leave the intent and every other start record alone until checked outside
+  # this environment.
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  agmsg_daemon_read_state
+  if [ "${AGMSGD_HEALTH:-}" = unchecked ]; then
+    echo "agmsg daemon start: agmsgd could not be checked here (${AGMSGD_REASON:-liveness is unavailable}). It may be running; do not start or stop it here. Check from an environment that can inspect it. Nothing was changed." >&2
+    return 1
+  fi
   # Before the "already running" answer below: a running agmsgd picks the
   # record up at its next start (the update path restarts it).
   [ "$(_os)" = windows ] || _record_tool_path
@@ -1234,6 +1244,7 @@ cmd_disable() {
 # choice screen should offer agmsgd for this agent type:
 #   agmsgd=on                       turned on and running; do not ask again
 #   agmsgd=not-running reason=...   turned on, but not confirmed running
+#   agmsgd=unchecked reason=...     may be running; this environment cannot check
 #   agmsgd=available                enable would go ahead
 #   agmsgd=unavailable reason=...   enable would refuse (or does not apply)
 # It changes nothing, and never enables anything.
@@ -1330,6 +1341,8 @@ cmd_offer() {
     agmsg_daemon_read_state
     if [ "${AGMSGD_HEALTH:-}" = ready ]; then
       echo "agmsgd=on"
+    elif [ "${AGMSGD_HEALTH:-}" = unchecked ]; then
+      echo "agmsgd=unchecked reason=${AGMSGD_REASON:-agmsgd liveness cannot be checked here}"
     else
       echo "agmsgd=not-running reason=${AGMSGD_REASON:-agmsgd is turned on but is not confirmed running}"
     fi

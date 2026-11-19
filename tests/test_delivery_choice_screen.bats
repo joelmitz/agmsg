@@ -37,7 +37,9 @@ _step5() {   # <file>: the delivery step of the join flow
     grep -Fq 'agmsgd is on: notices are delivered directly' <<<"$screen"
     grep -Fq 'agmsgd=unavailable' <<<"$screen"
     grep -Fq 'agmsgd=not-running' <<<"$screen"
+    grep -Fq 'agmsgd=unchecked' <<<"$screen"
     grep -Fq 'do not say notices are delivered directly' <<<"$screen"
+    grep -Fq 'do not start or stop it here' <<<"$screen"
   done
 }
 
