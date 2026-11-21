@@ -93,11 +93,15 @@ _assert_build_refused() {
 }
 
 @test "host orca: parallel loaders share one complete mirror" {
-  local i
+  local i pid failed=0
+  local -a probe_pids=()
   for i in 1 2 3 4 5 6 7 8; do
     _probe '' > "$BATS_TEST_TMPDIR/probe.$i" 2>&1 &
+    probe_pids+=("$!")
   done
-  wait $(jobs -p)
+  # Bats' timeout watcher is also a background job; wait only for our probes.
+  for pid in "${probe_pids[@]}"; do wait "$pid" || failed=1; done
+  [ "$failed" -eq 0 ] || return 1
   for i in 1 2 3 4 5 6 7 8; do
     grep -qx 'load_rc=0' "$BATS_TEST_TMPDIR/probe.$i" || return 1
     grep -qx 'orca=missing' "$BATS_TEST_TMPDIR/probe.$i" || return 1
