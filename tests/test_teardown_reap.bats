@@ -104,7 +104,9 @@ _wait_for_holder_ready() {
 @test "teardown reaper fails when its bounded wait expires" {
   # Keep the process list non-empty while replacing the side effects with no-ops. The
   # 60-tick ceiling then runs quickly and this test proves timeout is not reported green.
-  # The stubs live in a subshell so this test's own teardown runs the real reaper.
+  # The stubs live in a subshell so teardown runs the real reaper. A `kill`
+  # function left in the test shell would also swallow the kill bats sends its
+  # BATS_TEST_TIMEOUT watcher, holding the test open for the whole timeout.
   _reap_with_stubs() (
     _pids_referencing_dir() { printf '%s\n' 999999; }
     _pid_references_dir() { return 0; }
