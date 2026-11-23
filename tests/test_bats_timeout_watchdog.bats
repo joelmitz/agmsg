@@ -8,17 +8,16 @@ load test_helper
 
 @test "a test that stubs kill/sleep/wait does not hold its file for the timeout" {
   local f="$BATS_TEST_TMPDIR/stub.bats"
-  # Bats preprocesses @test lines inside heredocs as if they belonged to
-  # this file, so keep the generated test source in printf arguments.
-  printf '%s\n' \
-    "load \"$BATS_TEST_DIRNAME/test_helper\"" \
-    'teardown() { teardown_test_env; }' \
-    '@test "stubs" {' \
-    '  kill() { :; }' \
-    '  sleep() { :; }' \
-    '  wait() { :; }' \
-    '  true' \
-    '}' > "$f"
+  cat > "$f" <<EOF
+load "$BATS_TEST_DIRNAME/test_helper"
+teardown() { teardown_test_env; }
+@test "stubs" {
+  kill() { :; }
+  sleep() { :; }
+  wait() { :; }
+  true
+}
+EOF
   local t0=$SECONDS
   run env BATS_TEST_TIMEOUT=40 bats "$f"
   [ "$status" -eq 0 ]

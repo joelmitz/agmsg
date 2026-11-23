@@ -70,14 +70,14 @@ tab() { printf '\t'; }
 # ---- the runner, against real nested bats ----
 
 make_fixtures() {
-  # Keep generated @test lines inside printf arguments. Bats preprocesses
-  # source text without recognizing heredoc boundaries, so a heredoc here would
-  # be rewritten as the outer file's test functions before this helper runs.
-  printf '%s\n' \
-    '@test "fine one" { true; }' \
-    '@test "odd (name) [x] a.b|c*d" { [ -f "$FLAG" ]; }' \
-    '@test "fine two" { true; }' > "$W/a.bats"
-  printf '%s\n' '@test "b fine" { true; }' > "$W/b.bats"
+  cat > "$W/a.bats" <<'FIX'
+@test "fine one" { true; }
+@test "odd (name) [x] a.b|c*d" { [ -f "$FLAG" ]; }
+@test "fine two" { true; }
+FIX
+  cat > "$W/b.bats" <<'FIX'
+@test "b fine" { true; }
+FIX
   printf '%s\n' "$W/a.bats" "$W/b.bats" > "$W/m"
   export FLAG="$W/flag"
 }
