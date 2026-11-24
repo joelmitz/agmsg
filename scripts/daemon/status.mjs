@@ -20,31 +20,23 @@
 
 import { readPollTimeout } from './log.mjs';
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isAlive, pidNamespace } from "./executor.mjs";
+import { isAlive } from "./executor.mjs";
 import { readCompletionState, scriptsMismatches } from "./lifecycle.mjs";
 import { openInstallDb } from "./db.mjs";
-import { PROTOCOL_VERSION } from "./control.mjs";
+import { queryDaemon, observeLiveness } from "./heartbeat.mjs";
+export { queryDaemon } from "./heartbeat.mjs";
 import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
 
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
 // The pure decision. `now` is injectable for tests.
-export function classify({ owner, intent, alive, reachable, lastAttempt, otherPidNamespace = false }, now = Date.now()) {
+export function classify({ owner, intent, alive, reachable, lastAttempt, heartbeatFresh = false }, now = Date.now()) {
   const desired = intent?.desired ?? null;
-
-  // Asked from another pid namespace than the executor's (a sandbox such as
-  // Codex's): it cannot be seen from here, and stopping or starting it from
-  // here would take down a daemon that may well be running.
-  if (desired === "on" && owner.state === "ready" && alive === null && otherPidNamespace) {
-    return {
-      text: "agmsgd cannot be checked from here: it runs in another pid namespace than this command (a sandbox). Run agmsg daemon status outside the sandbox to check it; do not stop or start it from here. Unread messages are preserved.",
-      exitCode: 1,
-      gen: owner.gen,
-    };
+  if (owner.state === "ready" && heartbeatFresh) {
+    return { text: `agmsgd is running (gen ${owner.gen}, version ${owner.version ?? "unknown"}; recent heartbeat)`, exitCode: 0, gen: owner.gen };
   }
 
   if (desired === "on" && owner.state === "ready" && alive === null) {
@@ -136,7 +128,7 @@ export function classify({ owner, intent, alive, reachable, lastAttempt, otherPi
 
 // Reads install.db read-only and checks the recorded executor's liveness --
 // works whether or not agmsgd is actually running.
-export function readOwnerAndIntentReadOnly(installRoot) {
+export function readOwnerAndIntentReadOnly(installRoot, { checkProcess = true } = {}) {
   const db = openInstallDb(join(installRoot, "run", "install.db"), { readonly: true });
   try {
     const owner = db.prepare("SELECT * FROM daemon_owner").get();
@@ -158,53 +150,16 @@ export function readOwnerAndIntentReadOnly(installRoot) {
     } catch (error) {
       if (!String(error?.message ?? "").includes("no such table")) throw error;
     }
+    const installId = db.prepare("SELECT install_id FROM meta").get()?.install_id;
     const alive =
-      owner.state === "none" || owner.executor_pid == null
+      !checkProcess || owner.state === "none" || owner.executor_pid == null
         ? null
-        : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, pidNs: owner.executor_pid_ns, startedAt: owner.executor_started_at });
-    return { owner, intent, alive, codexPending, codexExpired, lastAttempt };
+        : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
+    return { owner, intent, alive, codexPending, codexExpired, lastAttempt, installId };
   } finally {
     db.close();
   }
 }
-
-// One hello + one request round trip against the recorded socket, with a short
-// deadline -- a prober must never hang the CLI command it backs. Resolves to
-// the response object, or null when there was none in time.
-export function queryDaemon(socketPath, type, timeoutMs = 2000) {
-  return new Promise((resolve) => {
-    const socket = createConnection(socketPath);
-    let buf = "";
-    const done = (result) => {
-      socket.destroy();
-      resolve(result);
-    };
-    const timer = setTimeout(() => done(null), timeoutMs);
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, role: "control" })}\n`);
-      socket.write(`${JSON.stringify({ type })}\n`);
-    });
-    socket.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
-      for (const line of buf.split("\n")) {
-        if (!line.startsWith("{")) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        if (msg?.type === type) {
-          clearTimeout(timer);
-          done(msg);
-          return;
-        }
-      }
-    });
-    socket.on("error", () => {
-      clearTimeout(timer);
-      done(null);
-    });
-  });
-}
-
-const probeSocket = async (socketPath, timeoutMs = 2000) => (await queryDaemon(socketPath, "status", timeoutMs)) !== null;
 
 // What the running agmsgd last observed about its seats. It keeps that in
 // memory only, so it is asked each time; with no running agmsgd there is
@@ -242,9 +197,9 @@ async function main() {
     process.stderr.write("usage: status.mjs <installRoot>\n");
     process.exit(2);
   }
-  let owner, intent, alive, codexPending, codexExpired, lastAttempt;
+  let owner, intent, alive, codexPending, codexExpired, lastAttempt, installId;
   try {
-    ({ owner, intent, alive, codexPending, codexExpired, lastAttempt } = readOwnerAndIntentReadOnly(installRoot));
+    ({ owner, intent, alive, codexPending, codexExpired, lastAttempt, installId } = readOwnerAndIntentReadOnly(installRoot, { checkProcess: false }));
   } catch (error) {
     // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
@@ -252,10 +207,14 @@ async function main() {
     process.stderr.write(`agmsgd status: could not read install.db: ${error.message}\n`);
     process.exit(1);
   }
-  const reachable = owner.state === "ready" && owner.socket ? await probeSocket(owner.socket) : false;
-  const ownPidNamespace = pidNamespace();
-  const otherPidNamespace = Boolean(owner.executor_pid_ns && ownPidNamespace && owner.executor_pid_ns !== ownPidNamespace);
-  const result = classify({ owner, intent, alive, reachable, lastAttempt, otherPidNamespace });
+  const liveness = await observeLiveness(installRoot, { owner, installId });
+  const reachable = liveness.source === 'socket';
+  if (liveness.running) alive = true;
+  else if (owner.state !== 'none' && owner.executor_pid != null) {
+    try { alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id }); }
+    catch { alive = null; } // Caller restrictions cannot refute a socket/heartbeat.
+  }
+  const result = classify({ owner, intent, alive, reachable, lastAttempt, heartbeatFresh: liveness.source === 'heartbeat' });
   const seatState = reachable
     ? await readSeatsFromDaemon(owner, alive)
     : { state: owner.state !== "ready" || alive === false ? "daemon_not_running" : alive === null ? "liveness_unconfirmed" : "no_answer" };

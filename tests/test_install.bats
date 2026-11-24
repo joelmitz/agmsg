@@ -710,26 +710,6 @@ _pid_gone_harness() {   # <kill message>
   [ "$owner_state" = "ready" ]
 }
 
-@test "install: --update refuses an unchecked daemon before changing the installation" {
-  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  local db="$SK/run/install.db" before_gen before_script boot
-  before_gen="$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')"
-  before_script="$(sha256sum "$SK/scripts/daemon.sh" | cut -d ' ' -f1)"
-  IFS= read -r boot < /proc/sys/kernel/random/boot_id
-  sqlite3 "$db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), executor_pid_ns='pid:[111]';"
-
-  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  [ "$status" -eq 1 ]
-  grep -Fq 'may still be running in another pid namespace' <<<"$output"
-  grep -Fq 'Nothing was updated' <<<"$output"
-  [ "$(sha256sum "$SK/scripts/daemon.sh" | cut -d ' ' -f1)" = "$before_script" ]
-  [ "$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(sqlite3 "$db" 'SELECT desired FROM daemon_intent;')" = on ]
-  [ ! -e "$SK/run/install-op-incomplete.json" ]
-  [ ! -e "$SK/run/agmsgd-updating" ]
-}
-
 @test "install: --update clears a down_notice left by an earlier failed restart once the daemon comes back (decision 11-04, S01/S14)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
@@ -971,6 +951,50 @@ EOF
   # the claim an absence-only check could never make.
   [ -f "$wrong_root/run/down/agmsgd.json" ]
   grep -q unrelated "$wrong_root/run/down/agmsgd.json"
+}
+
+# A CI-only (never reproduced locally) failure measured this week (bats #24,
+# 11-21 macOS run 44850365985, 11-23 ubuntu job 137494736304): "install.db:
+# reading the install id failed (sqlite3 rc=5)" right as install --update
+# started, immediately behind that same test's own prior sqlite3 write to
+# install.db. agmsg_install_db_ensure_meta's CREATE TABLE/SELECT/INSERT ran
+# with the default busy_timeout=0 -- the same race
+# agmsg_install_db_apply_schema below already guards against (see its own
+# comment), just missed here. Proven directly here, the same way: a
+# background writer holds an EXCLUSIVE transaction on the (not yet
+# bootstrapped) db file for longer than sqlite3's default busy_timeout but
+# well inside the 5000ms this function now asks for, and the call still
+# succeeds once that writer lets go. Remove the `.timeout 5000` from
+# agmsg_install_db_ensure_meta's CREATE TABLE call and this goes red with
+# exactly the measured "reading the install id failed (sqlite3 rc=5)" line.
+@test "agmsg_install_db_ensure_meta: tolerates a brief exclusive hold instead of failing immediately (flaky bats #24)" {
+  local lib="$REPO_ROOT/scripts/lib" db="$FAKE_HOME/install-meta.db" fifodir in_fifo out_fifo holder_pid
+  fifodir="$FAKE_HOME/meta-lock-fifos"
+  in_fifo="$fifodir/in"; out_fifo="$fifodir/out"
+  mkdir -p "$fifodir"
+  mkfifo "$in_fifo" "$out_fifo"
+  # A real held EXCLUSIVE lock on the db file BEFORE it has ever been
+  # bootstrapped by ensure_meta itself -- this races ensure_meta's own
+  # first statement (CREATE TABLE IF NOT EXISTS), not a later read against
+  # an already-populated db.
+  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
+  holder_pid=$!
+  _agmsg_watch_pid "$holder_pid" "sqlite3 $db"
+  exec 9> "$in_fifo"
+  exec 8< "$out_fifo"
+  printf '.timeout 1000\nBEGIN EXCLUSIVE;\nSELECT '"'"'held'"'"';\n' >&9
+  local line
+  IFS= read -r -t 5 -u 8 line
+  [ "$line" = held ]
+  ( sleep 0.5; printf 'COMMIT;\n' >&9 2>/dev/null || true ) &
+  local releaser_pid=$!
+  run bash -c 'source "$1/sqlite-output.sh"; source "$1/install-db.sh"; agmsg_install_db_ensure_meta "$2"' _ "$lib" "$db"
+  wait "$releaser_pid" 2>/dev/null || true
+  exec 9>&- 8<&-
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM meta;")" = 1 ]
+  [ "$(sqlite3 "$db" "SELECT install_id FROM meta;")" = "$output" ]
 }
 
 # A CI-only (never reproduced locally) failure measured on #1904: a schema

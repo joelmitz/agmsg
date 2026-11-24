@@ -2,6 +2,43 @@
 
 load test_helper
 
+@test "start and status trust a recent heartbeat across an invisible PID without changing any state" {
+  _seed_install_db
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on', op_gen=7; UPDATE daemon_owner SET gen=4, state='ready', executor_pid=999999, executor_boot_id='not-readable-here';"
+  node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({install_id:"daemon-sh-test", gen:4, sequence:2, at:new Date().toISOString()}))' "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+  local before heartbeat
+  before="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" '.dump')"
+  heartbeat="$(cat "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json")"
+  printf 'leave this alone\n' > "$TEST_SKILL_DIR/run/agmsgd-tool-path"
+  run bash "$DAEMON" start
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'already running (heartbeat); nothing was changed'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" '.dump')" = "$before" ]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json")" = "$heartbeat" ]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")" = 'leave this alone' ]
+  run bash "$DAEMON" status --json
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'recent heartbeat'
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"; agmsg_daemon_warn_if_stopped' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = ready ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = 7 ]
+}
+
+@test "stop removes its heartbeat even when intent is already off" {
+  _seed_install_db
+  printf '{}\n' > "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+  run bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  printf '{}\n' > "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json"
+  run bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-heartbeat.json" ]
+}
+
 setup() {
   setup_test_env
   DAEMON="$SCRIPTS/daemon.sh"
@@ -57,23 +94,6 @@ _seed_install_db() {
   # here directly for tests that exercise `start` on its own, without
   # going through `enable` first.
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id = 'daemon-sh-test', node_path = '$(command -v node)';"
-}
-
-_make_pid_namespace_unchecked() {
-  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
-  local boot
-  case "$(uname -s)" in
-    Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id)" ;;
-    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
-    *) skip 'pid namespace liveness fixture' ;;
-  esac
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), executor_pid_ns='pid:[111]';"
-  mkdir -p "$TEST_SKILL_DIR/fake-bin"
-  cat > "$TEST_SKILL_DIR/fake-bin/readlink" <<'EOF'
-#!/bin/sh
-if [ "$1" = /proc/self/ns/pid ]; then echo 'pid:[222]'; else exec /usr/bin/readlink "$@"; fi
-EOF
-  chmod +x "$TEST_SKILL_DIR/fake-bin/readlink"
 }
 
 _write_completion_record() {
@@ -312,72 +332,6 @@ _assert_start_result() {
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
-@test "daemon.sh start: an unchecked executor is not restarted and op_gen is unchanged" {
-  _seed_install_db
-  _make_pid_namespace_unchecked
-  local db="$TEST_SKILL_DIR/run/install.db" before_gen
-  before_gen="$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')"
-  PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$DAEMON" start
-  [ "$status" -eq 1 ]
-  grep -Fq 'could not be checked here' <<<"$output"
-  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
-  [ "$(sqlite3 "$db" 'SELECT desired FROM daemon_intent;')" = on ]
-  [ "$(sqlite3 "$db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(sqlite3 "$db" 'SELECT state FROM daemon_owner;')" = ready ]
-  [ ! -e "$TEST_SKILL_DIR/run/agmsgd-tool-path" ]
-}
-
-@test "daemon.sh enable: an unchecked executor leaves intent and service registration alone" {
-  _seed_install_db
-  _make_pid_namespace_unchecked
-  _fake_recover_systemctl
-  : > "$FAKE_LINUX/start-fails"
-  local before_gen
-  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
-  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" \
-    AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
-    run bash "$DAEMON" enable
-  [ "$status" -eq 1 ]
-  grep -Fq 'could not be checked here' <<<"$output"
-  grep -Fq 'Nothing was changed' <<<"$output"
-  [ ! -s "$FAKE_LINUX/call-log" ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
-  [ ! -f "$(_unit_file)" ]
-}
-
-@test "daemon.sh stop: an unchecked executor does not change intent or op_gen" {
-  _seed_install_db
-  _make_pid_namespace_unchecked
-  local before_gen
-  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
-  PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$DAEMON" stop
-  [ "$status" -eq 1 ]
-  grep -Fq 'could not be checked here' <<<"$output"
-  grep -Fq 'Nothing was changed' <<<"$output"
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = ready ]
-}
-
-@test "daemon.sh disable: an unchecked executor is not stopped or unregistered" {
-  _seed_install_db
-  _make_pid_namespace_unchecked
-  _fake_recover_systemctl
-  local before_gen
-  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
-  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" \
-    AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
-    run bash "$DAEMON" disable
-  [ "$status" -eq 1 ]
-  grep -Fq 'could not be checked here' <<<"$output"
-  grep -Fq 'Nothing was changed' <<<"$output"
-  [ ! -s "$FAKE_LINUX/call-log" ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = ready ]
-}
-
 @test "daemon.sh start: a second start while already running is a no-op" {
   _seed_install_db
   _write_completion_record
@@ -387,7 +341,8 @@ _assert_start_result() {
   ( . "$SCRIPTS/lib/down-notice.sh" 2>/dev/null; down_notice_set agmsgd down stale stale )
   _run_with_deadline 10 bash "$DAEMON" start
   _assert_start_result 'already running'
-  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  # A confirmed-running start is read-only, including diagnostic records.
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
@@ -1276,20 +1231,6 @@ EOF
   grep -qx 'is-active' "$TEST_SKILL_DIR/fake-linux/call-log"
 }
 
-@test "_linux_recover_if_failed does not restart an unchecked executor" {
-  _seed_install_db
-  _make_pid_namespace_unchecked
-  _fake_recover_systemctl
-  local fns
-  fns="$(_daemon_fns)"
-  PATH="$TEST_SKILL_DIR/fake-bin:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
-    bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; : > "$3/fake-linux/call-log"; _linux_recover_if_failed' \
-    _ "$fns" "/bin" "$TEST_SKILL_DIR"
-  [ ! -s "$FAKE_LINUX/call-log" ]
-  [ -f "$FAKE_LINUX/failed" ]
-  [ ! -f "$FAKE_LINUX/active" ]
-}
-
 @test "daemon.sh status: a retry failure's reason and recovery are shown in text, JSON stays an object (review round 2)" {
   _seed_install_db
   _fake_recover_systemctl
@@ -1374,18 +1315,21 @@ EOF
   [[ "$output" == *"terminal CLI directories (herdr, tmux) were not recorded"* ]]
 }
 
-@test "daemon.sh start: already running with a newer record says to stop and start again, since agmsgd applies it only at startup" {
+@test "daemon.sh start: already running leaves the terminal CLI record unchanged even when PATH changed" {
   _seed_install_db
   _write_completion_record
   _run_with_deadline 15 bash "$DAEMON" start
   _assert_start_result 'running'
+  local before
+  before="$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")"
   mkdir -p "$TEST_SKILL_DIR/clibin2"
   printf '#!/bin/sh\nexit 0\n' > "$TEST_SKILL_DIR/clibin2/herdr"
   chmod +x "$TEST_SKILL_DIR/clibin2/herdr"
   PATH="$TEST_SKILL_DIR/clibin2:$PATH" _run_with_deadline 15 bash "$DAEMON" start
   bash "$DAEMON" stop >/dev/null 2>&1 || true
   _assert_start_result 'already running'
-  [[ "$output" == *"take effect after: agmsg daemon stop, then agmsg daemon start"* ]]
+  [ "$(cat "$TEST_SKILL_DIR/run/agmsgd-tool-path")" = "$before" ]
+  [[ "$output" == *'nothing was changed'* ]]
 }
 
 # The record writer runs inside cmd_start under errexit: a failed write AND a
