@@ -43,21 +43,28 @@ fi
 agmsg_install_db_ensure_meta() {   # <install_db_path>
   local db="$1" id err rc
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
-  err="$(sqlite3 "$db" \
+  # `.timeout 5000`: a writer elsewhere (agmsgd's own shutdown, a concurrent
+  # `agmsg` command, or the caller's own prior sqlite3 UPDATE against this
+  # same db) can still hold install.db for a moment after returning -- the
+  # same race agmsg_install_db_apply_schema below already guards against
+  # (see its own comment), just missed here (measured in CI: "install.db:
+  # reading the install id failed (sqlite3 rc=5)" right after an --update's
+  # own prior write to this db, never reproduced locally).
+  err="$(sqlite3 -cmd '.timeout 5000' "$db" \
     "CREATE TABLE IF NOT EXISTS meta (schema_version INTEGER NOT NULL, install_id TEXT NOT NULL);" \
     2>&1)" || {
     rc=$?
     echo "  ! install.db: creating the meta table failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
     return 1
   }
-  id="$(agmsg_sqlite_capture "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
+  id="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT install_id FROM meta LIMIT 1;")" || {
     rc=$?
     echo "  ! install.db: reading the install id failed (sqlite3 rc=$rc): $db" >&2
     return 1
   }
   if [ -z "$id" ]; then
     id="$(compat_uuid7)"
-    err="$(sqlite3 "$db" \
+    err="$(sqlite3 -cmd '.timeout 5000' "$db" \
       "INSERT INTO meta (schema_version, install_id) VALUES (1, '$id');" \
       2>&1)" || {
       rc=$?
@@ -107,19 +114,6 @@ agmsg_install_db_apply_schema() {   # <install_db_path> <schema_sql_path>
   err="$(sqlite3 -cmd '.timeout 5000' "$db" < "$schema" 2>&1)" || {
     rc=$?
     echo "  ! install.db: applying $schema failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
-    return 1
-  }
-  # daemon_owner exists now (the schema creates it with every column); an older
-  # one lacks the executor's pid namespace (scripts/daemon/executor.mjs).
-  present="$(agmsg_sqlite_capture -cmd '.timeout 5000' "$db" "SELECT count(*) FROM pragma_table_info('daemon_owner') WHERE name = 'executor_pid_ns';")" || {
-    rc=$?
-    echo "  ! install.db: checking for daemon_owner column executor_pid_ns failed (sqlite3 rc=$rc): $db" >&2
-    return 1
-  }
-  [ "$present" = 1 ] && return 0
-  err="$(sqlite3 -cmd '.timeout 5000' "$db" "ALTER TABLE daemon_owner ADD COLUMN executor_pid_ns TEXT;" 2>&1)" || {
-    rc=$?
-    echo "  ! install.db: adding daemon_owner column executor_pid_ns failed (sqlite3 rc=$rc${err:+: ${err%%$'\n'*}}): $db" >&2
     return 1
   }
 }

@@ -54,21 +54,6 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   [[ "$output" == "agmsgd=not-running reason="* ]]
 }
 
-@test "offer: a daemon in another pid namespace is unchecked, not stopped" {
-  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
-  _mark_daemon_ready
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='pid:[111]';"
-  cat > "$TEST_SKILL_DIR/bin/readlink" <<'EOF'
-#!/bin/sh
-if [ "$1" = /proc/self/ns/pid ]; then echo 'pid:[222]'; else exec /usr/bin/readlink "$@"; fi
-EOF
-  chmod +x "$TEST_SKILL_DIR/bin/readlink"
-  run env PATH="$TEST_SKILL_DIR/bin:$PATH" bash "$SCRIPTS/daemon.sh" offer claude-code
-  [ "$status" -eq 0 ]
-  grep -Fq 'agmsgd=unchecked reason=' <<<"$output"
-  grep -Fq 'another pid namespace' <<<"$output"
-}
-
 @test "offer: a non-sqlite storage is unavailable, with the reason" {
   printf '{"storage":"jsonl"}\n' > "$AGMSG_CONFIG"
   run bash "$SCRIPTS/daemon.sh" offer claude-code

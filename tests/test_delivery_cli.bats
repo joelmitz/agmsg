@@ -13,7 +13,7 @@ setup() {
   TEST_SKILL_DIR="$(cd "$TEST_SKILL_DIR" && pwd -P)"
   cp -R "$BATS_TEST_DIRNAME/../scripts" "$TEST_SKILL_DIR/scripts"
   export SCRIPTS="$TEST_SKILL_DIR/scripts"
-  mkdir -p "$TEST_SKILL_DIR/run" "$TEST_SKILL_DIR/db" "$TEST_SKILL_DIR/project" "$TEST_SKILL_DIR/bin"
+  mkdir -p "$TEST_SKILL_DIR/run" "$TEST_SKILL_DIR/db" "$TEST_SKILL_DIR/project"
   export AGMSG_CONFIG="$TEST_SKILL_DIR/config.json"
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
@@ -163,33 +163,6 @@ STUB
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
   grep -Fq "mode: agmsgd" <<<"$output"
   refute grep -Fq "mode: monitor" <<<"$output"
-}
-
-@test "delivery agmsgd: unchecked daemon is reported without start or stop advice and changes nothing" {
-  [ "$(uname -s)" = Linux ] || skip 'pid namespaces are Linux'
-  _mark_daemon_ready
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='pid:[111]';"
-  cat > "$TEST_SKILL_DIR/bin/readlink" <<'EOF'
-#!/bin/sh
-if [ "$1" = /proc/self/ns/pid ]; then echo 'pid:[222]'; else exec /usr/bin/readlink "$@"; fi
-EOF
-  chmod +x "$TEST_SKILL_DIR/bin/readlink"
-  bash "$SCRIPTS/delivery.sh" set turn claude-code "$PROJECT" >/dev/null
-  local before_gen before_mode
-  before_gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')"
-  before_mode="$(bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT")"
-  PATH="$TEST_SKILL_DIR/bin:$PATH" run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
-  [ "$status" -eq 0 ]
-  grep -Fq 'agmsgd could not be checked here' <<<"$output"
-  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
-  refute grep -Fq 'start it with: agmsg delivery agmsgd' <<<"$output"
-  PATH="$TEST_SKILL_DIR/bin:$PATH" run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
-  [ "$status" -eq 1 ]
-  grep -Fq 'This project' <<<"$output"
-  grep -Fq 'do not enable, start, stop, disable, or update this install here' <<<"$output"
-  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT op_gen FROM daemon_intent;')" = "$before_gen" ]
-  [ "$(bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT")" = "$before_mode" ]
-  [ ! -e "$TEST_SKILL_DIR/run/delivery-choice" ]
 }
 
 @test "delivery.sh status: leftover Monitor hooks on a project with no choice, agmsgd on, read as agmsgd (#1819)" {

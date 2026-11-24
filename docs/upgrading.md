@@ -141,7 +141,7 @@ starts with `this project:` is what **this project** chose. Read both:
 | First line (install-wide) | `this project:` line | What it means | Go to |
 |---|---|---|---|
 | `delivery: agmsgd (on) — notices are delivered directly` | `this project: agmsgd — no Monitor is armed here; ...` | agmsgd is running and delivers here | 3a |
-| `delivery: agmsgd (on, but not running: <reason>) — start it with: agmsg delivery agmsgd` | `this project: agmsgd — ...` | this project is set to agmsgd, but agmsgd is **not running, so nothing is delivered right now** | start agmsgd as the line says, then run this check again. **Exception:** if the reason says `the executor runs in another pid namespace (a sandbox)`, agmsgd may well be running and this command only cannot see it: do not start it from here, and run the check from an ordinary shell outside the sandbox |
+| `delivery: agmsgd (on, but not running: <reason>) — start it with: agmsg delivery agmsgd` | `this project: agmsgd — ...` | this project is set to agmsgd, but agmsgd is **not running, so nothing is delivered right now** | start agmsgd as the line says, then run this check again |
 | `delivery: agmsgd (off) — available; ...` or `delivery: agmsgd (unavailable) — <reason>` | `this project: agmsgd — ...` | this project is set to agmsgd, but agmsgd is **turned off or unavailable, so nothing is delivered** | turn it on as the line says (or read the reason), then run this check again |
 | any | `this project: monitor (legacy)` (with or without `chosen — agmsgd does not deliver here`) | the bridge delivers here | 3b |
 | any | `this project: turn chosen — agmsgd does not deliver here`, `this project: off chosen — agmsgd does not deliver here`, or a bare `this project: turn` / `this project: off` | neither a bridge nor agmsgd delivers here | nothing to restart for this update |
@@ -171,11 +171,6 @@ was enabled keeps using that bridge until it is restarted: the seat line then
 says `bridge process running; reopen Codex to switch to agmsgd`, and agmsgd
 skips that session meanwhile. Restarting Codex ends that state.
 
-Run `agmsg daemon status` from an ordinary shell, not from inside a Codex
-sandbox. A command in another pid namespace cannot see agmsgd and says so
-(`agmsgd cannot be checked from here ...`); that is not a sign that agmsgd is
-down, and the message tells you not to stop or start it from there.
-
 #### 3b. The project uses the monitor (legacy)
 
 The bridge is a process of the Codex session. Running `--update` against a
@@ -203,17 +198,6 @@ A missing bridge or destination record in the moment after launch is not a
 failure. Do not read `run/` state, threads or metadata directly to infer or
 rewrite a seat; when several threads make the seat ambiguous, stop and report
 rather than adopting a guess.
-
-### 4. agmsgd that cannot be checked from this environment
-
-`agmsg daemon offer` reports `agmsgd=unchecked` when the daemon runs in another
-pid namespace and the current environment cannot inspect it. The daemon may
-still be running. Do not treat this as stopped and do
-not run `agmsg delivery agmsgd`, `agmsg daemon start`, or `agmsg daemon stop`
-here. Do not run `agmsg daemon enable`, `agmsg daemon disable`, or
-`install.sh --update` either: those commands manage the registered service or
-replace its files. Continue from an environment that can inspect the daemon;
-keep the project's configured delivery unchanged until then.
 
 ## After the update
 

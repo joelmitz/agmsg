@@ -73,13 +73,13 @@ test('status prints the Claude Code and Codex seat inventory as before', async (
       c.on('data', (d) => { b += d; let i;
         while ((i = b.indexOf('\\n')) >= 0) { const msg = JSON.parse(b.slice(0, i)); b = b.slice(i + 1);
           if (msg.type === 'hello') c.write(JSON.stringify({ type: 'hello_ok' }) + '\\n');
-          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true }) + '\\n'); c.end(); }
+          else if (msg.type === 'status') { c.write(JSON.stringify({ type: 'status', ok: true, gen: 1 }) + '\\n'); c.end(); }
           else if (msg.type === 'seats') { c.write(JSON.stringify({ type: 'seats', codex: { polled: true, seats: codex }, claude_code: { polled: true, seats: claude_code } }) + '\\n'); c.end(); } } });
     }).listen(socket, () => console.log('up'));
   `, socket, JSON.stringify({ claude_code: claude, codex })], { stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => child.kill());
   await new Promise(resolve => child.stdout.once('data', resolve));
-  db.prepare("UPDATE daemon_owner SET state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
+  db.prepare("UPDATE daemon_owner SET gen=1, state='ready', socket=?, executor_pid=?, executor_boot_id=?").run(socket, child.pid, bootId());
   db.prepare("UPDATE daemon_intent SET desired='on'").run();
   db.close();
   const run = (...flags) => new Promise((resolve, reject) => {

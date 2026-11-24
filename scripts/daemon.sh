@@ -420,9 +420,6 @@ EOF
 # Leaves a down_notice only when the self-heal attempt itself fails, cleared
 # the moment the unit is next seen running.
 _linux_recover_if_failed() {
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
-  agmsg_daemon_read_state
-  [ "${AGMSGD_PID_NS_MISMATCH:-0}" != 1 ] || return 0
   _systemd_user_usable || return 0
   local unit_path unit_name
   unit_path="$(_systemd_unit_path)"
@@ -825,15 +822,6 @@ _tool_path_restart_hint() {
   echo "agmsg daemon start: the running agmsgd uses the terminal CLI directories it read when it started ('${applied:-none}'); the ones found now ('${TOOL_PATH_RECORDED:-none}') take effect after: agmsg daemon stop, then agmsg daemon start"
 }
 
-_daemon_refuse_if_unchecked() {   # <action>
-  local action="${1:-operate on}"
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
-  agmsg_daemon_read_state
-  [ "${AGMSGD_PID_NS_MISMATCH:-0}" = 1 ] || return 1
-  echo "agmsg daemon $action: agmsgd could not be checked here (${AGMSGD_REASON:-liveness is unavailable}). It may be running; do not enable, start, stop, disable, or update this install here. Check from an environment that can inspect it. Nothing was changed." >&2
-  return 0
-}
-
 cmd_start() {
   local only_gen=""
   case "${1:-}" in
@@ -843,25 +831,22 @@ cmd_start() {
     '') ;;
     *) _usage; return 2 ;;
   esac
-  _ensure_install_db_schema
-  # A start bumps op_gen, which can make an executor in another pid namespace
-  # stand down. Do not do that until this environment can check its liveness.
-  _daemon_refuse_if_unchecked start && return 1
-  # Before the "already running" answer below: a running agmsgd picks the
-  # record up at its next start (the update path restarts it).
-  [ "$(_os)" = windows ] || _record_tool_path
-  local state
-  state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  local running_node
+  _require_install_db
+  local running_node observed=""
   running_node="$(_resolve_node 2>/dev/null || true)"
-  if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
-    echo "agmsg daemon start: already running"
-    _tool_path_restart_hint
-    _agmsg_down_notice_clear_if_present agmsgd
-    agmsg_daemon_seat_report start
-    _path_hint status
-    return 0
+  if [ -n "$running_node" ]; then
+    observed="$("$running_node" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/heartbeat.mjs" "$SKILL_DIR" --start)" || observed=""
   fi
+  case "$observed" in
+    running:*)
+      echo "agmsg daemon start: already running (${observed#running:}); nothing was changed"
+      _path_hint status
+      return 0 ;;
+  esac
+  _ensure_install_db_schema
+  # Record tool paths only when actually starting. A live no-op above must
+  # not change the configuration a future daemon would read.
+  [ "$(_os)" = windows ] || _record_tool_path
 
   # A install that was never enabled (enable refuses without a service
   # manager) has no Node recorded, and the launcher cannot start without
@@ -969,15 +954,16 @@ _request_stop_over_socket() {
 
 cmd_stop() {
   _ensure_install_db_schema
-  _daemon_refuse_if_unchecked stop && return 1
   # Stop takes no operation lock.
   local desired
   desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   if [ "$desired" != "on" ]; then
+    rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
     echo "agmsg daemon stop: already stopped"
     return 0
   fi
   agmsg_sqlite "$INSTALL_DB" "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'stop', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  rm -f -- "$SKILL_DIR/run/agmsgd-heartbeat.json" || echo "agmsg daemon stop: could not remove the heartbeat file" >&2
   local socket
   socket="$(agmsg_sqlite "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
@@ -1090,7 +1076,6 @@ _codex_shim_sync() {
 
 cmd_enable() {
   _ensure_install_db_schema
-  _daemon_refuse_if_unchecked enable && return 1
   if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
     echo "agmsg daemon enable: systemd user services are not available here (systemctl --user does not work), so agmsgd cannot be registered to start on its own. Nothing was changed. 'agmsg daemon start' runs it for this session only." >&2
     _path_hint start >&2
@@ -1188,7 +1173,6 @@ _disable_restore_intent() {
 
 cmd_disable() {
   _ensure_install_db_schema
-  _daemon_refuse_if_unchecked disable && return 1
   # The daemon writes stopping -> none into install.db on its way out, so it
   # must stop while no operation holds that database: commit the intent and
   # release the lock first, let the daemon finish, and only then unregister
@@ -1252,7 +1236,6 @@ cmd_disable() {
 # choice screen should offer agmsgd for this agent type:
 #   agmsgd=on                       turned on and running; do not ask again
 #   agmsgd=not-running reason=...   turned on, but not confirmed running
-#   agmsgd=unchecked reason=...     may be running; this environment cannot check
 #   agmsgd=available                enable would go ahead
 #   agmsgd=unavailable reason=...   enable would refuse (or does not apply)
 # It changes nothing, and never enables anything.
@@ -1345,12 +1328,10 @@ cmd_offer() {
   if [ "$desired" = on ]; then
     # Turned on is an intent, not proof that notices are being delivered:
     # a failed start or a stopped executor leaves it on with nothing running.
-    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON AGMSGD_PID_NS_MISMATCH
+    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
     agmsg_daemon_read_state
     if [ "${AGMSGD_HEALTH:-}" = ready ]; then
       echo "agmsgd=on"
-    elif [ "${AGMSGD_PID_NS_MISMATCH:-0}" = 1 ]; then
-      echo "agmsgd=unchecked reason=${AGMSGD_REASON:-agmsgd liveness cannot be checked here}"
     else
       echo "agmsgd=not-running reason=${AGMSGD_REASON:-agmsgd is turned on but is not confirmed running}"
     fi
