@@ -33,7 +33,8 @@ name: Sync fork with upstream
 #   呼び出しトークンの workflow scope を見ている。`permissions:` ブロックに
 #   `workflows` というキーは存在しない（YAML解析エラーで実測済み）ため、
 #   `workflow` スコープ付きの既存 gh 認証トークンを SYNC_UPSTREAM_TOKEN という
-#   repository secret に保存し、この 1 ステップだけそれを使う。
+#   repository secret に保存する。タグや Release の作成でも同じ権限が
+#   必要になりうるため、同期先に書き込むステップでこのトークンを使う。
 
 on:
   schedule:
@@ -44,9 +45,16 @@ permissions:
   contents: write
   issues: write
 
+# 定時実行と main の手動実行が同じタグや Release を同時に作らないようにする。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      # 作業ブランチの workflow_dispatch では実際の差分を読み取り専用で検証する。
+      SYNC_WRITE: ${{ github.ref == 'refs/heads/main' }}
     steps:
       # merge_type は "none" が2通りの意味を持つ（実測 2026-08-22）:
       #   - 競合等で同期できなかった
@@ -54,6 +62,7 @@ jobs:
       # 戻り値で成否を判定すると後者を失敗と誤判定するため、ここでは同期を
       # 試みるだけにして、成否は次の step で **実際の同期状態**を見て決める。
       - name: Sync main from upstream
+        if: env.SYNC_WRITE == 'true'
         env:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
         run: |
@@ -79,13 +88,106 @@ jobs:
             exit 1
           fi
 
+      - name: Sync missing upstream tags
+        env:
+          GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          upstream="${GITHUB_SERVER_URL}/fujibee/agmsg.git"
+          fork="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          # --refs は peeled 行を除く。annotated tag は参照先コミットでなくタグオブジェクトを比較する。
+          upstream_refs="$(git ls-remote --refs --tags "$upstream")"
+          fork_refs="$(git ls-remote --refs --tags "$fork")"
+          declare -A fork_oids=() missing_oids=()
+          missing_refs=()
+          while read -r oid ref; do
+            [[ -n "$ref" ]] || continue
+            fork_oids["$ref"]="$oid"
+          done <<< "$fork_refs"
+          while read -r oid ref; do
+            [[ -n "$ref" ]] || continue
+            fork_oid="${fork_oids[$ref]-}"
+            if [[ -z "$fork_oid" ]]; then
+              missing_refs+=("$ref:$ref")
+              missing_oids["$ref"]="$oid"
+              printf 'Missing tag %s\n' "$ref"
+            elif [[ "$fork_oid" != "$oid" ]]; then
+              printf '::error::Tag mismatch for %s (upstream %s, fork %s)\n' "$ref" "$oid" "$fork_oid"
+              exit 1
+            fi
+          done <<< "$upstream_refs"
+          printf 'Missing upstream tags: %s\n' "${#missing_refs[@]}"
+          if [[ "$SYNC_WRITE" != true || ${#missing_refs[@]} -eq 0 ]]; then
+            exit 0
+          fi
+
+          # 空のリポジトリに対象 ref を取得し、比較後に上流タグが動いていないことも確認する。
+          tag_repo="$(mktemp -d)"
+          git -C "$tag_repo" init --bare --quiet
+          git -C "$tag_repo" fetch --no-tags "$upstream" "${missing_refs[@]}"
+          for ref in "${!missing_oids[@]}"; do
+            if [[ "$(git -C "$tag_repo" rev-parse --verify "$ref")" != "${missing_oids[$ref]}" ]]; then
+              printf '::error::Upstream tag changed during fetch: %s\n' "$ref"
+              exit 1
+            fi
+          done
+          # force を使わず一括で追加する。照合後に fork 側で競合が起きた場合も上書きしない。
+          git -C "$tag_repo" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push --atomic --no-follow-tags "$fork" "${missing_refs[@]}"
+
+      - name: Sync newly published upstream releases
+        env:
+          GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+          # 2026-11-26 00:00 JST 以降の公開分だけを引き継ぐ。
+          RELEASE_CUTOFF: '2026-11-25T15:00:00Z'
+        run: |
+          set -euo pipefail
+          upstream='repos/fujibee/agmsg/releases'
+          fork="repos/${GITHUB_REPOSITORY}/releases"
+          upstream_latest="$(gh api "${upstream}/latest" --jq '.tag_name')"
+          existing="$(gh api --paginate "${fork}?per_page=100" | jq -sc 'add // []')"
+          candidates="$(gh api --paginate "${upstream}?per_page=100" | jq -c --arg cutoff "$RELEASE_CUTOFF" \
+            '.[] | select(.draft == false and (.published_at // "") >= $cutoff)')"
+
+          while IFS= read -r release; do
+            [[ -n "$release" ]] || continue
+            tag="$(jq -r '.tag_name' <<< "$release")"
+            if jq -e --arg tag "$tag" 'any(.[]; .tag_name == $tag)' <<< "$existing" >/dev/null; then
+              continue
+            fi
+            printf 'Missing release %s\n' "$tag"
+            if [[ "$SYNC_WRITE" == true ]]; then
+              # 元のタイトル・本文・prerelease を引き継ぎ、アセットは元の Release で案内する。
+              jq -c --arg latest "$upstream_latest" '{
+                tag_name, name, prerelease,
+                body: ((.body // "") + "\n\nUpstream release: " + .html_url),
+                make_latest: ((.tag_name == $latest) | tostring)
+              } | if .name == null then del(.name) else . end' <<< "$release" \
+                | gh api -X POST "$fork" --input - --jq '.html_url'
+            fi
+          done <<< "$candidates"
+          printf 'Upstream Latest: %s\n' "$upstream_latest"
+
+          # 既存 Release で変更できるのは Latest の指定だけ。新規作成時は上で指定済み。
+          latest_id="$(jq -r --arg tag "$upstream_latest" \
+            '.[] | select(.tag_name == $tag and ((.draft or .prerelease) | not)) | .id' <<< "$existing")"
+          if [[ -n "$latest_id" ]]; then
+            fork_latest="$(gh api "${fork}/latest" --jq '.tag_name')"
+            if [[ "$fork_latest" != "$upstream_latest" ]]; then
+              printf 'Promote existing release %s to Latest\n' "$upstream_latest"
+              if [[ "$SYNC_WRITE" == true ]]; then
+                gh api -X PATCH "${fork}/${latest_id}" -f make_latest=true --jq '.html_url'
+              fi
+            fi
+          fi
+
       # ★メール通知に依存しない検知経路。
       # 初版はこれが無く、2026-08-18〜08-22 の5日連続失敗が誰にも届かなかった
       # （Actions の失敗通知メールが実質機能していなかった）。
       # fork は Issue が既定で無効なため 2026-08-22 に有効化した。
       # 同題の open issue があればコメント追記に留め、毎日 issue が増えないようにする。
       - name: Open an issue on failure
-        if: failure()
+        if: failure() && env.SYNC_WRITE == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
