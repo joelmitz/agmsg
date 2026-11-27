@@ -24,6 +24,7 @@ import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-stor
 import { createTerminalPokeChannel } from "./channels/terminal-poke.mjs";
 import { ensureTerminalPokeChannelSchema } from "./channels/terminal-poke-store.mjs";
 import { createGrokQueueChannel } from "./channels/grok-queue.mjs";
+import { createCodexPaneFillChannel } from "./channels/codex-pane-fill.mjs";
 import { extendPathFromRecord } from "./tool-path.mjs";
 import { ensureGrokQueueChannelSchema } from "./channels/grok-queue-store.mjs";
 
@@ -48,6 +49,7 @@ export function createDefaultChannels({ db, installRoot, expectedOpGen }) {
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
     createTerminalPokeChannel({ db, installRoot, expectedOpGen }),
     createGrokQueueChannel({ db, installRoot, expectedOpGen }),
+    createCodexPaneFillChannel({ installRoot }),
   ];
 }
 
